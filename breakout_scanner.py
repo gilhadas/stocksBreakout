@@ -9,6 +9,9 @@ import logging
 from pathlib import Path
 from ib_insync import IB, Stock, util
 
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List
+
 nest_asyncio.apply()
 warnings.filterwarnings('ignore')
 
@@ -59,11 +62,195 @@ MODES = {
     }
 }
 
+@dataclass
+class BreakoutSignal:
+    symbol: str
+    mode: str
+    price: float
+    vol_ratio: float
+    dist_atr: float
+    stop: float
+    target: float
+    rr: float
+    gap_pct: float
+    quality: str
+    spread_pct: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'Symbol': self.symbol,
+            'Mode': self.mode,
+            'Price': round(self.price, 2),
+            'Vol': round(self.vol_ratio, 2),
+            'Dist': round(self.dist_atr, 2),
+            'Stop': round(self.stop, 2),
+            'Target': round(self.target, 2),
+            'R:R': round(self.rr, 2),
+            'Gap%': round(self.gap_pct, 2) if abs(self.gap_pct) > 0.5 else 0,
+            'Quality': self.quality,
+            **({'Spread%': round(self.spread_pct, 2)} if self.spread_pct is not None else {})
+        }
+
 class BreakoutScanner:
     def __init__(self, ib_connection):
         self.ib = ib_connection
         self.spy_cache = {}
         self.rejection_reasons = []
+    def _check_trend(self, latest, df, cfg, mode_name: str) -> bool:
+        if cfg['trend_type'] == 'VWAP':
+            # For scalping: price must be above VWAP and VWAP rising
+            if pd.isna(latest.get('vwap', np.nan)) or pd.isna(df['vwap'].iloc[-2]):
+                return False
+            return latest['close'] > latest['vwap'] and latest['vwap'] > df['vwap'].iloc[-2]
+        return latest['close'] > latest['Trend_Line']
+
+    def _check_vwap_position(self, latest, mode_name: str) -> bool:
+        vwap_val = latest.get('vwap', np.nan)
+        if pd.isna(vwap_val):
+            return True
+        if mode_name == 'scalping':
+            return latest['close'] > vwap_val and latest['close'] > latest['open']
+        if mode_name == 'daytrade':
+            return latest['close'] > vwap_val
+        return True
+
+    def _check_consolidation(self, df, cfg, mode_name: str) -> bool:
+        if mode_name == 'scalping':
+            return True
+        min_cons_bars = cfg['min_consolidation_bars']
+        window = df['Is_Consolidating'].iloc[-min_cons_bars - 1:-1]
+        return bool(window.any())
+
+    def _compute_rr_levels(self, latest, cfg):
+        atr = latest['ATR']
+        price = latest['close']
+        sl = price - (cfg['sl_mult'] * atr)
+        tp = price + (cfg['tp_mult'] * atr)
+        rr = (tp - price) / max(price - sl, 1e-6)
+        return sl, tp, rr
+        
+    def detect_breakout(self, df, symbol, mode_name, timeframe, spy_perf, **kwargs):
+        """Main breakout detection with cleaner structure."""
+        cfg = MODES[mode_name]
+        lookback = kwargs.get('lookback') or cfg['lookback']
+        vol_thresh = kwargs.get('vol_thresh') or cfg['vol_thresh']
+        atr_mult = kwargs.get('atr_mult') or cfg['atr_mult']
+        spread_pct = kwargs.get('spread_pct')
+
+        # Minimum data
+        min_bars = 100 if mode_name == 'scalping' else cfg.get('trend_period', 50)
+        if len(df) < min_bars:
+            return None
+
+        # Work on a copy to avoid side-effects
+        df = self.calculate_indicators(df.copy(), cfg['trend_type'], cfg.get('trend_period'), timeframe)
+
+        prev_high = df['high'].rolling(lookback).max().iloc[-2]
+        latest = df.iloc[-1]
+
+        # Scalping price filter
+        if mode_name == 'scalping':
+            if latest['close'] < cfg['min_price'] or latest['close'] > cfg['max_price']:
+                return None
+
+        # Core breakout metrics
+        price_break = latest['close'] > prev_high
+        vol_confirm = latest['Vol_Ratio'] >= vol_thresh
+        dist_atr = (latest['close'] - prev_high) / latest['ATR']
+        dist_confirm = dist_atr >= atr_mult
+
+        # Relative strength (skip scalping)
+        if mode_name != 'scalping':
+            stock_perf = (latest['close'] / df['close'].iloc[-lookback]) - 1
+            rs_ok = stock_perf > spy_perf
+        else:
+            stock_perf = 0.0
+            rs_ok = True
+
+        trend_ok = self._check_trend(latest, df, cfg, mode_name)
+        vwap_ok = self._check_vwap_position(latest, mode_name)
+        was_consolidating = self._check_consolidation(df, cfg, mode_name)
+        liquid_ok = self.check_liquidity(df)
+
+        gap_percent = self.calculate_gap(df) if mode_name != 'scalping' else 0.0
+        has_gap_up = gap_percent > 2.0
+
+        # Scalping: stronger immediate volume spike
+        if mode_name == 'scalping':
+            recent_vol_spike = latest['Vol_Ratio'] > vol_thresh * 1.5
+            vol_confirm = vol_confirm and recent_vol_spike
+
+        # Collect rejection reasons (only if core conditions present)
+        rejection_reasons: List[str] = []
+        if price_break and vol_confirm:
+            if not trend_ok:
+                if cfg['trend_type'] == 'VWAP':
+                    rejection_reasons.append("Below VWAP or VWAP not rising")
+                else:
+                    rejection_reasons.append(f"Below {cfg['trend_period']} {cfg['trend_type']}")
+            if not rs_ok and mode_name != 'scalping':
+                rejection_reasons.append(f"Weaker than SPY ({stock_perf:.1%} vs {spy_perf:.1%})")
+            if not vwap_ok:
+                rejection_reasons.append("VWAP position poor")
+            if not was_consolidating and mode_name != 'scalping':
+                rejection_reasons.append("No consolidation")
+            if not liquid_ok:
+                rejection_reasons.append("Low liquidity")
+            if not dist_confirm:
+                rejection_reasons.append(f"Weak distance ({dist_atr:.2f} ATR)")
+
+        if rejection_reasons:
+            self.rejection_reasons.append({
+                'symbol': symbol,
+                'price': latest['close'],
+                'vol_ratio': latest['Vol_Ratio'],
+                'mode': mode_name,
+                'timeframe': timeframe,
+                'reasons': ', '.join(rejection_reasons),
+            })
+
+        conditions = [price_break, vol_confirm, dist_confirm, trend_ok, vwap_ok, liquid_ok]
+        if mode_name != 'scalping':
+            conditions.extend([rs_ok, was_consolidating])
+
+        # Global min R:R per mode
+        sl, tp, rr = self._compute_rr_levels(latest, cfg)
+        min_rr_by_mode = {'swing': 2.0, 'daytrade': 1.5, 'scalping': 1.0}
+        rr_ok = rr >= min_rr_by_mode.get(mode_name, 1.0)
+        conditions.append(rr_ok)
+
+        if not all(conditions):
+            return None
+
+        quality = 'HIGH'
+        if mode_name == 'scalping':
+            vwap_series = df['vwap']
+            if len(vwap_series) >= 5 and not pd.isna(vwap_series.iloc[-5]):
+                vwap_momentum = (latest['vwap'] - vwap_series.iloc[-5]) / max(latest['ATR'], 1e-6)
+                if latest['Vol_Ratio'] > 3.0 and vwap_momentum > 0.5:
+                    quality = 'PREMIUM'
+        elif has_gap_up:
+            quality = 'PREMIUM'
+
+        signal = BreakoutSignal(
+            symbol=symbol,
+            mode=mode_name,
+            price=float(latest['close']),
+            vol_ratio=float(latest['Vol_Ratio']),
+            dist_atr=float(dist_atr),
+            stop=float(sl),
+            target=float(tp),
+            rr=float(rr),
+            gap_pct=float(gap_percent),
+            quality=quality,
+            spread_pct=float(spread_pct) if spread_pct is not None else None,
+        )
+
+        logger.info(
+            f"🚀 SIGNAL: {symbol} {mode_name} at ${latest['close']:.2f} | "
+            f"SL: ${sl:.2f} | TP: ${tp:.2f} | R:R={rr:.2f}"
+        )
+        return signal.to_dict()
 
     def calculate_indicators(self, df, trend_type, trend_period, timeframe):
         """Calculate all technical indicators"""
@@ -413,7 +600,7 @@ async def main(file_name, mode, vol, atr, tf, live=False):
         logger.info(f"Loaded {len(watchlist)} symbols from {file_name}")
         
         scanner = BreakoutScanner(ib)
-        
+
         # Get market context (skip for scalping - too slow)
         if mode != 'scalping':
             spy_perf = await scanner.get_spy_performance(tf, MODES[mode]['lookback'])
@@ -422,20 +609,22 @@ async def main(file_name, mode, vol, atr, tf, live=False):
         else:
             spy_perf = 0
             logger.info(f"--- Mode: SCALPING | TF: {tf} | VWAP-based entries ---")
-        
-        # Scan all symbols
+
         results = []
-        for i, sym in enumerate(watchlist, 1):
-            print(f"[{i}/{len(watchlist)}] {sym:6}", end="\r")
-            res = await scanner.scan_symbol_with_retry(sym, mode, tf, vol, atr, spy_perf)
-            if res:
-                results.append(res)
-            
-            # Faster pacing for scalping
-            delay = 0.02 if mode == 'scalping' else 0.03
-            await asyncio.sleep(delay)
-        
-        print()  # Clear progress line
+        semaphore = asyncio.Semaphore(5)  # tune for IB pacing
+
+        async def _scan_one(idx_sym):
+            idx, sym = idx_sym
+            async with semaphore:
+                print(f"[{idx}/{len(watchlist)}] {sym:6}", end="\r")
+                res = await scanner.scan_symbol_with_retry(sym, mode, tf, vol, atr, spy_perf)
+                return res
+
+        tasks = [_scan_one((i, sym)) for i, sym in enumerate(watchlist, 1)]
+        results_raw = await asyncio.gather(*tasks)
+        results = [r for r in results_raw if r]
+        print()
+
         
         # Display results
         if results:
