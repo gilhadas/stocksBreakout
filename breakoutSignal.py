@@ -1,0 +1,353 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime, time as dtime
+import asyncio
+import warnings
+import nest_asyncio
+import argparse
+import logging
+from pathlib import Path
+from ib_insync import IB, Stock, util
+
+nest_asyncio.apply()
+warnings.filterwarnings('ignore')
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler(f'scanner_{datetime.now():%Y%m%d}.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+MODES = {
+    'swing': {
+        'lookback': 20,
+        'vol_thresh': 1.3,
+        'atr_mult': 0.5,
+        'trend_type': 'SMA',
+        'trend_period': 200,
+        'sl_mult': 2.0,
+        'tp_mult': 4.0,
+        'min_consolidation_bars': 3
+    },
+    'daytrade': {
+        'lookback': 10,
+        'vol_thresh': 1.1,
+        'atr_mult': 0.2,
+        'trend_type': 'EMA',
+        'trend_period': 9,
+        'sl_mult': 1.5,
+        'tp_mult': 3.0,
+        'min_consolidation_bars': 2
+    }
+}
+
+class BreakoutScanner:
+    def __init__(self, ib_connection):
+        self.ib = ib_connection
+        self.spy_cache = {}
+        self.rejection_reasons = []
+
+    def calculate_indicators(self, df, trend_type, trend_period, timeframe):
+        """Calculate all technical indicators"""
+        # ATR
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        df['ATR'] = np.max(ranges, axis=1).rolling(14).mean()
+        
+        # Volume
+        df['Vol_MA'] = df['volume'].rolling(20).mean()
+        df['Vol_Ratio'] = df['volume'] / df['Vol_MA']
+        
+        # Trend Filter
+        if trend_type == 'EMA':
+            df['Trend_Line'] = df['close'].ewm(span=trend_period, adjust=False).mean()
+        else:
+            df['Trend_Line'] = df['close'].rolling(trend_period).mean()
+        
+        # VWAP - Only for intraday
+        if 'min' in timeframe or 'hour' in timeframe:
+            df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+            
+            # Reset VWAP daily
+            if hasattr(df.index, 'date'):
+                df['date_only'] = df.index.date
+                df['vwap'] = df.groupby('date_only').apply(
+                    lambda x: (x['typical_price'] * x['volume']).cumsum() / x['volume'].cumsum()
+                ).reset_index(level=0, drop=True)
+            else:
+                # Single day or continuous
+                df['vwap'] = (df['typical_price'] * df['volume']).cumsum() / df['volume'].cumsum()
+        else:
+            df['vwap'] = np.nan
+        
+        # Bollinger Bands Width for consolidation
+        bb_ma = df['close'].rolling(20).mean()
+        bb_std = df['close'].rolling(20).std()
+        df['BB_Width'] = ((bb_std * 2) / bb_ma) * 100
+        df['Avg_BB_Width'] = df['BB_Width'].rolling(20).mean()
+        df['Is_Consolidating'] = df['BB_Width'] < (df['Avg_BB_Width'] * 0.6)
+        
+        return df
+
+    async def get_spy_performance(self, timeframe, lookback):
+        """Get SPY performance with caching"""
+        cache_key = f"{timeframe}_{lookback}"
+        
+        if cache_key in self.spy_cache:
+            return self.spy_cache[cache_key]
+        
+        try:
+            spy = Stock('SPY', 'ARCA', 'USD')
+            duration = '300 D' if 'day' in timeframe else '10 D'
+            bars = await self.ib.reqHistoricalDataAsync(spy, '', duration, timeframe, 'TRADES', True, 1)
+            
+            if not bars:
+                return 0
+            
+            df = util.df(bars)
+            perf = (df['close'].iloc[-1] / df['close'].iloc[-lookback]) - 1
+            self.spy_cache[cache_key] = perf
+            return perf
+            
+        except Exception as e:
+            logger.warning(f"Failed to get SPY performance: {e}")
+            return 0
+
+    def calculate_gap(self, df):
+        """Calculate opening gap percentage"""
+        if len(df) < 2:
+            return 0
+        return ((df['open'].iloc[-1] - df['close'].iloc[-2]) / df['close'].iloc[-2]) * 100
+
+    def check_liquidity(self, df, min_dollar_volume=5_000_000):
+        """Check if stock has sufficient liquidity"""
+        avg_dollar_volume = (df['close'] * df['volume']).tail(20).mean()
+        return avg_dollar_volume >= min_dollar_volume
+
+    def detect_breakout(self, df, symbol, mode_name, timeframe, spy_perf, **kwargs):
+        """Main breakout detection with comprehensive filters"""
+        cfg = MODES[mode_name]
+        lookback = kwargs.get('lookback') or cfg['lookback']
+        vol_thresh = kwargs.get('vol_thresh') or cfg['vol_thresh']
+        atr_mult = kwargs.get('atr_mult') or cfg['atr_mult']
+        
+        if len(df) < cfg['trend_period']:
+            return None
+        
+        # Calculate indicators
+        df = self.calculate_indicators(df, cfg['trend_type'], cfg['trend_period'], timeframe)
+        
+        # Get values
+        prev_high = df['high'].rolling(lookback).max().iloc[-2]
+        latest = df.iloc[-1]
+        
+        # --- CORE BREAKOUT LOGIC ---
+        price_break = latest['close'] > prev_high
+        vol_confirm = latest['Vol_Ratio'] >= vol_thresh
+        dist_atr = (latest['close'] - prev_high) / latest['ATR']
+        dist_confirm = dist_atr >= atr_mult
+        
+        # --- FILTERS ---
+        # 1. Relative Strength
+        stock_perf = (latest['close'] / df['close'].iloc[-lookback]) - 1
+        rs_ok = stock_perf > spy_perf
+        
+        # 2. Trend Filter
+        trend_ok = latest['close'] > latest['Trend_Line']
+        
+        # 3. VWAP (daytrade only)
+        vwap_ok = True
+        if mode_name == 'daytrade' and not pd.isna(latest['vwap']):
+            vwap_ok = latest['close'] > latest['vwap']
+        
+        # 4. Consolidation before breakout
+        was_consolidating = df['Is_Consolidating'].iloc[-cfg['min_consolidation_bars']-1:-1].any()
+        
+        # 5. Liquidity
+        liquid_ok = self.check_liquidity(df)
+        
+        # 6. Gap detection
+        gap_percent = self.calculate_gap(df)
+        has_gap_up = gap_percent > 2.0
+        
+        # --- LOGGING REJECTIONS ---
+        rejection_reasons = []
+        
+        if price_break and vol_confirm:
+            if not trend_ok:
+                rejection_reasons.append(f"Below {cfg['trend_period']} {cfg['trend_type']}")
+            if not rs_ok:
+                rejection_reasons.append(f"Weaker than SPY ({stock_perf:.1%} vs {spy_perf:.1%})")
+            if not vwap_ok:
+                rejection_reasons.append("Below VWAP")
+            if not was_consolidating:
+                rejection_reasons.append("No consolidation")
+            if not liquid_ok:
+                rejection_reasons.append("Low liquidity")
+            if not dist_confirm:
+                rejection_reasons.append(f"Weak distance ({dist_atr:.2f} ATR)")
+            
+            if rejection_reasons:
+                self.rejection_reasons.append({
+                    'symbol': symbol,
+                    'price': latest['close'],
+                    'vol_ratio': latest['Vol_Ratio'],
+                    'reasons': ', '.join(rejection_reasons)
+                })
+        
+        # --- SIGNAL GENERATION ---
+        if all([price_break, vol_confirm, dist_confirm, rs_ok, trend_ok, vwap_ok, was_consolidating, liquid_ok]):
+            sl = latest['close'] - (cfg['sl_mult'] * latest['ATR'])
+            tp = latest['close'] + (cfg['tp_mult'] * latest['ATR'])
+            risk_reward = (tp - latest['close']) / (latest['close'] - sl)
+            
+            signal = {
+                'Symbol': symbol,
+                'Price': round(latest['close'], 2),
+                'Vol': round(latest['Vol_Ratio'], 2),
+                'Dist': round(dist_atr, 2),
+                'Stop': round(sl, 2),
+                'Target': round(tp, 2),
+                'R:R': round(risk_reward, 2),
+                'Gap%': round(gap_percent, 2) if abs(gap_percent) > 0.5 else 0,
+                'Mode': mode_name,
+                'Quality': 'PREMIUM' if has_gap_up else 'HIGH'
+            }
+            
+            logger.info(f"🚀 SIGNAL: {symbol} at ${latest['close']:.2f} | SL: ${sl:.2f} | TP: ${tp:.2f}")
+            return signal
+        
+        return None
+
+    async def scan_symbol_with_retry(self, symbol, mode, tf, vol, atr, spy_perf, max_retries=3):
+        """Scan with automatic retry on failure"""
+        for attempt in range(max_retries):
+            try:
+                contract = Stock(symbol, 'SMART', 'USD')
+                await self.ib.qualifyContractsAsync(contract)
+                
+                duration = '365 D' if 'day' in tf else '30 D'
+                bars = await self.ib.reqHistoricalDataAsync(contract, '', duration, tf, 'TRADES', True, 1)
+                
+                if not bars:
+                    return None
+                
+                df = util.df(bars).set_index('date')
+                return self.detect_breakout(df, symbol, mode, tf, spy_perf, vol_thresh=vol, atr_mult=atr)
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.warning(f"Failed {symbol} after {max_retries} attempts: {e}")
+                    return None
+                await asyncio.sleep(1)
+        
+        return None
+
+def get_watchlist_from_file(file_path):
+    """Load watchlist from file"""
+    watchlist = []
+    try:
+        with open(file_path, 'r') as f:
+            for line in f.read().splitlines():
+                line = line.strip()
+                if not line or line.startswith('###'):
+                    continue
+                for s in line.split(','):
+                    s = s.strip()
+                    if s and not s.startswith('###'):
+                        clean = s.split(':')[-1]
+                        if clean == 'BRK.B':
+                            clean = 'BRK B'
+                        if not (clean.startswith('XL') and len(clean) <= 4):
+                            watchlist.append(clean)
+        return list(set(watchlist))
+    except Exception as e:
+        logger.error(f"Failed to load watchlist: {e}")
+        return []
+
+async def main(file_name, mode, vol, atr, tf, live=False):
+    """Main scanner execution"""
+    port = 7496 if live else 7497
+    logger.info(f"Connecting to IB on port {port} ({'LIVE' if live else 'PAPER'})")
+    
+    ib = IB()
+    try:
+        await ib.connectAsync('127.0.0.1', port, clientId=1)
+        logger.info("✓ Connected to Interactive Brokers")
+        
+        watchlist = get_watchlist_from_file(file_name)
+        logger.info(f"Loaded {len(watchlist)} symbols from {file_name}")
+        
+        scanner = BreakoutScanner(ib)
+        
+        # Get market context
+        spy_perf = await scanner.get_spy_performance(tf, MODES[mode]['lookback'])
+        market_regime = "BULLISH" if spy_perf > 0.05 else "BEARISH" if spy_perf < -0.05 else "NEUTRAL"
+        
+        logger.info(f"--- Mode: {mode.upper()} | TF: {tf} | SPY: {spy_perf:.2%} | Regime: {market_regime} ---")
+        
+        # Scan all symbols
+        results = []
+        for i, sym in enumerate(watchlist, 1):
+            print(f"[{i}/{len(watchlist)}] {sym:6}", end="\r")
+            res = await scanner.scan_symbol_with_retry(sym, mode, tf, vol, atr, spy_perf)
+            if res:
+                results.append(res)
+            await asyncio.sleep(0.03)
+        
+        print()  # Clear progress line
+        
+        # Display results
+        if results:
+            logger.info(f"\n{'='*70}")
+            logger.info(f" {mode.upper()} SIGNALS FOUND: {len(results)}")
+            logger.info(f"{'='*70}")
+            
+            df_final = pd.DataFrame(results).sort_values(by='Vol', ascending=False)
+            print(df_final.to_string(index=False))
+            
+            # Save to CSV
+            output_file = f"signals_{mode}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+            df_final.to_csv(output_file, index=False)
+            logger.info(f"\n✓ Signals saved to: {output_file}")
+        else:
+            logger.info("No signals found.")
+        
+        # Save rejection analysis
+        if scanner.rejection_reasons:
+            df_reject = pd.DataFrame(scanner.rejection_reasons)
+            reject_file = f"rejections_{mode}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+            df_reject.to_csv(reject_file, index=False)
+            logger.info(f"✓ Rejections saved to: {reject_file}")
+        
+    except Exception as e:
+        logger.error(f"Scanner error: {e}", exc_info=True)
+    finally:
+        ib.disconnect()
+        logger.info("✓ Disconnected from IB")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Breakout Scanner for Interactive Brokers')
+    parser.add_argument('file', help='Path to watchlist file')
+    parser.add_argument('--mode', choices=['swing', 'daytrade'], default='swing')
+    parser.add_argument('--vol', type=float, help='Volume threshold override')
+    parser.add_argument('--atr', type=float, help='ATR multiplier override')
+    parser.add_argument('--tf', type=str, help='Timeframe override')
+    parser.add_argument('--live', action='store_true', help='Use live account (default: paper)')
+    
+    args = parser.parse_args()
+    timeframe = args.tf or ('1 day' if args.mode == 'swing' else '15 mins')
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main(args.file, args.mode, args.vol, args.atr, timeframe, args.live))
+    finally:
+        loop.close()
