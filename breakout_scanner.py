@@ -22,7 +22,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
+logging.getLogger('ib_insync').setLevel(logging.WARNING)
 MODES = {
     'swing': {
         'lookback': 20,
@@ -101,6 +101,15 @@ class BreakoutScanner:
         df['Is_Consolidating'] = df['BB_Width'] < (df['Avg_BB_Width'] * 0.6)
         
         return df
+
+    def calculate_gap(self, df):
+        """Calculates the percentage difference between today's open and yesterday's close"""
+        if len(df) < 2:
+            return 0
+        prev_close = df['close'].iloc[-2]
+        current_open = df['open'].iloc[-1]
+        gap_pct = ((current_open - prev_close) / prev_close) * 100
+        return round(gap_pct, 2)
     
     def calculate_vwap(self, df, timeframe):
         """Calculate VWAP properly - resets daily"""
@@ -318,14 +327,34 @@ class BreakoutScanner:
                 contract = Stock(symbol, 'SMART', 'USD')
                 await self.ib.qualifyContractsAsync(contract)
                 
-                duration = '365 D' if 'day' in tf else '30 D'
+                # Check spread for scalping
+                spread_pct = None
+                if mode == 'scalping':
+                    spread_pct = await self.get_bid_ask_spread(contract)
+                    if spread_pct is None or spread_pct > MODES['scalping']['max_spread_pct']:
+                        logger.debug(f"{symbol}: Spread too wide ({spread_pct:.2f}%)")
+                        return None
+                
+                # Adjust duration based on timeframe
+                if 'day' in tf:
+                    duration = '365 D'
+                elif 'min' in tf and '1 min' in tf:
+                    duration = '2 D'  # For 1min bars, get 2 days
+                else:
+                    duration = '10 D'
+                
                 bars = await self.ib.reqHistoricalDataAsync(contract, '', duration, tf, 'TRADES', True, 1)
                 
                 if not bars:
                     return None
                 
                 df = util.df(bars).set_index('date')
-                return self.detect_breakout(df, symbol, mode, tf, spy_perf, vol_thresh=vol, atr_mult=atr)
+                
+                # Pass spread info to detection
+                return self.detect_breakout(
+                    df, symbol, mode, tf, spy_perf, 
+                    vol_thresh=vol, atr_mult=atr, spread_pct=spread_pct
+                )
                 
             except Exception as e:
                 if attempt == max_retries - 1:
@@ -356,27 +385,43 @@ def get_watchlist_from_file(file_path):
     except Exception as e:
         logger.error(f"Failed to load watchlist: {e}")
         return []
-
+    
 async def main(file_name, mode, vol, atr, tf, live=False):
     """Main scanner execution"""
     port = 7496 if live else 7497
     logger.info(f"Connecting to IB on port {port} ({'LIVE' if live else 'PAPER'})")
     
+    # Scalping warning
+    if mode == 'scalping' and live:
+        logger.warning("⚠️  SCALPING ON LIVE ACCOUNT - High frequency trading risks apply!")
+        response = input("Type 'YES' to continue with live scalping: ")
+        if response != 'YES':
+            logger.info("Aborted by user")
+            return
+    
     ib = IB()
     try:
         await ib.connectAsync('127.0.0.1', port, clientId=1)
         logger.info("✓ Connected to Interactive Brokers")
+        # --- FIX FOR ERROR 10089 ---
+        # This allows the script to use delayed data if live data is not subscribed
+        ib.reqMarketDataType(3) 
+        logger.info(f"✓ Connected to {'Live' if live else 'Paper'} account. Using Market Data Type: 3")
+        # ---------------------------
         
         watchlist = get_watchlist_from_file(file_name)
         logger.info(f"Loaded {len(watchlist)} symbols from {file_name}")
         
         scanner = BreakoutScanner(ib)
         
-        # Get market context
-        spy_perf = await scanner.get_spy_performance(tf, MODES[mode]['lookback'])
-        market_regime = "BULLISH" if spy_perf > 0.05 else "BEARISH" if spy_perf < -0.05 else "NEUTRAL"
-        
-        logger.info(f"--- Mode: {mode.upper()} | TF: {tf} | SPY: {spy_perf:.2%} | Regime: {market_regime} ---")
+        # Get market context (skip for scalping - too slow)
+        if mode != 'scalping':
+            spy_perf = await scanner.get_spy_performance(tf, MODES[mode]['lookback'])
+            market_regime = "BULLISH" if spy_perf > 0.05 else "BEARISH" if spy_perf < -0.05 else "NEUTRAL"
+            logger.info(f"--- Mode: {mode.upper()} | TF: {tf} | SPY: {spy_perf:.2%} | Regime: {market_regime} ---")
+        else:
+            spy_perf = 0
+            logger.info(f"--- Mode: SCALPING | TF: {tf} | VWAP-based entries ---")
         
         # Scan all symbols
         results = []
@@ -385,7 +430,10 @@ async def main(file_name, mode, vol, atr, tf, live=False):
             res = await scanner.scan_symbol_with_retry(sym, mode, tf, vol, atr, spy_perf)
             if res:
                 results.append(res)
-            await asyncio.sleep(0.03)
+            
+            # Faster pacing for scalping
+            delay = 0.02 if mode == 'scalping' else 0.03
+            await asyncio.sleep(delay)
         
         print()  # Clear progress line
         
@@ -402,6 +450,14 @@ async def main(file_name, mode, vol, atr, tf, live=False):
             output_file = f"signals_{mode}_{datetime.now():%Y%m%d_%H%M%S}.csv"
             df_final.to_csv(output_file, index=False)
             logger.info(f"\n✓ Signals saved to: {output_file}")
+            
+            # Scalping-specific warnings
+            if mode == 'scalping':
+                logger.warning("\n⚠️  SCALPING REMINDERS:")
+                logger.warning("   • Exit at target or stop - no exceptions")
+                logger.warning("   • Monitor spread widening during execution")
+                logger.warning("   • Close all positions before market close")
+                logger.warning("   • Watch for news events that spike volatility")
         else:
             logger.info("No signals found.")
         
@@ -421,14 +477,23 @@ async def main(file_name, mode, vol, atr, tf, live=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Breakout Scanner for Interactive Brokers')
     parser.add_argument('file', help='Path to watchlist file')
-    parser.add_argument('--mode', choices=['swing', 'daytrade'], default='swing')
+    parser.add_argument('--mode', choices=['swing', 'daytrade', 'scalping'], default='swing')
     parser.add_argument('--vol', type=float, help='Volume threshold override')
     parser.add_argument('--atr', type=float, help='ATR multiplier override')
     parser.add_argument('--tf', type=str, help='Timeframe override')
     parser.add_argument('--live', action='store_true', help='Use live account (default: paper)')
     
     args = parser.parse_args()
-    timeframe = args.tf or ('1 day' if args.mode == 'swing' else '15 mins')
+    
+    # Default timeframes per mode if not specified
+    if args.tf:
+        timeframe = args.tf
+    else:
+        timeframe = {
+            'swing': '1 day',
+            'daytrade': '15 mins',
+            'scalping': '1 min'
+        }[args.mode]
     
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
