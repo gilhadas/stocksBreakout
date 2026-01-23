@@ -136,6 +136,17 @@ class BreakoutScanner:
         vol_thresh = kwargs.get('vol_thresh') or cfg['vol_thresh']
         atr_mult = kwargs.get('atr_mult') or cfg['atr_mult']
         spread_pct = kwargs.get('spread_pct')
+        regime = kwargs.get('regime', "NORMAL")
+        # Regime-based adjustment of thresholds (only for non-scalping)
+        if mode_name != 'scalping':
+            if regime == "CHOPPY":
+                vol_thresh *= 1.3
+                atr_mult *= 1.3
+            elif regime == "EXPANSION":
+                vol_thresh *= 0.9
+                atr_mult *= 0.9
+            # NORMAL -> no change
+
 
         # For scalping, check minimum data requirements
         min_bars = 100 if mode_name == 'scalping' else cfg.get('trend_period', 50)
@@ -412,8 +423,19 @@ class BreakoutScanner:
             
             df = util.df(bars)
             perf = (df['close'].iloc[-1] / df['close'].iloc[-lookback]) - 1
-            self.spy_cache[cache_key] = perf
-            return perf
+
+            # Simple volatility proxy: ATR% over same lookback
+            df['hl'] = df['high'] - df['low']
+            df['hc'] = (df['high'] - df['close'].shift()).abs()
+            df['lc'] = (df['low'] - df['close'].shift()).abs()
+            tr = pd.concat([df['hl'], df['hc'], df['lc']], axis=1).max(axis=1)
+            atr = tr.rolling(14).mean()
+            atr_pct = (atr / df['close']) * 100
+            spy_vol = float(atr_pct.tail(lookback).mean())
+
+            self.spy_cache[cache_key] = (perf, spy_vol)
+            return perf, spy_vol
+
             
         except Exception as e:
             logger.warning(f"Failed to get SPY performance: {e}")
@@ -585,7 +607,7 @@ class BreakoutScanner:
         
         return None
 
-    async def scan_symbol_with_retry(self, symbol, mode, tf, vol, atr, spy_perf, max_retries=3):
+    async def scan_symbol_with_retry(self, symbol, mode, tf, vol, atr, spy_perf, regime="NORMAL", max_retries=3):
         """Scan with automatic retry on failure"""
         for attempt in range(max_retries):
             try:
@@ -619,7 +641,7 @@ class BreakoutScanner:
                 # Pass spread info to detection
                 return self.detect_breakout(
                     df, symbol, mode, tf, spy_perf, 
-                    vol_thresh=vol, atr_mult=atr, spread_pct=spread_pct
+                    vol_thresh=vol, atr_mult=atr, spread_pct=spread_pct, regime=regime
                 )
                 
             except Exception as e:
@@ -682,11 +704,22 @@ async def main(file_name, mode, vol, atr, tf, live=False):
 
         # Get market context (skip for scalping - too slow)
         if mode != 'scalping':
-            spy_perf = await scanner.get_spy_performance(tf, MODES[mode]['lookback'])
-            market_regime = "BULLISH" if spy_perf > 0.05 else "BEARISH" if spy_perf < -0.05 else "NEUTRAL"
-            logger.info(f"--- Mode: {mode.upper()} | TF: {tf} | SPY: {spy_perf:.2%} | Regime: {market_regime} ---")
+            spy_perf, spy_vol = await scanner.get_spy_performance(tf, MODES[mode]['lookback'])
+
+            # Simple regime classification based on perf and vol
+            if abs(spy_perf) < 0.01 and spy_vol < 1.0:
+                regime = "CHOPPY"
+            elif abs(spy_perf) > 0.05 and spy_vol > 2.0:
+                regime = "EXPANSION"
+            else:
+                regime = "NORMAL"
+
+            logger.info(
+                f"--- Mode: {mode.upper()} | TF: {tf} | "
+                f"SPY: {spy_perf:.2%} | Vol: {spy_vol:.2f}% | Regime: {regime} ---"
+            )
         else:
-            spy_perf = 0
+            spy_perf, spy_vol, regime = 0, 0, "INTRADAY"
             logger.info(f"--- Mode: SCALPING | TF: {tf} | VWAP-based entries ---")
 
         results = []
@@ -696,7 +729,7 @@ async def main(file_name, mode, vol, atr, tf, live=False):
             idx, sym = idx_sym
             async with semaphore:
                 print(f"[{idx}/{len(watchlist)}] {sym:6}", end="\r")
-                res = await scanner.scan_symbol_with_retry(sym, mode, tf, vol, atr, spy_perf)
+                res = await scanner.scan_symbol_with_retry(sym, mode, tf, vol, atr, spy_perf, regime=regime)
                 return res
 
         tasks = [_scan_one((i, sym)) for i, sym in enumerate(watchlist, 1)]
