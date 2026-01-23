@@ -615,11 +615,13 @@ class BreakoutScanner:
         }
 
     async def scan_symbol_with_retry(self, symbol, mode, tf, vol, atr, spy_perf, regime="NORMAL", max_retries=3):
+        """Scan with automatic retry on failure"""
         for attempt in range(max_retries):
             try:
                 contract = Stock(symbol, 'SMART', 'USD')
                 await self.ib.qualifyContractsAsync(contract)
 
+                # Check spread for scalping
                 spread_pct = None
                 if mode == 'scalping':
                     spread_pct = await self.get_bid_ask_spread(contract)
@@ -628,21 +630,21 @@ class BreakoutScanner:
                         logger.debug(f"{symbol}: Spread too wide ({msg_spread})")
                         return None
 
+                # Adjust duration based on timeframe
                 if 'day' in tf:
                     duration = '365 D'
                 elif 'min' in tf and '1 min' in tf:
-                    duration = '2 D'
+                    duration = '2 D'  # For 1min bars, get 2 days
                 else:
                     duration = '10 D'
 
-                bars = await self.ib.reqHistoricalDataAsync(
-                    contract, '', duration, tf, 'TRADES', True, 1
-                )
+                bars = await self.ib.reqHistoricalDataAsync(contract, '', duration, tf, 'TRADES', True, 1)
                 if not bars:
                     return None
 
                 df = util.df(bars).set_index('date')
 
+                # Pass spread info to detection
                 return self.detect_breakout(
                     df, symbol, mode, tf, spy_perf,
                     vol_thresh=vol, atr_mult=atr, spread_pct=spread_pct, regime=regime
@@ -653,8 +655,9 @@ class BreakoutScanner:
                     logger.warning(f"Failed {symbol} after {max_retries} attempts: {e}")
                     return None
                 await asyncio.sleep(1)
+
         return None
-    
+
 def get_watchlist_from_file(file_path):
     """Load watchlist from file"""
     watchlist = []
