@@ -463,195 +463,198 @@ class BreakoutScanner:
         avg_dollar_volume = (df['close'] * df['volume']).tail(20).mean()
         return avg_dollar_volume >= min_dollar_volume
 
-    def detect_breakout(self, df, symbol, mode_name, timeframe, spy_perf, **kwargs):
-        """Main breakout detection with comprehensive filters"""
+
+    def evaluate_exit(
+        self,
+        df,
+        symbol,
+        mode_name,
+        entry_price,
+        stop_price,
+        target_price,
+        timeframe,
+        regime="NORMAL",
+    ):
+        """
+        Evaluate exit conditions for an existing LONG position.
+
+        Returns a dict:
+          {
+            'Symbol': ...,
+            'Mode': ...,
+            'Action': 'HOLD' | 'TRAIL' | 'EXIT_PARTIAL' | 'EXIT_FULL',
+            'Reason': str
+          }
+        """
         cfg = MODES[mode_name]
-        lookback = kwargs.get('lookback') or cfg['lookback']
-        vol_thresh = kwargs.get('vol_thresh') or cfg['vol_thresh']
-        atr_mult = kwargs.get('atr_mult') or cfg['atr_mult']
-        
-        # For scalping, check minimum data requirements
-        min_bars = 100 if mode_name == 'scalping' else cfg.get('trend_period', 50)
-        if len(df) < min_bars:
-            return None
-        
-        # Calculate indicators
-        df = self.calculate_indicators(df, cfg['trend_type'], cfg.get('trend_period'), timeframe)
-        
-        # Get values
-        prev_high = df['high'].rolling(lookback).max().iloc[-2]
-        latest = df.iloc[-1]
-        
-        # Scalping-specific price filter
-        if mode_name == 'scalping':
-            if latest['close'] < cfg['min_price'] or latest['close'] > cfg['max_price']:
-                return None
-        
-        # --- CORE BREAKOUT LOGIC ---
-        price_break = latest['close'] > prev_high
-        vol_confirm = latest['Vol_Ratio'] >= vol_thresh
-        dist_atr = (latest['close'] - prev_high) / latest['ATR']
-        dist_confirm = dist_atr >= atr_mult
-        
-        # --- FILTERS ---
-        # 1. Relative Strength (skip for scalping - too slow)
-        if mode_name != 'scalping':
-            stock_perf = (latest['close'] / df['close'].iloc[-lookback]) - 1
-            rs_ok = stock_perf > spy_perf
-        else:
-            rs_ok = True  # Not relevant for 1min scalps
-        
-        # 2. Trend Filter
-        if cfg['trend_type'] == 'VWAP':
-            # For scalping: price must be above VWAP AND breaking up
-            trend_ok = latest['close'] > latest['vwap'] and latest['vwap'] > df['vwap'].iloc[-2]
-            vwap_rising = True
-        else:
-            trend_ok = latest['close'] > latest['Trend_Line']
-            vwap_rising = True
-        
-        # 3. VWAP position (critical for scalping and daytrade)
-        vwap_ok = True
-        if not pd.isna(latest['vwap']):
-            if mode_name == 'scalping':
-                # Must be above VWAP with momentum
-                vwap_ok = latest['close'] > latest['vwap'] and latest['close'] > latest['open']
-            elif mode_name == 'daytrade':
-                vwap_ok = latest['close'] > latest['vwap']
-        
-        # 4. Consolidation before breakout (looser for scalping)
-        min_cons_bars = cfg['min_consolidation_bars']
-        was_consolidating = df['Is_Consolidating'].iloc[-min_cons_bars-1:-1].any()
-        
-        # 5. Liquidity
-        liquid_ok = self.check_liquidity(df)
-        
-        # 6. Gap detection (not relevant for scalping)
-        gap_percent = self.calculate_gap(df) if mode_name != 'scalping' else 0
-        has_gap_up = gap_percent > 2.0
-        
-        # 7. Volume spike for scalping
-        if mode_name == 'scalping':
-            # Need immediate volume explosion
-            recent_vol_spike = latest['Vol_Ratio'] > vol_thresh * 1.5
-            vol_confirm = vol_confirm and recent_vol_spike
-        
-        # --- LOGGING REJECTIONS ---
-        rejection_reasons = []
-        
-        if price_break and vol_confirm:
-            if not trend_ok:
-                if cfg['trend_type'] == 'VWAP':
-                    rejection_reasons.append("Below VWAP or VWAP not rising")
-                else:
-                    rejection_reasons.append(f"Below {cfg['trend_period']} {cfg['trend_type']}")
-            if not rs_ok:
-                rejection_reasons.append(f"Weaker than SPY ({stock_perf:.1%} vs {spy_perf:.1%})")
-            if not vwap_ok:
-                rejection_reasons.append("VWAP position poor")
-            if not was_consolidating and mode_name != 'scalping':
-                rejection_reasons.append("No consolidation")
-            if not liquid_ok:
-                rejection_reasons.append("Low liquidity")
-            if not dist_confirm:
-                rejection_reasons.append(f"Weak distance ({dist_atr:.2f} ATR)")
-            
-            if rejection_reasons:
-                self.rejection_reasons.append({
-                    'symbol': symbol,
-                    'price': latest['close'],
-                    'vol_ratio': latest['Vol_Ratio'],
-                    'reasons': ', '.join(rejection_reasons)
-                })
-        
-        # --- SIGNAL GENERATION ---
-        conditions = [price_break, vol_confirm, dist_confirm, trend_ok, vwap_ok, liquid_ok]
-        
-        # Add optional filters based on mode
-        if mode_name != 'scalping':
-            conditions.extend([rs_ok, was_consolidating])
-        
-        if all(conditions):
-            sl = latest['close'] - (cfg['sl_mult'] * latest['ATR'])
-            tp = latest['close'] + (cfg['tp_mult'] * latest['ATR'])
-            risk_reward = (tp - latest['close']) / (latest['close'] - sl)
-            
-            # Scalping quality check
-            quality = 'HIGH'
-            if mode_name == 'scalping':
-                # Premium scalp: huge volume + VWAP rising fast
-                vwap_momentum = (latest['vwap'] - df['vwap'].iloc[-5]) / latest['ATR']
-                if latest['Vol_Ratio'] > 3.0 and vwap_momentum > 0.5:
-                    quality = 'PREMIUM'
-            elif has_gap_up:
-                quality = 'PREMIUM'
-            
-            signal = {
+
+        # Need enough bars
+        if len(df) < max(30, cfg.get('trend_period', 50)):
+            return {
                 'Symbol': symbol,
-                'Price': round(latest['close'], 2),
-                'Vol': round(latest['Vol_Ratio'], 2),
-                'Dist': round(dist_atr, 2),
-                'Stop': round(sl, 2),
-                'Target': round(tp, 2),
-                'R:R': round(risk_reward, 2),
-                'Gap%': round(gap_percent, 2) if abs(gap_percent) > 0.5 else 0,
                 'Mode': mode_name,
-                'Quality': quality
+                'Action': 'HOLD',
+                'Reason': 'Not enough data for exit evaluation'
             }
-            
-            if mode_name == 'scalping':
-                signal['Spread%'] = kwargs.get('spread_pct', 0)
-            
-            logger.info(f"🚀 SIGNAL: {symbol} at ${latest['close']:.2f} | SL: ${sl:.2f} | TP: ${tp:.2f}")
-            return signal
-        
-        return None
+
+        # Reuse indicators
+        df = self.calculate_indicators(df.copy(), cfg['trend_type'], cfg.get('trend_period'), timeframe)
+        latest = df.iloc[-1]
+
+        price = float(latest['close'])
+        trend_line = latest['Trend_Line']
+        atr = float(latest['ATR'])
+        vwap_val = latest.get('vwap', np.nan)
+
+        # Basic status
+        unrealized_r = (price - entry_price) / max(entry_price - stop_price, 1e-6)
+        # --- Dynamic stop suggestions ---
+        # ATR-based trailing stop (e.g. 2 ATR below close)
+        atr_mult_stop = 2.0  # you can make this per-mode
+        atr_trail_stop = price - atr_mult_stop * atr
+
+        # SMA150-based long-term stop for swing
+        sma150 = None
+        if 'close' in df.columns:
+            sma150 = df['close'].rolling(150).mean().iloc[-1]
+
+        sma150_stop = None
+        if sma150 and not np.isnan(sma150):
+            # e.g. 1 ATR below SMA150
+            sma150_stop = sma150 - 1.0 * atr
+
+        # 1) Hard stop: close below stop -> EXIT_FULL
+        if price <= stop_price:
+            return {
+                'Symbol': symbol,
+                'Mode': mode_name,
+                'Action': 'EXIT_FULL',
+                'Reason': f'Close {price:.2f} <= stop {stop_price:.2f}'
+            }
+
+        # 2) Trend break: close below trend line (and VWAP for intraday)
+        trend_broken = price < trend_line
+        vwap_broken = (not pd.isna(vwap_val)) and price < vwap_val and ('min' in timeframe or 'hour' in timeframe)
+
+        if trend_broken and (vwap_broken or mode_name != 'swing'):
+            return {
+                'Symbol': symbol,
+                'Mode': mode_name,
+                'Action': 'EXIT_FULL',
+                'Reason': f'Trend broken (price {price:.2f} < TL {trend_line:.2f})'
+            }
+        # Extra protection: for swing, exit if price clearly loses SMA150
+        sma150 = df['close'].rolling(150).mean().iloc[-1]
+        if mode_name == 'swing' and not np.isnan(sma150):
+            if price < sma150 - 0.5 * atr:  # small buffer under SMA150
+                return {
+                    'Symbol': symbol,
+                    'Mode': mode_name,
+                    'Action': 'EXIT_FULL',
+                    'Reason': f'Lost SMA150 support (price {price:.2f} < {sma150 - 0.5*atr:.2f})'
+                }
+
+        # 3) Reversal candle near target: partial take profit
+        high = latest['high']
+        low = latest['low']
+        close = latest['close']
+        rng = max(high - low, 1e-6)
+        upper_wick = high - max(close, latest['open'])
+        body_bottom = min(close, latest['open'])
+        body_top = max(close, latest['open'])
+
+        near_target = price >= target_price * 0.97  # within 3% of target
+        strong_reversal = (
+            near_target and
+            upper_wick > 0.5 * atr and            # big upper wick
+            close < body_top - 0.5 * rng          # close in lower half of bar
+        )
+
+        if strong_reversal and unrealized_r >= 1.0:
+            return {
+                'Symbol': symbol,
+                'Mode': mode_name,
+                'Action': 'EXIT_PARTIAL',
+                'Reason': f'Reversal near target (R={unrealized_r:.2f})'
+            }
+
+        # 4) Time + no progress: consider exit or tighten stop
+        lookback = cfg['lookback']
+        recent_low = df['close'].iloc[-lookback:].min()
+        recent_high = df['close'].iloc[-lookback:].max()
+        in_middle_range = recent_low < price < recent_high and (recent_high - recent_low) < 1.5 * atr
+
+        if regime == 'CHOPPY' and in_middle_range and unrealized_r < 0.5:
+            return {
+                'Symbol': symbol,
+                'Mode': mode_name,
+                'Action': 'EXIT_FULL',
+                'Reason': 'Choppy regime, no progress, low R'
+            }
+
+        # 5) Trail stop suggestion: move stop under recent swing low
+        # Use last N bars swing low
+        trail_lookback = 5 if mode_name != 'swing' else 10
+        swing_low = df['low'].iloc[-trail_lookback:].min()
+        proposed_trail_stop = swing_low - 0.5 * atr
+
+        if proposed_trail_stop > stop_price and unrealized_r >= 1.0:
+            return {
+                'Symbol': symbol,
+                'Mode': mode_name,
+                'Action': 'TRAIL',
+                'Reason': f'Raise stop to {proposed_trail_stop:.2f} under swing low',
+            }
+
+        # Default: hold
+        return {
+            'Symbol': symbol,
+            'Mode': mode_name,
+            'Action': 'HOLD',
+            'Reason': f'Above stop and trend; R={unrealized_r:.2f}'
+        }
 
     async def scan_symbol_with_retry(self, symbol, mode, tf, vol, atr, spy_perf, regime="NORMAL", max_retries=3):
-        """Scan with automatic retry on failure"""
         for attempt in range(max_retries):
             try:
                 contract = Stock(symbol, 'SMART', 'USD')
                 await self.ib.qualifyContractsAsync(contract)
-                
-                # Check spread for scalping
+
                 spread_pct = None
                 if mode == 'scalping':
+                    spread_pct = await self.get_bid_ask_spread(contract)
                     if spread_pct is None or spread_pct > MODES['scalping']['max_spread_pct']:
                         msg_spread = "None" if spread_pct is None else f"{spread_pct:.2f}%"
                         logger.debug(f"{symbol}: Spread too wide ({msg_spread})")
                         return None
 
-
-                # Adjust duration based on timeframe
                 if 'day' in tf:
                     duration = '365 D'
                 elif 'min' in tf and '1 min' in tf:
-                    duration = '2 D'  # For 1min bars, get 2 days
+                    duration = '2 D'
                 else:
                     duration = '10 D'
-                
-                bars = await self.ib.reqHistoricalDataAsync(contract, '', duration, tf, 'TRADES', True, 1)
-                
+
+                bars = await self.ib.reqHistoricalDataAsync(
+                    contract, '', duration, tf, 'TRADES', True, 1
+                )
                 if not bars:
                     return None
-                
+
                 df = util.df(bars).set_index('date')
-                
-                # Pass spread info to detection
+
                 return self.detect_breakout(
-                    df, symbol, mode, tf, spy_perf, 
+                    df, symbol, mode, tf, spy_perf,
                     vol_thresh=vol, atr_mult=atr, spread_pct=spread_pct, regime=regime
                 )
-                
+
             except Exception as e:
                 if attempt == max_retries - 1:
                     logger.warning(f"Failed {symbol} after {max_retries} attempts: {e}")
                     return None
                 await asyncio.sleep(1)
-        
         return None
-
+    
 def get_watchlist_from_file(file_path):
     """Load watchlist from file"""
     watchlist = []
@@ -673,8 +676,37 @@ def get_watchlist_from_file(file_path):
     except Exception as e:
         logger.error(f"Failed to load watchlist: {e}")
         return []
+
+def get_positions_from_file(file_path):
+    """
+    Load existing positions from CSV.
+
+    Columns required:
+      symbol, mode, entry, stop, target, timeframe
+    """
+    import csv
+
+    positions = []
+    try:
+        with open(file_path, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    positions.append({
+                        'symbol': row['symbol'].strip(),
+                        'mode': row['mode'].strip(),
+                        'entry': float(row['entry']),
+                        'stop': float(row['stop']),
+                        'target': float(row['target']),
+                        'timeframe': row['timeframe'].strip(),
+                    })
+                except Exception as e:
+                    logger.warning(f"Skip bad row in positions file: {row} ({e})")
+    except Exception as e:
+        logger.error(f"Failed to load positions: {e}")
+    return positions
     
-async def main(file_name, mode, vol, atr, tf, live=False):
+async def main(file_name, mode, vol, atr, tf, live=False, exit_file=None):
     """Main scanner execution"""
     port = 7496 if live else 7497
     logger.info(f"Connecting to IB on port {port} ({'LIVE' if live else 'PAPER'})")
@@ -697,12 +729,81 @@ async def main(file_name, mode, vol, atr, tf, live=False):
         logger.info(f"✓ Connected to {'Live' if live else 'Paper'} account. Using Market Data Type: 3")
         # ---------------------------
         
+        scanner = BreakoutScanner(ib)
+        if exit_file:
+            # Exit evaluation mode
+            positions = get_positions_from_file(exit_file)
+            logger.info(f"Loaded {len(positions)} positions from {exit_file}")
+
+            # Market regime for exit context (reuse SPY metrics for non-scalping)
+            if positions:
+                sample_mode = positions[0]['mode']
+                if sample_mode != 'scalping':
+                    spy_perf, spy_vol = await scanner.get_spy_performance(tf, MODES[sample_mode]['lookback'])
+                    if abs(spy_perf) < 0.01 and spy_vol < 1.0:
+                        regime = "CHOPPY"
+                    elif abs(spy_perf) > 0.05 and spy_vol > 2.0:
+                        regime = "EXPANSION"
+                    else:
+                        regime = "NORMAL"
+                else:
+                    regime = "INTRADAY"
+            else:
+                regime = "NORMAL"
+
+            exit_results = []
+
+            for pos in positions:
+                sym = pos['symbol']
+                pos_mode = pos['mode']
+                entry = pos['entry']
+                stop = pos['stop']
+                target = pos['target']
+                pos_tf = pos['timeframe']
+
+                contract = Stock(sym, 'SMART', 'USD')
+                await ib.qualifyContractsAsync(contract)
+
+                # Choose duration based on timeframe
+                if 'day' in pos_tf:
+                    duration = '365 D'
+                elif 'min' in pos_tf and '1 min' in pos_tf:
+                    duration = '2 D'
+                else:
+                    duration = '10 D'
+
+                bars = await ib.reqHistoricalDataAsync(
+                    contract, '', duration, pos_tf, 'TRADES', True, 1
+                )
+                if not bars:
+                    logger.warning(f"No data for {sym} in exit check")
+                    continue
+
+                df_pos = util.df(bars).set_index('date')
+
+                decision = scanner.evaluate_exit(
+                    df=df_pos,
+                    symbol=sym,
+                    mode_name=pos_mode,
+                    entry_price=entry,
+                    stop_price=stop,
+                    target_price=target,
+                    timeframe=pos_tf,
+                    regime=regime,
+                )
+                exit_results.append(decision)
+                print(exit_results)
+
+            if exit_results:
+                df_exit = pd.DataFrame(exit_results)
+                print(df_exit.to_string(index=False))
+            else:
+                logger.info("No exit decisions generated.")
+            return
         watchlist = get_watchlist_from_file(file_name)
         logger.info(f"Loaded {len(watchlist)} symbols from {file_name}")
         
-        scanner = BreakoutScanner(ib)
-
-        # Get market context (skip for scalping - too slow)
+       # Get market context (skip for scalping - too slow)
         if mode != 'scalping':
             spy_perf, spy_vol = await scanner.get_spy_performance(tf, MODES[mode]['lookback'])
 
@@ -783,7 +884,8 @@ if __name__ == "__main__":
     parser.add_argument('--atr', type=float, help='ATR multiplier override')
     parser.add_argument('--tf', type=str, help='Timeframe override')
     parser.add_argument('--live', action='store_true', help='Use live account (default: paper)')
-    
+    parser.add_argument('--exit-file', type=str, help='Path to positions CSV for exit evaluation')
+   
     args = parser.parse_args()
     
     # Default timeframes per mode if not specified
@@ -799,6 +901,9 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(main(args.file, args.mode, args.vol, args.atr, timeframe, args.live))
+        loop.run_until_complete(
+            main(args.file, args.mode, args.vol, args.atr, timeframe, args.live, args.exit_file)
+        )
+
     finally:
         loop.close()
