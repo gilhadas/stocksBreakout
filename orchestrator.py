@@ -5,11 +5,13 @@ Coordinates market data, detection, and exit evaluation
 
 import asyncio
 import logging
+import os
 from typing import List, Dict, Optional
 from datetime import datetime
+from pathlib import Path
 import pandas as pd
 
-from config import MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY
+from config import MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
@@ -25,6 +27,15 @@ class ScannerOrchestrator:
         self.market_data = MarketDataHandler(ib_connection)
         self.detector = BreakoutDetector()
         self.exit_evaluator = ExitEvaluator()
+        self._ensure_output_dir()
+    
+    def _ensure_output_dir(self):
+        """Create output directory if it doesn't exist"""
+        Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+        
+        # Create subdirectories
+        for subdir in ['signals', 'exits', 'rejections', 'logs']:
+            Path(OUTPUT_DIR, subdir).mkdir(exist_ok=True)
     
     async def scan_watchlist(self, watchlist: List[str], mode: str, 
                             timeframe: str, vol_thresh: Optional[float] = None,
@@ -167,7 +178,7 @@ class ScannerOrchestrator:
     def save_results(self, results: List[Dict], mode: str, 
                     result_type: str = 'signals') -> str:
         """
-        Save results to CSV file
+        Save results to CSV file in appropriate subdirectory
         
         Args:
             results: List of result dictionaries
@@ -175,7 +186,7 @@ class ScannerOrchestrator:
             result_type: 'signals', 'exits', or 'rejections'
         
         Returns:
-            Output filename
+            Output filename (full path)
         """
         if not results:
             return ""
@@ -183,8 +194,12 @@ class ScannerOrchestrator:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"{result_type}_{mode}_{timestamp}.csv"
         
-        df = pd.DataFrame(results)
-        df.to_csv(filename, index=False)
+        # Save to appropriate subdirectory
+        subdir = result_type if result_type in ['signals', 'exits', 'rejections'] else 'signals'
+        filepath = os.path.join(OUTPUT_DIR, subdir, filename)
         
-        logger.info(f"✓ Saved {len(results)} {result_type} to: {filename}")
-        return filename
+        df = pd.DataFrame(results)
+        df.to_csv(filepath, index=False)
+        
+        logger.info(f"✓ Saved {len(results)} {result_type} to: {filepath}")
+        return filepath

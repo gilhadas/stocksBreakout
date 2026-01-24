@@ -105,12 +105,18 @@ def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
 
 def setup_logging(log_file: str = None):
     """
-    Setup logging configuration
+    Setup logging configuration with output to nested folder
     """
     from datetime import datetime
+    from pathlib import Path
+    from config import OUTPUT_DIR
+    
+    # Ensure logs directory exists
+    log_dir = Path(OUTPUT_DIR, 'logs')
+    log_dir.mkdir(parents=True, exist_ok=True)
     
     if log_file is None:
-        log_file = f'scanner_{datetime.now():%Y%m%d}.log'
+        log_file = log_dir / f'scanner_{datetime.now():%Y%m%d}.log'
     
     logging.basicConfig(
         level=logging.INFO,

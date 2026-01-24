@@ -6,7 +6,7 @@ Professional-grade breakout scanner supporting swing trading, day trading, and s
 
 ```
 breakout_scanner/
-├── breakout_scanner.py    # Main entry point
+├── main.py                 # Main entry point
 ├── config.py              # Configuration and mode settings
 ├── orchestrator.py        # Scanner orchestration
 ├── scanner.py             # Breakout detection logic
@@ -30,16 +30,16 @@ pip install ib_insync pandas numpy
 
 ```bash
 # Swing trading scan
-python breakout_scanner.py watchlist.txt --mode swing
+python main.py watchlist.txt --mode swing
 
 # Day trading scan
-python breakout_scanner.py watchlist.txt --mode daytrade
+python main.py watchlist.txt --mode daytrade
 
 # Scalping (1min bars)
-python breakout_scanner.py watchlist.txt --mode scalping
+python main.py watchlist.txt --mode scalping
 
 # Exit evaluation
-python breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv
+python main.py watchlist.txt --mode swing --exit-file positions.csv
 ```
 
 ## 📋 File Formats
@@ -66,6 +66,15 @@ TSLA,scalping,245.10,244.85,245.45,1 min
 ```
 
 ## 🎯 Trading Modes
+
+### Long-Term Position Trading ⭐ NEW
+- **Timeframe**: 1 week
+- **Holding period**: Weeks to months
+- **Trend filter**: 200 SMA
+- **R:R minimum**: 2.5
+- **Stop loss**: 3.0 ATR
+- **Target**: 6.0 ATR
+- **Best for**: Position traders, retirement accounts
 
 ### Swing Trading
 - **Timeframe**: 1 day
@@ -140,18 +149,110 @@ Priority-ordered exit signals:
 ## 🛠️ Advanced Options
 
 ```bash
+# Long-term position trading (weekly bars)
+python main.py watchlist.txt --mode longterm
+
+# Combined scan + exit evaluation
+python main.py watchlist.txt --mode swing --exit-file positions.csv --both
+
+# Cron mode (silent, notifications only)
+python main.py watchlist.txt --mode swing --cron --notify
+
 # Custom volume threshold
-python breakout_scanner.py watchlist.txt --mode swing --vol 1.5
+python main.py watchlist.txt --mode swing --vol 1.5
 
 # Custom ATR multiplier
-python breakout_scanner.py watchlist.txt --mode daytrade --atr 0.3
+python main.py watchlist.txt --mode daytrade --atr 0.3
 
 # Custom timeframe
-python breakout_scanner.py watchlist.txt --mode swing --tf "4 hour"
+python main.py watchlist.txt --mode swing --tf "4 hour"
 
 # Live trading (requires real-time data subscription)
-python breakout_scanner.py watchlist.txt --mode swing --live
+python main.py watchlist.txt --mode swing --live
 ```
+
+## 🔔 Notifications ⭐ NEW
+
+Configure notifications in `config.py`:
+
+### Email Notifications
+```python
+NOTIFICATIONS = {
+    'email': {
+        'enabled': True,
+        'smtp_server': 'smtp.gmail.com',
+        'smtp_port': 587,
+        'sender_email': 'your_email@gmail.com',
+        'sender_password': 'your_app_password',  # Use Gmail App Password
+        'recipient_email': 'alerts@yourdomain.com',
+    }
+}
+```
+
+### Telegram Notifications
+1. Create a bot with [@BotFather](https://t.me/botfather)
+2. Get your chat ID from [@userinfobot](https://t.me/userinfobot)
+3. Configure:
+```python
+'telegram': {
+    'enabled': True,
+    'bot_token': 'YOUR_BOT_TOKEN',
+    'chat_id': 'YOUR_CHAT_ID',
+}
+```
+
+### Discord Notifications
+1. Create a webhook in your Discord server
+2. Configure:
+```python
+'discord': {
+    'enabled': True,
+    'webhook_url': 'YOUR_WEBHOOK_URL',
+}
+```
+
+Enable notifications with `--notify` flag:
+```bash
+python main.py watchlist.txt --mode swing --notify
+```
+
+## ⏰ Automated Scanning (Cron) ⭐ NEW
+
+Set up automated scans using cron:
+
+```bash
+# Run the setup script
+chmod +x setup_cron.sh
+./setup_cron.sh
+```
+
+This creates example cron jobs. Edit and add to your crontab:
+
+```bash
+crontab -e
+```
+
+### Example Cron Jobs
+
+```bash
+# Long-term: Weekly scan every Monday at 9:00 AM
+0 9 * * 1 cd /path/to/scanner && python3 main.py watchlist.txt --mode longterm --cron --notify
+
+# Swing: Daily scan at 9:35 AM (after market open)
+35 9 * * 1-5 cd /path/to/scanner && python3 main.py watchlist.txt --mode swing --cron --notify
+
+# Swing: Exit check at 3:45 PM (before close)
+45 15 * * 1-5 cd /path/to/scanner && python3 main.py watchlist.txt --mode swing --exit-file positions.csv --cron --notify
+
+# Day trade: Combined scan + exit at market close
+30 16 * * 1-5 cd /path/to/scanner && python3 main.py watchlist.txt --mode daytrade --exit-file positions.csv --both --cron --notify
+```
+
+### Cron Mode Features
+- Minimal console output (errors only)
+- Full logging to `scanner_output/logs/`
+- Automatic notifications on signals/exits
+- Exit code 0 on success for monitoring
 
 ## ⚙️ Configuration
 
@@ -162,14 +263,26 @@ Edit `config.py` to customize:
 - IB connection settings
 - Data request settings
 
-## 📈 Output Files
+## 📈 Output Files ⭐ UPDATED
 
-Scanner generates timestamped CSV files:
+Scanner generates timestamped files in organized subdirectories:
 
-- `signals_{mode}_{timestamp}.csv` - Detected breakout signals
-- `rejections_{mode}_{timestamp}.csv` - Near-miss signals for analysis
-- `exits_{mode}_{timestamp}.csv` - Exit decisions for positions
-- `scanner_{YYYYMMDD}.log` - Detailed log file
+```
+scanner_output/
+├── signals/
+│   └── signals_swing_20260124_093500.csv
+├── exits/
+│   └── exits_swing_20260124_154500.csv
+├── rejections/
+│   └── rejections_swing_20260124_093500.csv
+└── logs/
+    └── scanner_20260124.log
+```
+
+- **signals/** - Detected breakout signals
+- **exits/** - Exit decisions for positions
+- **rejections/** - Near-miss signals for analysis
+- **logs/** - Detailed execution logs
 
 ## ⚠️ Important Notes
 
@@ -216,7 +329,7 @@ Scanner generates timestamped CSV files:
 
 ## 📚 Module Documentation
 
-### `breakout_scanner.py`
+### `main.py`
 Entry point. Handles CLI arguments and orchestrates scan/exit workflows.
 
 ### `config.py`

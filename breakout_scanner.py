@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Breakout Scanner - Main Entry Point
-Supports swing trading, day trading, and scalping modes
+Supports long-term, swing, day trading, and scalping modes
 """
 
 import asyncio
@@ -18,6 +18,7 @@ from utils import (
     setup_logging
 )
 from orchestrator import ScannerOrchestrator
+from notifier import Notifier
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +46,13 @@ async def connect_to_ib(live: bool = False) -> IB:
         sys.exit(1)
 
 
-async def run_scan_mode(orchestrator: ScannerOrchestrator, args):
+async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notifier):
     """Execute scan mode"""
     # Load watchlist
     watchlist = get_watchlist_from_file(args.file)
     if not watchlist:
         logger.error("No symbols loaded from watchlist")
-        return
+        return []
     
     logger.info(f"Loaded {len(watchlist)} symbols from {args.file}")
     
@@ -75,7 +76,15 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args):
         df = pd.DataFrame(results).sort_values(by='Vol', ascending=False)
         print(df.to_string(index=False))
         
-        orchestrator.save_results(results, args.mode, 'signals')
+        output_file = orchestrator.save_results(results, args.mode, 'signals')
+        
+        # Send notifications
+        mode_desc = MODES[args.mode]['description']
+        notifier.send_all(
+            subject=f"🚨 {args.mode.upper()} Breakout Signals",
+            message=f"{len(results)} {mode_desc} breakout signals detected",
+            signals=results
+        )
         
         # Scalping warnings
         if args.mode == 'scalping':
@@ -91,16 +100,18 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args):
     rejections = orchestrator.get_rejection_reasons()
     if rejections:
         orchestrator.save_results(rejections, args.mode, 'rejections')
-        logger.info("   (Showing only signals close to passing)")
+        logger.info("   (Saved near-miss signals for analysis)")
+    
+    return results
 
 
-async def run_exit_mode(orchestrator: ScannerOrchestrator, args):
+async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notifier):
     """Execute exit evaluation mode"""
     # Load positions
     positions = get_positions_from_file(args.exit_file)
     if not positions:
         logger.error("No positions loaded")
-        return
+        return []
     
     logger.info(f"Loaded {len(positions)} positions from {args.exit_file}")
     
@@ -134,8 +145,39 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args):
         print(df.to_string(index=False))
         
         orchestrator.save_results(exit_results, args.mode, 'exits')
+        
+        # Send exit notifications
+        notifier.send_exit_notification(exit_results)
     else:
         logger.info("No exit decisions generated")
+    
+    return exit_results
+
+
+async def run_combined_mode(orchestrator: ScannerOrchestrator, args, notifier: Notifier):
+    """Run both scan and exit in same execution"""
+    logger.info("="*70)
+    logger.info(" COMBINED MODE: BREAKOUT SCAN + EXIT EVALUATION")
+    logger.info("="*70)
+    
+    # Run breakout scan
+    logger.info("\n[1/2] Running breakout scan...")
+    scan_results = await run_scan_mode(orchestrator, args, notifier)
+    
+    # Run exit evaluation
+    logger.info("\n[2/2] Running exit evaluation...")
+    exit_results = await run_exit_mode(orchestrator, args, notifier)
+    
+    # Summary
+    logger.info(f"\n{'='*70}")
+    logger.info(" COMBINED SCAN SUMMARY")
+    logger.info(f"{'='*70}")
+    logger.info(f"New signals found: {len(scan_results)}")
+    logger.info(f"Positions evaluated: {len(exit_results)}")
+    
+    actionable_exits = [r for r in exit_results if r['Action'] != 'HOLD']
+    if actionable_exits:
+        logger.info(f"⚠️  {len(actionable_exits)} positions need attention!")
 
 
 async def main():
@@ -145,6 +187,9 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Long-term position trading (weekly bars)
+  python main.py watchlist.txt --mode longterm
+  
   # Swing trading scan
   python main.py watchlist.txt --mode swing
   
@@ -154,8 +199,14 @@ Examples:
   # Scalping (1min bars)
   python main.py watchlist.txt --mode scalping
   
-  # Exit evaluation
+  # Exit evaluation only
   python main.py watchlist.txt --mode swing --exit-file positions.csv
+  
+  # Combined: scan + exit evaluation
+  python main.py watchlist.txt --mode swing --exit-file positions.csv --both
+  
+  # Cron mode (silent, notifications only)
+  python main.py watchlist.txt --mode swing --cron
   
   # Live trading (CAREFUL!)
   python main.py watchlist.txt --mode swing --live
@@ -165,7 +216,7 @@ Examples:
     parser.add_argument('file', help='Path to watchlist file')
     parser.add_argument(
         '--mode',
-        choices=['swing', 'daytrade', 'scalping'],
+        choices=['longterm', 'swing', 'daytrade', 'scalping'],
         default='swing',
         help='Trading mode'
     )
@@ -182,11 +233,48 @@ Examples:
         type=str,
         help='CSV with positions for exit evaluation'
     )
+    parser.add_argument(
+        '--both',
+        action='store_true',
+        help='Run both breakout scan and exit evaluation'
+    )
+    parser.add_argument(
+        '--cron',
+        action='store_true',
+        help='Cron mode: minimal output, send notifications only'
+    )
+    parser.add_argument(
+        '--notify',
+        action='store_true',
+        help='Enable notifications (requires config.py setup)'
+    )
     
     args = parser.parse_args()
     
     # Setup logging
-    setup_logging()
+    if args.cron:
+        # Cron mode: only errors to console, everything to log file
+        import logging
+        from pathlib import Path
+        from config import OUTPUT_DIR
+        from datetime import datetime
+        
+        log_dir = Path(OUTPUT_DIR, 'logs')
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f'scanner_{datetime.now():%Y%m%d}.log'
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s | %(levelname)s | %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler(sys.stderr)  # Only errors to console
+            ]
+        )
+        logging.getLogger().handlers[1].setLevel(logging.ERROR)
+        logging.getLogger('ib_insync').setLevel(logging.WARNING)
+    else:
+        setup_logging()
     
     # Get timeframe
     if args.tf:
@@ -197,14 +285,24 @@ Examples:
     # Scalping warnings
     if args.mode == 'scalping' and args.live:
         logger.warning("⚠️  SCALPING ON LIVE ACCOUNT!")
-        response = input("Type 'YES' to continue: ")
-        if response != 'YES':
-            logger.info("Aborted by user")
-            return
+        if not args.cron:
+            response = input("Type 'YES' to continue: ")
+            if response != 'YES':
+                logger.info("Aborted by user")
+                return
     
-    if args.mode == 'scalping' and not args.live:
+    if args.mode == 'scalping' and not args.live and not args.cron:
         logger.warning("⚠️  PAPER MODE = DELAYED DATA (15min lag)")
         logger.warning("    Not suitable for live scalping!")
+    
+    # Initialize notifier
+    notifier = Notifier() if args.notify or args.cron else None
+    if not notifier:
+        # Create dummy notifier that does nothing
+        class DummyNotifier:
+            def send_all(self, *args, **kwargs): pass
+            def send_exit_notification(self, *args, **kwargs): pass
+        notifier = DummyNotifier()
     
     # Connect to IB
     ib = await connect_to_ib(args.live)
@@ -213,14 +311,24 @@ Examples:
         # Create orchestrator
         orchestrator = ScannerOrchestrator(ib)
         
-        # Run appropriate mode
-        if args.exit_file:
-            await run_exit_mode(orchestrator, args)
+        # Determine execution mode
+        if args.both and args.exit_file:
+            # Combined mode
+            await run_combined_mode(orchestrator, args, notifier)
+        elif args.exit_file:
+            # Exit evaluation only
+            await run_exit_mode(orchestrator, args, notifier)
         else:
-            await run_scan_mode(orchestrator, args)
+            # Breakout scan only
+            await run_scan_mode(orchestrator, args, notifier)
     
     except Exception as e:
         logger.error(f"Scanner error: {e}", exc_info=True)
+        if args.notify or args.cron:
+            notifier.send_all(
+                subject="❌ Scanner Error",
+                message=f"Scanner encountered an error: {str(e)}"
+            )
     
     finally:
         ib.disconnect()

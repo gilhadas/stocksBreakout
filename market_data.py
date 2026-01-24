@@ -32,7 +32,9 @@ class MarketDataHandler:
             await self.ib.qualifyContractsAsync(contract)
             
             # Determine duration based on timeframe
-            if 'day' in timeframe:
+            if 'week' in timeframe:
+                duration = DATA_DURATION['weekly']
+            elif 'day' in timeframe:
                 duration = DATA_DURATION['daily']
             elif 'min' in timeframe and '1 min' in timeframe:
                 duration = DATA_DURATION['scalping']

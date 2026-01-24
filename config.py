@@ -5,6 +5,21 @@ Contains all mode settings and regime configurations
 
 # --- Mode Configurations ---
 MODES = {
+    'longterm': {
+        'lookback': 50,
+        'vol_thresh': 1.2,
+        'atr_mult': 0.8,
+        'trend_type': 'SMA',
+        'trend_period': 200,
+        'sl_mult': 3.0,
+        'tp_mult': 6.0,
+        'min_consolidation_bars': 5,
+        'min_rr': 2.5,
+        'max_wick_atr': 0.4,
+        'max_body_top_pct': 0.25,
+        'default_timeframe': '1 week',
+        'description': 'Position trading - weeks to months'
+    },
     'swing': {
         'lookback': 20,
         'vol_thresh': 1.3,
@@ -17,7 +32,8 @@ MODES = {
         'min_rr': 2.0,
         'max_wick_atr': 0.5,
         'max_body_top_pct': 0.3,
-        'default_timeframe': '1 day'
+        'default_timeframe': '1 day',
+        'description': 'Swing trading - days to weeks'
     },
     'daytrade': {
         'lookback': 10,
@@ -31,7 +47,8 @@ MODES = {
         'min_rr': 1.5,
         'max_wick_atr': 0.75,
         'max_body_top_pct': 0.4,
-        'default_timeframe': '15 mins'
+        'default_timeframe': '15 mins',
+        'description': 'Day trading - intraday only'
     },
     'scalping': {
         'lookback': 5,
@@ -48,7 +65,8 @@ MODES = {
         'max_price': 500.0,
         'max_wick_atr': 1.0,
         'max_body_top_pct': 0.5,
-        'default_timeframe': '1 min'
+        'default_timeframe': '1 min',
+        'description': 'Scalping - seconds to minutes'
     }
 }
 
@@ -91,6 +109,31 @@ IB_CLIENT_ID = 1
 # --- Data Request Settings ---
 DATA_DURATION = {
     'daily': '365 D',
+    'weekly': '730 D',  # 2 years for weekly
     'intraday': '10 D',
     'scalping': '2 D'
+}
+
+# --- Output Settings ---
+OUTPUT_DIR = 'scanner_output'  # Directory for all output files
+
+# --- Notification Settings ---
+NOTIFICATIONS = {
+    'email': {
+        'enabled': False,
+        'smtp_server': 'smtp.gmail.com',
+        'smtp_port': 587,
+        'sender_email': '',  # Set your email
+        'sender_password': '',  # Use app password
+        'recipient_email': '',  # Where to send alerts
+    },
+    'telegram': {
+        'enabled': False,
+        'bot_token': '',  # Get from @BotFather
+        'chat_id': '',  # Your chat ID
+    },
+    'discord': {
+        'enabled': False,
+        'webhook_url': '',  # Discord webhook URL
+    }
 }
