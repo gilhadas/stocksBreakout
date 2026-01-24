@@ -17,7 +17,7 @@ MODES = {
         'min_rr': 2.5,
         'max_wick_atr': 0.4,
         'max_body_top_pct': 0.25,
-        'default_timeframe': '1 week',
+        'default_timeframe': '1 day',  # Use daily, not weekly (IB uses '1W' not '1 week')
         'description': 'Position trading - weeks to months'
     },
     'swing': {
@@ -135,5 +135,11 @@ NOTIFICATIONS = {
     'discord': {
         'enabled': False,
         'webhook_url': '',  # Discord webhook URL
+    },
+    'webhook': {
+        'enabled': False,
+        'url': '',  # Your webhook endpoint (e.g., http://localhost:5000/webhook)
+        'auth_token': '',  # Optional: Bearer token for authentication
+        'default_quantity': 100,  # Default order size for automated trading
     }
 }

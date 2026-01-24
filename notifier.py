@@ -1,5 +1,5 @@
 """
-Notification module - supports Email, Telegram, and Discord
+Notification module - supports Email, Telegram, Discord, Mac Native, and Webhooks
 """
 
 import logging
@@ -8,6 +8,10 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict, Optional
 import requests
+import platform
+import subprocess
+import json
+import pandas as pd
 
 from config import NOTIFICATIONS
 
@@ -21,10 +25,15 @@ class Notifier:
         self.email_enabled = NOTIFICATIONS['email']['enabled']
         self.telegram_enabled = NOTIFICATIONS['telegram']['enabled']
         self.discord_enabled = NOTIFICATIONS['discord']['enabled']
+        self.webhook_enabled = NOTIFICATIONS.get('webhook', {}).get('enabled', False)
+        
+        # Mac native notifications (auto-detect)
+        self.mac_native_enabled = platform.system() == 'Darwin'
     
     def send_all(self, subject: str, message: str, signals: Optional[List[Dict]] = None):
         """Send notification via all enabled channels"""
-        if not any([self.email_enabled, self.telegram_enabled, self.discord_enabled]):
+        if not any([self.email_enabled, self.telegram_enabled, self.discord_enabled, 
+                   self.mac_native_enabled, self.webhook_enabled]):
             return
         
         results = []
@@ -37,6 +46,12 @@ class Notifier:
         
         if self.discord_enabled:
             results.append(('Discord', self.send_discord(subject, message, signals)))
+        
+        if self.mac_native_enabled:
+            results.append(('Mac Native', self.send_mac_notification(subject, message, signals)))
+        
+        if self.webhook_enabled:
+            results.append(('Webhook', self.send_webhook(signals)))
         
         # Log results
         for channel, success in results:
@@ -160,7 +175,140 @@ class Notifier:
             logger.error(f"Discord notification failed: {e}")
             return False
     
+    def send_mac_notification(self, subject: str, message: str, 
+                             signals: Optional[List[Dict]] = None) -> bool:
+        """
+        Send Mac native notification
+        Uses osascript to trigger Notification Center
+        """
+        try:
+            # Build notification text
+            if signals:
+                body = f"{message}\n\nFound {len(signals)} signals"
+                if signals:
+                    top_signal = signals[0]
+                    body += f"\nTop: {top_signal['Symbol']} @ ${top_signal['Price']}"
+            else:
+                body = message
+            
+            # Escape quotes for AppleScript
+            subject_escaped = subject.replace('"', '\\"')
+            body_escaped = body.replace('"', '\\"').replace('\n', ' ')
+            
+            # AppleScript command
+            script = f'''
+            display notification "{body_escaped}" with title "{subject_escaped}" sound name "Glass"
+            '''
+            
+            # Execute
+            subprocess.run(
+                ['osascript', '-e', script],
+                capture_output=True,
+                timeout=5
+            )
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Mac notification failed: {e}")
+            return False
+    
+    def send_webhook(self, signals: Optional[List[Dict]] = None) -> bool:
+        """
+        Send webhook for automated trading integration
+        Sends JSON payload to configured endpoint
+        """
+        try:
+            config = NOTIFICATIONS.get('webhook', {})
+            
+            if not config.get('url'):
+                return False
+            
+            # Build payload
+            payload = {
+                'timestamp': pd.Timestamp.now().isoformat(),
+                'source': 'breakout_scanner',
+                'signals': []
+            }
+            
+            if signals:
+                for sig in signals:
+                    # Convert to trading-friendly format
+                    signal_data = {
+                        'symbol': sig['Symbol'],
+                        'action': 'BUY',  # Breakout = long entry
+                        'price': sig['Price'],
+                        'stop_loss': sig['Stop'],
+                        'take_profit': sig['Target'],
+                        'quantity': config.get('default_quantity', 100),
+                        'mode': sig['Mode'],
+                        'quality': sig['Quality'],
+                        'volume_ratio': sig['Vol'],
+                        'risk_reward': sig['R:R']
+                    }
+                    
+                    # Add Level 2 data if available
+                    if 'Level2_Quality' in sig:
+                        signal_data['level2_quality'] = sig['Level2_Quality']
+                        signal_data['level2_imbalance'] = sig.get('Level2_Imbalance', 0)
+                    
+                    payload['signals'].append(signal_data)
+            
+            # Send webhook
+            headers = {
+                'Content-Type': 'application/json'
+            }
+            
+            # Add authentication if configured
+            if config.get('auth_token'):
+                headers['Authorization'] = f"Bearer {config['auth_token']}"
+            
+            response = requests.post(
+                config['url'],
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            
+            if response.status_code in [200, 201, 202]:
+                logger.info(f"Webhook sent successfully: {len(payload['signals'])} signals")
+                return True
+            else:
+                logger.warning(f"Webhook returned status {response.status_code}")
+                return False
+        
+        except Exception as e:
+            logger.error(f"Webhook notification failed: {e}")
+            return False
+    
     def send_exit_notification(self, exit_results: List[Dict]):
+        """Send notification for exit decisions"""
+        if not exit_results:
+            return
+        
+        # Filter for actionable exits
+        actionable = [r for r in exit_results if r['Action'] != 'HOLD']
+        
+        if not actionable:
+            return
+        
+        subject = f"⚠️ Exit Alerts: {len(actionable)} positions need attention"
+        message = f"Exit evaluation completed. {len(actionable)} positions require action:"
+        
+        # Format for notification
+        formatted = []
+        for r in actionable:
+            formatted.append({
+                'Symbol': r['Symbol'],
+                'Quality': r['Action'],
+                'Price': r['Price'],
+                'Stop': 0,
+                'Target': 0,
+                'R:R': r['UnrealizedR'],
+                'Vol': 0
+            })
+        
+        self.send_all(subject, message, formatted)
         """Send notification for exit decisions"""
         if not exit_results:
             return

@@ -26,23 +26,30 @@ class MarketDataHandler:
                                   currency: str = 'USD') -> Optional[pd.DataFrame]:
         """
         Fetch historical data for a symbol
+        
+        Note: IB bar sizes: 1 secs, 5 secs, 10 secs, 15 secs, 30 secs,
+              1 min, 2 mins, 3 mins, 5 mins, 10 mins, 15 mins, 20 mins, 30 mins,
+              1 hour, 2 hours, 3 hours, 4 hours, 8 hours, 1 day, 1W, 1M
         """
         try:
             contract = Stock(symbol, exchange, currency)
             await self.ib.qualifyContractsAsync(contract)
             
+            # Normalize timeframe to IB format
+            ib_timeframe = self._normalize_timeframe(timeframe)
+            
             # Determine duration based on timeframe
-            if 'week' in timeframe:
+            if 'W' in ib_timeframe or 'M' in ib_timeframe or 'week' in timeframe.lower():
                 duration = DATA_DURATION['weekly']
-            elif 'day' in timeframe:
+            elif 'day' in ib_timeframe or 'day' in timeframe.lower():
                 duration = DATA_DURATION['daily']
-            elif 'min' in timeframe and '1 min' in timeframe:
+            elif '1 min' in ib_timeframe:
                 duration = DATA_DURATION['scalping']
             else:
                 duration = DATA_DURATION['intraday']
             
             bars = await self.ib.reqHistoricalDataAsync(
-                contract, '', duration, timeframe, 'TRADES', True, 1
+                contract, '', duration, ib_timeframe, 'TRADES', True, 1
             )
             
             if not bars:
@@ -54,6 +61,33 @@ class MarketDataHandler:
         except Exception as e:
             logger.debug(f"Failed to fetch data for {symbol}: {e}")
             return None
+    
+    def _normalize_timeframe(self, timeframe: str) -> str:
+        """
+        Normalize timeframe to IB format
+        
+        Converts user-friendly formats to IB API format
+        """
+        # Already in IB format
+        if any(x in timeframe for x in ['secs', 'mins', 'hour', 'day', '1W', '1M']):
+            return timeframe
+        
+        # Convert common formats
+        tf_map = {
+            '1 week': '1W',
+            '1 month': '1M',
+            'weekly': '1W',
+            'monthly': '1M',
+            'daily': '1 day',
+            '1 minute': '1 min',
+            '5 minutes': '5 mins',
+            '15 minutes': '15 mins',
+            '30 minutes': '30 mins',
+            '1 hour': '1 hour',
+            '4 hours': '4 hours',
+        }
+        
+        return tf_map.get(timeframe.lower(), timeframe)
     
     async def get_bid_ask_spread(self, symbol: str, 
                                  exchange: str = 'SMART', 

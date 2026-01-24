@@ -248,6 +248,11 @@ Examples:
         action='store_true',
         help='Enable notifications (requires config.py setup)'
     )
+    parser.add_argument(
+        '--level2',
+        action='store_true',
+        help='Enable Level 2 (Market Depth) analysis'
+    )
     
     args = parser.parse_args()
     

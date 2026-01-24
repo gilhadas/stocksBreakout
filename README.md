@@ -6,16 +6,24 @@ Professional-grade breakout scanner supporting swing trading, day trading, and s
 
 ```
 breakout_scanner/
-├── main.py                 # Main entry point
+├── breakout_scanner.py    # Main entry point (renamed from main.py)
 ├── config.py              # Configuration and mode settings
 ├── orchestrator.py        # Scanner orchestration
 ├── scanner.py             # Breakout detection logic
 ├── exit_evaluator.py      # Exit condition evaluation
 ├── market_data.py         # IB data fetching
 ├── indicators.py          # Technical indicators
+├── level2_analyzer.py     # ⭐ Level 2 market depth analysis
+├── algo_trader.py         # ⭐ Algorithmic order execution
+├── notifier.py            # Multi-channel notifications
 ├── utils.py               # Utility functions
+├── webhook_server.py      # ⭐ Example webhook for auto-trading
+├── setup_cron.sh          # Cron setup helper
+├── monitor_cron.sh        # Cron job monitor
 ├── watchlist.txt          # Your watchlist
-└── positions.csv          # Your open positions (for exit eval)
+├── positions.csv          # Your open positions (for exit eval)
+├── WEBHOOK_GUIDE.md       # Webhook integration guide
+└── ALGO_TRADING_GUIDE.md  # ⭐ Algorithmic trading guide
 ```
 
 ## 🚀 Quick Start
@@ -30,16 +38,19 @@ pip install ib_insync pandas numpy
 
 ```bash
 # Swing trading scan
-python main.py watchlist.txt --mode swing
+python breakout_scanner.py watchlist.txt --mode swing
 
 # Day trading scan
-python main.py watchlist.txt --mode daytrade
+python breakout_scanner.py watchlist.txt --mode daytrade
 
 # Scalping (1min bars)
-python main.py watchlist.txt --mode scalping
+python breakout_scanner.py watchlist.txt --mode scalping
+
+# With Level 2 market depth analysis
+python breakout_scanner.py watchlist.txt --mode swing --level2
 
 # Exit evaluation
-python main.py watchlist.txt --mode swing --exit-file positions.csv
+python breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv
 ```
 
 ## 📋 File Formats
@@ -150,25 +161,31 @@ Priority-ordered exit signals:
 
 ```bash
 # Long-term position trading (weekly bars)
-python main.py watchlist.txt --mode longterm
+python breakout_scanner.py watchlist.txt --mode longterm
 
 # Combined scan + exit evaluation
-python main.py watchlist.txt --mode swing --exit-file positions.csv --both
+python breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv --both
+
+# With Level 2 market depth analysis
+python breakout_scanner.py watchlist.txt --mode swing --level2
 
 # Cron mode (silent, notifications only)
-python main.py watchlist.txt --mode swing --cron --notify
+python breakout_scanner.py watchlist.txt --mode swing --cron --notify
 
 # Custom volume threshold
-python main.py watchlist.txt --mode swing --vol 1.5
+python breakout_scanner.py watchlist.txt --mode swing --vol 1.5
 
 # Custom ATR multiplier
-python main.py watchlist.txt --mode daytrade --atr 0.3
+python breakout_scanner.py watchlist.txt --mode daytrade --atr 0.3
 
 # Custom timeframe
-python main.py watchlist.txt --mode swing --tf "4 hour"
+python breakout_scanner.py watchlist.txt --mode swing --tf "4 hour"
 
 # Live trading (requires real-time data subscription)
-python main.py watchlist.txt --mode swing --live
+python breakout_scanner.py watchlist.txt --mode swing --live
+
+# Full-featured example
+python breakout_scanner.py watchlist.txt --mode swing --level2 --notify --exit-file positions.csv --both
 ```
 
 ## 🔔 Notifications ⭐ NEW
@@ -213,8 +230,53 @@ NOTIFICATIONS = {
 
 Enable notifications with `--notify` flag:
 ```bash
-python main.py watchlist.txt --mode swing --notify
+python breakout_scanner.py watchlist.txt --mode swing --notify
 ```
+
+### Mac Native Notifications ⭐ NEW
+Automatically enabled on macOS - no configuration needed!
+- Shows alerts in Notification Center
+- Includes sound notification
+- Works in background
+
+### Webhook for Automated Trading ⭐ NEW
+Send signals to your own server for automated execution:
+
+```python
+'webhook': {
+    'enabled': True,
+    'url': 'http://localhost:5000/webhook',
+    'auth_token': 'your_secret_token',
+    'default_quantity': 100,
+}
+```
+
+**Example webhook server provided:** `webhook_server.py`
+
+```bash
+# Run the example webhook server
+pip install flask
+python webhook_server.py
+```
+
+The server receives JSON payloads with signals:
+```json
+{
+  "signals": [
+    {
+      "symbol": "AAPL",
+      "action": "BUY",
+      "price": 185.50,
+      "stop_loss": 180.00,
+      "take_profit": 195.00,
+      "quantity": 100
+    }
+  ]
+}
+```
+
+**⚠️ WARNING:** Auto-trading carries significant risk. Always test thoroughly!
+
 
 ## ⏰ Automated Scanning (Cron) ⭐ NEW
 
@@ -236,16 +298,16 @@ crontab -e
 
 ```bash
 # Long-term: Weekly scan every Monday at 9:00 AM
-0 9 * * 1 cd /path/to/scanner && python3 main.py watchlist.txt --mode longterm --cron --notify
+0 9 * * 1 cd /path/to/scanner && python3 breakout_scanner.py watchlist.txt --mode longterm --cron --notify
 
 # Swing: Daily scan at 9:35 AM (after market open)
-35 9 * * 1-5 cd /path/to/scanner && python3 main.py watchlist.txt --mode swing --cron --notify
+35 9 * * 1-5 cd /path/to/scanner && python3 breakout_scanner.py watchlist.txt --mode swing --cron --notify
 
 # Swing: Exit check at 3:45 PM (before close)
-45 15 * * 1-5 cd /path/to/scanner && python3 main.py watchlist.txt --mode swing --exit-file positions.csv --cron --notify
+45 15 * * 1-5 cd /path/to/scanner && python3 breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv --cron --notify
 
 # Day trade: Combined scan + exit at market close
-30 16 * * 1-5 cd /path/to/scanner && python3 main.py watchlist.txt --mode daytrade --exit-file positions.csv --both --cron --notify
+30 16 * * 1-5 cd /path/to/scanner && python3 breakout_scanner.py watchlist.txt --mode daytrade --exit-file positions.csv --both --cron --notify
 ```
 
 ### Cron Mode Features
@@ -253,6 +315,69 @@ crontab -e
 - Full logging to `scanner_output/logs/`
 - Automatic notifications on signals/exits
 - Exit code 0 on success for monitoring
+
+## 📊 Level 2 (Market Depth) Analysis ⭐ NEW
+
+Enable advanced order flow analysis:
+
+```bash
+python breakout_scanner.py watchlist.txt --mode swing --level2
+```
+
+### What Level 2 Adds:
+- **Bid/Ask Liquidity Analysis** - Measures buying vs selling pressure
+- **Order Imbalance Detection** - Identifies institutional accumulation
+- **Support/Resistance Strength** - Quantifies level significance
+- **Entry Quality Scoring** - EXCELLENT | GOOD | FAIR | POOR
+- **Breakout Confirmation** - Validates price action with order flow
+
+### Level 2 Metrics:
+- `imbalance`: -100 to +100 (positive = bullish pressure)
+- `bid_ask_ratio`: Ratio of bid to ask liquidity
+- `support_strength`: Concentration of bids (0-100%)
+- `resistance_strength`: Concentration of asks (0-100%)
+
+### Requirements:
+- IB Market Depth subscription
+- Real-time data (not delayed)
+- Works best for liquid stocks
+
+**Signal Enhancement:**
+- Signals with EXCELLENT depth are upgraded to PREMIUM
+- Signals with POOR depth are rejected
+- Level 2 data included in webhook payloads
+
+## 🤖 Algorithmic Order Execution ⭐ NEW
+
+Professional algo execution strategies for better fills:
+
+```python
+# Configure in webhook_server.py
+CONFIG = {
+    'use_algo_trading': True,
+    'default_algo': 'VWAP',  # or TWAP, ICEBERG, ADAPTIVE, etc.
+    'algo_urgency': 'Normal',  # Patient | Normal | Urgent
+}
+```
+
+### Available Algorithms:
+
+1. **ADAPTIVE** - IB's smart algo (recommended default)
+2. **VWAP** - Volume Weighted Average Price
+3. **TWAP** - Time Weighted Average Price  
+4. **ICEBERG** - Hide order size
+5. **DARK_ICE** - Seek dark pools
+6. **ARRIVAL_PRICE** - Minimize slippage
+7. **PERCENT_VOL** - Match market volume %
+
+### Benefits:
+- ✅ Better fill prices than market orders
+- ✅ Minimize market impact
+- ✅ Hide large order sizes
+- ✅ Access dark pool liquidity
+- ✅ Automated execution monitoring
+
+**See [ALGO_TRADING_GUIDE.md](ALGO_TRADING_GUIDE.md) for complete documentation.**
 
 ## ⚙️ Configuration
 

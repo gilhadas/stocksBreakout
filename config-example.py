@@ -79,5 +79,22 @@ NOTIFICATIONS = {
 #     'webhook_url': 'https://discord.com/api/webhooks/123/abc...',
 # }
 
+# WEBHOOK FOR AUTOMATED TRADING:
+# 'webhook': {
+#     'enabled': True,
+#     'url': 'http://localhost:5000/webhook',  # Your webhook server
+#     'auth_token': 'your_secret_token_here',  # Must match server config
+#     'default_quantity': 100,  # Default order size
+# }
+
+# Mac Native Notifications:
+# Automatically enabled on macOS - no configuration needed!
+# Shows notifications in Notification Center
+
 # You can enable multiple channels at once!
 # The scanner will send notifications to all enabled channels.
+
+# --- Level 2 (Market Depth) Settings ---
+# Enable with --level2 flag when running scanner
+# Requires IB market depth subscription
+# Analyzes bid/ask liquidity for higher probability entries

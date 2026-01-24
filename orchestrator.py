@@ -15,6 +15,7 @@ from config import MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
+from level2_analyzer import Level2Analyzer
 from utils import classify_market_regime
 
 logger = logging.getLogger(__name__)
@@ -23,10 +24,12 @@ logger = logging.getLogger(__name__)
 class ScannerOrchestrator:
     """Coordinates all scanning operations"""
     
-    def __init__(self, ib_connection):
+    def __init__(self, ib_connection, use_level2: bool = False):
         self.market_data = MarketDataHandler(ib_connection)
         self.detector = BreakoutDetector()
         self.exit_evaluator = ExitEvaluator()
+        self.level2_analyzer = Level2Analyzer(ib_connection) if use_level2 else None
+        self.use_level2 = use_level2
         self._ensure_output_dir()
     
     def _ensure_output_dir(self):
@@ -90,7 +93,7 @@ class ScannerOrchestrator:
                           spy_perf: float, regime: str,
                           vol_thresh: Optional[float], 
                           atr_mult: Optional[float]) -> Optional[Dict]:
-        """Scan a single symbol with retry logic"""
+        """Scan a single symbol with retry logic and optional Level 2 analysis"""
         max_retries = 3
         
         for attempt in range(max_retries):
@@ -116,6 +119,37 @@ class ScannerOrchestrator:
                     spread_pct=spread_pct,
                     regime=regime
                 )
+                
+                # If signal found and Level 2 enabled, analyze depth
+                if signal and self.use_level2:
+                    depth = await self.level2_analyzer.get_market_depth(symbol)
+                    
+                    if depth:
+                        # Evaluate entry quality
+                        quality, reason = self.level2_analyzer.evaluate_entry_quality(depth)
+                        
+                        # Check breakout confirmation
+                        confirmed = self.level2_analyzer.check_breakout_confirmation(
+                            depth, signal['Price']
+                        )
+                        
+                        # Add Level 2 data to signal
+                        signal['Level2_Quality'] = quality
+                        signal['Level2_Reason'] = reason
+                        signal['Level2_Imbalance'] = depth['imbalance']
+                        signal['Level2_Confirmed'] = confirmed
+                        
+                        # Reject if poor depth quality
+                        if quality == 'POOR' or not confirmed:
+                            logger.info(
+                                f"   ❌ {symbol} rejected by Level 2: {reason}"
+                            )
+                            return None
+                        
+                        # Upgrade signal quality if excellent depth
+                        if quality == 'EXCELLENT' and signal['Quality'] == 'HIGH':
+                            signal['Quality'] = 'PREMIUM'
+                            logger.info(f"   ⭐ {symbol} upgraded to PREMIUM (Level 2)")
                 
                 return signal
             
