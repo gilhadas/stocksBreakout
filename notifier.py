@@ -29,12 +29,31 @@ class Notifier:
         
         # Mac native notifications (auto-detect)
         self.mac_native_enabled = platform.system() == 'Darwin'
+        
+        # Track sent notifications to prevent duplicates
+        self._sent_cache = set()
+    
+    def _generate_cache_key(self, subject: str, signals: Optional[List[Dict]]) -> str:
+        """Generate unique key for notification to prevent duplicates"""
+        if signals:
+            symbols = sorted([s['Symbol'] for s in signals])
+            return f"{subject}:{','.join(symbols)}"
+        return subject
     
     def send_all(self, subject: str, message: str, signals: Optional[List[Dict]] = None):
-        """Send notification via all enabled channels"""
+        """Send notification via all enabled channels (prevents duplicates)"""
+        # Check if already sent
+        cache_key = self._generate_cache_key(subject, signals)
+        if cache_key in self._sent_cache:
+            logger.debug(f"Skipping duplicate notification: {subject}")
+            return
+        
         if not any([self.email_enabled, self.telegram_enabled, self.discord_enabled, 
                    self.mac_native_enabled, self.webhook_enabled]):
             return
+        
+        # Mark as sent
+        self._sent_cache.add(cache_key)
         
         results = []
         

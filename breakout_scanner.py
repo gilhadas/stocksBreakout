@@ -8,9 +8,17 @@ import asyncio
 import argparse
 import logging
 import sys
+
+# Python 3.14 compatibility: Create event loop before importing ib_insync
+# This prevents "RuntimeError: There is no current event loop" from eventkit
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from ib_insync import IB
 
-from config import IB_PAPER_PORT, IB_LIVE_PORT, IB_HOST, IB_CLIENT_ID, MODES, REGIME_CONFIG
+from config import IB_PAPER_PORT, IB_LIVE_PORT, IB_HOST, IB_CLIENT_ID, MODES, REGIME_CONFIG, OUTPUT_DIR
 from utils import (
     get_watchlist_from_file,
     get_positions_from_file,
@@ -19,12 +27,20 @@ from utils import (
 )
 from orchestrator import ScannerOrchestrator
 from notifier import Notifier
+from mock_trader import MockIBConnection, MockTrader, SimulationMode
 
 logger = logging.getLogger(__name__)
 
 
-async def connect_to_ib(live: bool = False) -> IB:
-    """Connect to Interactive Brokers"""
+async def connect_to_ib(live: bool = False, mock: bool = False, mock_mode: str = 'realistic') -> IB:
+    """Connect to Interactive Brokers or Mock connection"""
+    
+    if mock:
+        logger.info(f"🔧 Using MOCK trading mode ({mock_mode})")
+        ib = MockIBConnection(mode=mock_mode)
+        await ib.connectAsync(IB_HOST, IB_PAPER_PORT, clientId=IB_CLIENT_ID)
+        return ib
+    
     port = IB_LIVE_PORT if live else IB_PAPER_PORT
     
     ib = IB()
@@ -43,6 +59,7 @@ async def connect_to_ib(live: bool = False) -> IB:
     except Exception as e:
         logger.error(f"Failed to connect to IB: {e}")
         logger.error("Make sure TWS or IB Gateway is running and API is enabled")
+        logger.info("💡 Tip: Use --mock flag to test without IB connection")
         sys.exit(1)
 
 
@@ -180,6 +197,172 @@ async def run_combined_mode(orchestrator: ScannerOrchestrator, args, notifier: N
         logger.info(f"⚠️  {len(actionable_exits)} positions need attention!")
 
 
+async def run_simulation_mode(args, ib, data_source='auto'):
+    """Run historical simulation on watchlist with real data"""
+    from datetime import datetime
+    import pandas as pd
+    from yfinance_adapter import YFinanceAdapter
+    
+    logger.info("=" * 70)
+    logger.info(" HISTORICAL SIMULATION MODE")
+    logger.info("=" * 70)
+    
+    # Load watchlist
+    watchlist = get_watchlist_from_file(args.file)
+    if not watchlist:
+        logger.error("No symbols loaded from watchlist")
+        return
+    
+    logger.info(f"📊 Loaded {len(watchlist)} symbols from {args.file}")
+    logger.info(f"📊 Simulation period: {args.sim_start} to {args.sim_end}")
+    logger.info(f"📊 Mode: {args.mode.upper()}")
+    
+    # Determine data source
+    use_yfinance = False
+    if data_source == 'yfinance':
+        use_yfinance = True
+        logger.info(f"📊 Data source: Yahoo Finance (yfinance)")
+    elif data_source == 'mock':
+        logger.info(f"📊 Data source: Mock (random data)")
+    elif data_source == 'auto' or data_source == 'ib':
+        # Check if IB is actually connected (not mock)
+        if hasattr(ib, 'mode') and ib.mode:
+            # It's a mock connection, use yfinance instead
+            use_yfinance = True
+            logger.info(f"📊 Data source: Yahoo Finance (IB not available)")
+        else:
+            logger.info(f"📊 Data source: Interactive Brokers")
+    
+    # Create simulation
+    sim = SimulationMode(
+        start_date=args.sim_start,
+        end_date=args.sim_end,
+        initial_capital=100000
+    )
+    
+    # Create orchestrator or yfinance adapter
+    if use_yfinance:
+        yf_adapter = YFinanceAdapter()
+        logger.info("📊 Using Yahoo Finance for historical data")
+    else:
+        orchestrator = ScannerOrchestrator(ib)
+    
+    # Get timeframe
+    timeframe = args.timeframe
+    
+    logger.info("📊 Scanning historical data for breakout signals...")
+    
+    # Generate signals by scanning historical data
+    all_signals = []
+    
+    # Parse dates
+    start_date = pd.to_datetime(args.sim_start)
+    end_date = pd.to_datetime(args.sim_end)
+    
+    # For each symbol, scan historical data and find breakouts
+    for idx, symbol in enumerate(watchlist, 1):
+        print(f"[{idx}/{len(watchlist)}] Scanning {symbol:6}...", end="\r")
+        
+        try:
+            # Get historical data from appropriate source
+            if use_yfinance:
+                df = yf_adapter.get_historical_data(
+                    symbol, timeframe, 
+                    start_date=args.sim_start, 
+                    end_date=args.sim_end
+                )
+            else:
+                df = await orchestrator.market_data.get_historical_data(symbol, timeframe)
+            
+            if df is None or len(df) < 50:
+                continue
+            
+            # Filter to simulation period
+            df_sim = df[(df.index >= start_date) & (df.index <= end_date)]
+            
+            if len(df_sim) < 10:
+                continue
+            
+            # Scan each bar in the period for breakout signals
+            for i in range(len(df_sim)):
+                # Get data up to this point
+                current_date = df_sim.index[i]
+                df_up_to_date = df[df.index <= current_date]
+                
+                if len(df_up_to_date) < 50:
+                    continue
+                
+                # Detect breakout
+                if use_yfinance:
+                    # Create temporary detector for yfinance data
+                    from scanner import BreakoutDetector
+                    detector = BreakoutDetector()
+                    signal = detector.detect(
+                        df_up_to_date, 
+                        symbol, 
+                        args.mode, 
+                        timeframe, 
+                        spy_perf=0.0,
+                        regime='NORMAL'
+                    )
+                else:
+                    signal = orchestrator.detector.detect(
+                        df_up_to_date, 
+                        symbol, 
+                        args.mode, 
+                        timeframe, 
+                        spy_perf=0.0,
+                        regime='NORMAL'
+                    )
+                
+                if signal:
+                    # Convert to simulation signal format
+                    sim_signal = {
+                        'date': current_date.strftime('%Y-%m-%d'),
+                        'symbol': symbol,
+                        'action': 'BUY',
+                        'price': float(signal['Price']),
+                        'quantity': 100,  # Fixed quantity for simulation
+                        'stop_loss': float(signal['Stop']),
+                        'take_profit': float(signal['Target'])
+                    }
+                    all_signals.append(sim_signal)
+                    logger.info(f"   ✓ Signal: {symbol} @ ${signal['Price']:.2f} on {current_date.date()}")
+                    
+                    # Only take first signal per symbol to avoid over-trading
+                    break
+        
+        except Exception as e:
+            logger.debug(f"Failed to scan {symbol}: {e}")
+            continue
+    
+    print()  # Clear progress line
+    
+    logger.info(f"📊 Generated {len(all_signals)} signals from historical data")
+    
+    if not all_signals:
+        logger.warning("No signals found in simulation period. Try:")
+        logger.warning("  - Longer date range")
+        logger.warning("  - Different mode (swing, daytrade, etc.)")
+        logger.warning("  - More symbols in watchlist")
+        return
+    
+    # Run simulation
+    report = sim.run_simulation(all_signals)
+    
+    # Save report
+    from pathlib import Path
+    sim_dir = Path(OUTPUT_DIR, 'simulation_report')
+    sim_dir.mkdir(parents=True, exist_ok=True)
+    
+    report_file = sim_dir / f'simulation_report_{args.sim_start}_{args.sim_end}.json'
+    sim.trader.save_report(str(report_file))
+    
+    logger.info("✓ Simulation complete!")
+
+
+
+
 async def main():
     """Main execution flow"""
     parser = argparse.ArgumentParser(
@@ -207,6 +390,9 @@ Examples:
   
   # Cron mode (silent, notifications only)
   python main.py watchlist.txt --mode swing --cron
+  
+  # Historical simulation (scans watchlist for signals)
+  python main.py watchlist.txt --mode swing --simulate --sim-start 2025-01-01 --sim-end 2025-12-31
   
   # Live trading (CAREFUL!)
   python main.py watchlist.txt --mode swing --live
@@ -253,6 +439,43 @@ Examples:
         action='store_true',
         help='Enable Level 2 (Market Depth) analysis'
     )
+    parser.add_argument(
+        '--mock',
+        action='store_true',
+        help='Use mock trading (no real IB connection needed)'
+    )
+    parser.add_argument(
+        '--mock-mode',
+        choices=['realistic', 'optimistic', 'pessimistic'],
+        default='realistic',
+        help='Mock trading simulation mode'
+    )
+    parser.add_argument(
+        '--simulate',
+        action='store_true',
+        help='Run historical simulation'
+    )
+    parser.add_argument(
+        '--sim-start',
+        type=str,
+        help='Simulation start date (YYYY-MM-DD)'
+    )
+    parser.add_argument(
+        '--sim-end',
+        type=str,
+        help='Simulation end date (YYYY-MM-DD)'
+    )
+    parser.add_argument(
+        '--sim-data-source',
+        choices=['auto', 'ib', 'yfinance', 'mock'],
+        default='auto',
+        help='Data source for simulation: auto (try IB, fallback to yfinance), ib (IB only), yfinance (Yahoo Finance), mock (random data)'
+    )
+    parser.add_argument(
+        '--sim-mock',
+        action='store_true',
+        help='Use mock data for simulation (shorthand for --sim-data-source mock)'
+    )
     
     args = parser.parse_args()
     
@@ -288,7 +511,7 @@ Examples:
         args.timeframe = MODES[args.mode]['default_timeframe']
     
     # Scalping warnings
-    if args.mode == 'scalping' and args.live:
+    if args.mode == 'scalping' and args.live and not args.mock:
         logger.warning("⚠️  SCALPING ON LIVE ACCOUNT!")
         if not args.cron:
             response = input("Type 'YES' to continue: ")
@@ -296,9 +519,56 @@ Examples:
                 logger.info("Aborted by user")
                 return
     
-    if args.mode == 'scalping' and not args.live and not args.cron:
+    if args.mode == 'scalping' and not args.live and not args.cron and not args.mock:
         logger.warning("⚠️  PAPER MODE = DELAYED DATA (15min lag)")
         logger.warning("    Not suitable for live scalping!")
+    
+    # Mock mode info
+    if args.mock:
+        logger.info("🔧 MOCK TRADING MODE")
+        logger.info(f"   Simulation: {args.mock_mode}")
+        logger.info("   No real orders will be placed")
+        logger.info("   Perfect for testing strategies!")
+    
+    # Simulation mode
+    if args.simulate:
+        if not args.sim_start or not args.sim_end:
+            logger.error("❌ Simulation requires --sim-start and --sim-end dates")
+            logger.error("   Example: --simulate --sim-start 2025-01-01 --sim-end 2025-12-31")
+            return
+        
+        logger.info("📊 HISTORICAL SIMULATION MODE")
+        logger.info(f"   Period: {args.sim_start} to {args.sim_end}")
+        logger.info(f"   Mode: {args.mode.upper()}")
+        
+        # Determine data source
+        data_source = 'mock' if args.sim_mock else args.sim_data_source
+        
+        # Connect to IB if needed
+        if data_source == 'yfinance':
+            # yfinance doesn't need IB connection, use mock placeholder
+            ib = await connect_to_ib(args.live, mock=True, mock_mode='realistic')
+        elif data_source == 'mock':
+            # Mock mode
+            ib = await connect_to_ib(args.live, mock=True, mock_mode='realistic')
+        else:
+            # 'ib' or 'auto' - try real IB connection, fallback to mock (which triggers yfinance)
+            try:
+                ib = await connect_to_ib(args.live, mock=False)
+            except Exception as e:
+                logger.warning(f"Could not connect to IB: {e}")
+                logger.info("Falling back to yfinance data source")
+                ib = await connect_to_ib(args.live, mock=True, mock_mode='realistic')
+                data_source = 'yfinance'
+        
+        try:
+            # Run simulation with selected data source
+            await run_simulation_mode(args, ib, data_source=data_source)
+        finally:
+            ib.disconnect()
+            logger.info("✓ Disconnected from IB")
+        
+        return
     
     # Initialize notifier
     notifier = Notifier() if args.notify or args.cron else None
@@ -310,7 +580,7 @@ Examples:
         notifier = DummyNotifier()
     
     # Connect to IB
-    ib = await connect_to_ib(args.live)
+    ib = await connect_to_ib(args.live, args.mock, args.mock_mode)
     
     try:
         # Create orchestrator

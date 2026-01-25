@@ -56,16 +56,16 @@ cat > "$CRON_FILE" << 'EOF'
 # ============================================
 
 # Every weekday at 9:35 AM - Day trade morning scan
-35 9 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1
+35 9 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1
 
 # Every weekday at 10:00 AM - Day trade mid-morning scan
-0 10 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
+0 10 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
 
 # Every weekday at 2:00 PM - Day trade afternoon scan
-0 14 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1
+0 14 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1
 
 # Every weekday at 3:30 PM - Day trade exit check
-30 15 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode daytrade --exit-file positions_daytrade.csv --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
+30 15 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --exit-file positions_daytrade.csv --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
 
 
 # ============================================
