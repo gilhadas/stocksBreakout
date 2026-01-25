@@ -26,21 +26,21 @@ async def test_signal_detection():
     detector = BreakoutDetector()
     
     # Test symbols
-    symbols = ['AAPL', 'NVDA', 'TSLA', 'GOOGL', 'MSFT']
+    symbols = ['AAPL', 'NVDA', 'TSLA', 'GOOGL', 'MSFT', 'TMC'    ]
     
     print(f"\nTesting {len(symbols)} symbols for 2025 data...")
     print(f"Mode: SWING")
-    print(f"Period: 2025-01-01 to 2025-01-24\n")
+    print(f"Period: 2025-01-01 to 2025-12-31\n")
     
     for symbol in symbols:
         print(f"\n--- {symbol} ---")
         
-        # Fetch data
+        # Fetch data - need 2 years before 2025 for 150-day SMA
         df = yf_adapter.get_historical_data(
             symbol,
             '1 day',
-            start_date='2024-01-01',  # Get more history for context
-            end_date='2025-01-24'
+            start_date='2023-01-01',  # Start 2 years earlier for 150 SMA
+            end_date='2025-12-31'
         )
         
         if df is None or len(df) < 50:
@@ -55,33 +55,49 @@ async def test_signal_detection():
         df_2025 = df[df.index >= pd.to_datetime('2025-01-01')]
         print(f"  ✓ 2025 bars: {len(df_2025)}")
         
-        # Try to detect breakout on latest data
-        signal = detector.detect(
-            df,
-            symbol,
-            'swing',
-            '1 day',
-            spy_perf=0.0,
-            regime='NORMAL'
-        )
+        # Scan all 2025 bars for signals (not just latest)
+        signals_found = []
+        for i in range(len(df_2025)):
+            current_date = df_2025.index[i]
+            df_up_to_date = df[df.index <= current_date]
+            
+            if len(df_up_to_date) < 50:
+                continue
+            
+            # Try to detect breakout
+            signal = detector.detect(
+                df_up_to_date,
+                symbol,
+                'swing',
+                '1 day',
+                spy_perf=0.0,
+                regime='NORMAL'
+            )
+            
+            if signal:
+                signals_found.append({
+                    'date': current_date,
+                    'price': signal['Price'],
+                    'quality': signal['Quality']
+                })
         
-        if signal:
-            print(f"  🎯 SIGNAL FOUND!")
-            print(f"     Price: ${signal['Price']:.2f}")
-            print(f"     Stop: ${signal['Stop']:.2f}")
-            print(f"     Target: ${signal['Target']:.2f}")
-            print(f"     Quality: {signal['Quality']}")
+        if signals_found:
+            print(f"  🎯 FOUND {len(signals_found)} SIGNAL(S)!")
+            for sig in signals_found[:3]:  # Show first 3
+                print(f"     {sig['date'].date()}: ${sig['price']:.2f} ({sig['quality']})")
         else:
             print(f"  ⚪ No signal (strict criteria not met)")
             
             # Show why it might not qualify
             latest = df.iloc[-1]
-            sma_200 = df['close'].rolling(200).mean().iloc[-1]
+            start_price = df_2025.iloc[0]['close'] if len(df_2025) > 0 else latest['close']
+            sma_150 = df['close'].rolling(150).mean().iloc[-1]
             vol_ratio = latest['volume'] / df['volume'].rolling(20).mean().iloc[-1]
             
+            print(f"     Start price (2025): ${start_price:.2f}")
             print(f"     Latest close: ${latest['close']:.2f}")
-            print(f"     200 SMA: ${sma_200:.2f}")
-            print(f"     Above SMA: {latest['close'] > sma_200}")
+            print(f"     150 SMA: ${sma_150:.2f}")
+            print(f"     Above SMA: {latest['close'] > sma_150}")
             print(f"     Volume ratio: {vol_ratio:.2f}x (need >1.3x)")
     
     print("\n" + "=" * 70)
@@ -91,7 +107,7 @@ async def test_signal_detection():
     print("✅ Data format is compatible with breakout detector")
     print("ℹ️  No signals found = detector criteria not met (normal)")
     print("\nThe breakout detector has strict criteria:")
-    print("  - Must be above 200-day SMA")
+    print("  - Must be above 150-day SMA")
     print("  - Volume must be 1.3x+ average")
     print("  - Must break consolidation pattern")
     print("  - ATR and other technical conditions")

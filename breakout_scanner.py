@@ -234,10 +234,19 @@ async def run_simulation_mode(args, ib, data_source='auto'):
             logger.info(f"📊 Data source: Interactive Brokers")
     
     # Create simulation
+    # Import portfolio config
+    from config import PORTFOLIO
+    
+    # Create simulation with portfolio config
     sim = SimulationMode(
         start_date=args.sim_start,
         end_date=args.sim_end,
-        initial_capital=100000
+        initial_capital=PORTFOLIO['initial_capital'],
+        max_position_pct=PORTFOLIO['max_position_pct'],
+        max_risk_pct=PORTFOLIO['max_risk_pct'],
+        use_trailing_stop=PORTFOLIO.get('use_trailing_stop', False),
+        trailing_stop_atr_mult=PORTFOLIO.get('trailing_stop_atr_mult', 2.0),
+        trailing_stop_activation_pct=PORTFOLIO.get('trailing_stop_activation_pct', 0.0)
     )
     
     # Create orchestrator or yfinance adapter
@@ -264,11 +273,16 @@ async def run_simulation_mode(args, ib, data_source='auto'):
         print(f"[{idx}/{len(watchlist)}] Scanning {symbol:6}...", end="\r")
         
         try:
-            # Get historical data from appropriate source
+            # Get historical data - need extra history for 200-day SMA and other indicators
+            # Fetch from 2 years before simulation start to have enough context
+            import datetime
+            sim_start_dt = pd.to_datetime(args.sim_start)
+            data_start = (sim_start_dt - pd.DateOffset(years=2)).strftime('%Y-%m-%d')
+            
             if use_yfinance:
                 df = yf_adapter.get_historical_data(
                     symbol, timeframe, 
-                    start_date=args.sim_start, 
+                    start_date=data_start,  # Start 2 years earlier for context
                     end_date=args.sim_end
                 )
             else:
@@ -277,7 +291,7 @@ async def run_simulation_mode(args, ib, data_source='auto'):
             if df is None or len(df) < 50:
                 continue
             
-            # Filter to simulation period
+            # Filter to simulation period for signal generation
             df_sim = df[(df.index >= start_date) & (df.index <= end_date)]
             
             if len(df_sim) < 10:
@@ -316,21 +330,32 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                     )
                 
                 if signal:
-                    # Convert to simulation signal format
+                    # Convert to simulation signal format (quantity will be calculated by risk management)
                     sim_signal = {
                         'date': current_date.strftime('%Y-%m-%d'),
                         'symbol': symbol,
                         'action': 'BUY',
                         'price': float(signal['Price']),
-                        'quantity': 100,  # Fixed quantity for simulation
                         'stop_loss': float(signal['Stop']),
                         'take_profit': float(signal['Target'])
                     }
                     all_signals.append(sim_signal)
-                    logger.info(f"   ✓ Signal: {symbol} @ ${signal['Price']:.2f} on {current_date.date()}")
                     
-                    # Only take first signal per symbol to avoid over-trading
-                    break
+                    # Get period start price for context
+                    period_start_price = df_sim.iloc[0]['close'] if len(df_sim) > 0 else signal['Price']
+                    
+                    # Calculate gain from signal entry to end of simulation period
+                    # This shows how the trade would have performed
+                    end_price = df_sim.iloc[-1]['close'] if len(df_sim) > 0 else signal['Price']
+                    gain_from_entry = ((end_price / signal['Price']) - 1) * 100
+                    
+                    logger.info(
+                        f"   ✓ Signal: {symbol} @ ${signal['Price']:.2f} on {current_date.date()} "
+                        f"(period start: ${period_start_price:.2f}, gain from entry: {gain_from_entry:+.1f}%, quality: {signal['Quality']})"
+                    )
+                    
+                    # Don't break - continue scanning for more signals
+                    # (removed the break statement to capture all signals)
         
         except Exception as e:
             logger.debug(f"Failed to scan {symbol}: {e}")
@@ -347,8 +372,33 @@ async def run_simulation_mode(args, ib, data_source='auto'):
         logger.warning("  - More symbols in watchlist")
         return
     
-    # Run simulation
-    report = sim.run_simulation(all_signals)
+    # Collect end prices and historical data for each symbol (for closing positions and trailing stops)
+    end_prices = {}
+    historical_data = {}
+    
+    for symbol in set(sig['symbol'] for sig in all_signals):
+        try:
+            if use_yfinance:
+                df = yf_adapter.get_historical_data(
+                    symbol, timeframe,
+                    start_date=data_start,
+                    end_date=args.sim_end
+                )
+            else:
+                df = await orchestrator.market_data.get_historical_data(symbol, timeframe)
+            
+            if df is not None and len(df) > 0:
+                # Get the last price in the simulation period
+                df_sim = df[(df.index >= start_date) & (df.index <= end_date)]
+                if len(df_sim) > 0:
+                    end_prices[symbol] = float(df_sim.iloc[-1]['close'])
+                    # Store full historical data for trailing stop calculations
+                    historical_data[symbol] = df
+        except Exception as e:
+            logger.debug(f"Could not get end price for {symbol}: {e}")
+    
+    # Run simulation with end prices and historical data
+    report = sim.run_simulation(all_signals, end_prices=end_prices, historical_data=historical_data)
     
     # Save report
     from pathlib import Path

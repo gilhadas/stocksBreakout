@@ -3,6 +3,16 @@ Configuration module for breakout scanner
 Contains all mode settings and regime configurations
 """
 
+# --- Portfolio Configuration ---
+PORTFOLIO = {
+    'initial_capital': 100000,      # Starting capital in USD
+    'max_position_pct': 0.05,       # Max 5% of capital per position
+    'max_risk_pct': 0.01,           # Max 1% of capital risk per trade
+    'use_trailing_stop': True,      # Enable ATR-based trailing stop
+    'trailing_stop_atr_mult': 3.0,  # Trail by 3x ATR (wider stop, more breathing room)
+    'trailing_stop_activation_pct': 0.05, # Only activate trailing stop after 5% profit
+}
+
 # --- Mode Configurations ---
 MODES = {
     'longterm': {
@@ -10,7 +20,7 @@ MODES = {
         'vol_thresh': 1.2,
         'atr_mult': 0.8,
         'trend_type': 'SMA',
-        'trend_period': 200,
+        'trend_period': 150,
         'sl_mult': 3.0,
         'tp_mult': 6.0,
         'min_consolidation_bars': 5,
@@ -25,7 +35,7 @@ MODES = {
         'vol_thresh': 1.3,
         'atr_mult': 0.5,
         'trend_type': 'SMA',
-        'trend_period': 200,
+        'trend_period': 150,
         'sl_mult': 2.0,
         'tp_mult': 4.0,
         'min_consolidation_bars': 3,

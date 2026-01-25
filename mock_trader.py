@@ -286,12 +286,54 @@ class MockTrader:
     Tracks P&L, win rate, etc.
     """
     
-    def __init__(self, initial_capital: float = 100000):
+    def __init__(self, initial_capital: float = 100000, max_position_pct: float = 0.05, max_risk_pct: float = 0.01):
+        """
+        Args:
+            initial_capital: Starting capital
+            max_position_pct: Max % of capital per position (default 5%)
+            max_risk_pct: Max % of capital to risk per trade (default 1%)
+        """
         self.initial_capital = initial_capital
         self.capital = initial_capital
+        self.max_position_pct = max_position_pct
+        self.max_risk_pct = max_risk_pct
         self.trades: List[MockTrade] = []
-        self.open_positions: Dict[str, MockTrade] = {}
+        self.open_positions: Dict[int, MockTrade] = {}  # trade_id -> MockTrade
         self.trade_id_counter = 1
+    
+    def calculate_position_size(self, price: float, stop_loss: float) -> int:
+        """
+        Calculate position size based on risk management rules
+        
+        Args:
+            price: Entry price
+            stop_loss: Stop loss price
+        
+        Returns:
+            Quantity to trade
+        """
+        # Calculate max position value (5% of capital)
+        max_position_value = self.capital * self.max_position_pct
+        
+        # Calculate max shares based on position size limit
+        max_shares_by_position = int(max_position_value / price)
+        
+        # Calculate max shares based on risk limit (1% of capital)
+        risk_per_share = abs(price - stop_loss)
+        if risk_per_share > 0:
+            max_risk_amount = self.capital * self.max_risk_pct
+            max_shares_by_risk = int(max_risk_amount / risk_per_share)
+        else:
+            max_shares_by_risk = max_shares_by_position
+        
+        # Take the smaller of the two limits
+        quantity = min(max_shares_by_position, max_shares_by_risk)
+        
+        # Ensure at least 1 share if we have enough capital
+        if quantity < 1 and self.capital >= price:
+            quantity = 1
+        
+        return quantity
     
     def enter_trade(self, symbol: str, action: str, quantity: int, 
                    price: float, stop_loss: float, take_profit: float) -> MockTrade:
@@ -309,7 +351,7 @@ class MockTrader:
         
         self.trade_id_counter += 1
         self.trades.append(trade)
-        self.open_positions[symbol] = trade
+        self.open_positions[trade.trade_id] = trade  # Use trade_id instead of symbol
         
         # Deduct capital
         cost = price * quantity
@@ -324,11 +366,18 @@ class MockTrader:
     
     def exit_trade(self, symbol: str, exit_price: float, reason: str = 'Manual'):
         """Exit a mock trade"""
-        if symbol not in self.open_positions:
+        # Find trade by symbol (open_positions is keyed by trade_id)
+        trade_id = None
+        trade = None
+        for tid, t in list(self.open_positions.items()):
+            if t.symbol == symbol:
+                trade_id = tid
+                trade = t
+                break
+        
+        if trade is None:
             logger.warning(f"No open position for {symbol}")
             return
-        
-        trade = self.open_positions[symbol]
         trade.exit_price = exit_price
         trade.exit_time = datetime.now()
         
@@ -351,8 +400,8 @@ class MockTrader:
         proceeds = exit_price * trade.quantity
         self.capital += proceeds
         
-        # Remove from open positions
-        del self.open_positions[symbol]
+        # Remove from open positions using trade_id
+        del self.open_positions[trade_id]
         
         logger.info(
             f"📊 Mock trade closed: {symbol} @ ${exit_price:.2f} | "
@@ -435,27 +484,46 @@ class SimulationMode:
     Tests strategy on historical data
     """
     
-    def __init__(self, start_date: str, end_date: str, initial_capital: float = 100000):
+    def __init__(self, start_date: str, end_date: str, initial_capital: float = 100000,
+                 max_position_pct: float = 0.05, max_risk_pct: float = 0.01,
+                 use_trailing_stop: bool = False, trailing_stop_atr_mult: float = 2.0,
+                 trailing_stop_activation_pct: float = 0.0):
         """
         Args:
             start_date: YYYY-MM-DD
             end_date: YYYY-MM-DD
             initial_capital: Starting capital
+            max_position_pct: Max % of capital per position (default 5%)
+            max_risk_pct: Max % of capital to risk per trade (default 1%)
+            use_trailing_stop: Enable ATR-based trailing stop (default False)
+            trailing_stop_atr_mult: ATR multiplier for trailing stop (default 2.0)
+            trailing_stop_activation_pct: Only activate trailing stop after this % profit (default 0.0)
         """
         self.start_date = pd.to_datetime(start_date)
         self.end_date = pd.to_datetime(end_date)
         self.current_date = self.start_date
-        self.trader = MockTrader(initial_capital)
+        self.trader = MockTrader(initial_capital, max_position_pct, max_risk_pct)
         self.daily_equity = []
+        self.use_trailing_stop = use_trailing_stop
+        self.trailing_stop_atr_mult = trailing_stop_atr_mult
+        self.trailing_stop_activation_pct = trailing_stop_activation_pct
+        self.historical_data = {}  # Store historical data for each symbol
     
-    def run_simulation(self, signals: List[Dict]):
+    def run_simulation(self, signals: List[Dict], end_prices: Dict[str, float] = None,
+                       historical_data: Dict[str, pd.DataFrame] = None):
         """
         Run simulation with historical signals
         
         Args:
             signals: List of signal dicts with 'date', 'symbol', 'action', etc.
+            end_prices: Dict of symbol -> end price for closing positions at simulation end
+            historical_data: Dict of symbol -> DataFrame with historical prices for trailing stops
         """
         logger.info(f"🔄 Running simulation: {self.start_date.date()} to {self.end_date.date()}")
+        
+        # Store end prices and historical data for closing positions
+        self.end_prices = end_prices or {}
+        self.historical_data = historical_data or {}
         
         # Sort signals by date
         signals_df = pd.DataFrame(signals)
@@ -471,14 +539,33 @@ class SimulationMode:
             
             # Execute signals
             for _, signal in day_signals.iterrows():
+                # Calculate position size based on risk management
+                quantity = self.trader.calculate_position_size(
+                    price=signal['price'],
+                    stop_loss=signal.get('stop_loss', signal['price'] * 0.95)
+                )
+                
+                # Skip if quantity is 0 (insufficient capital)
+                if quantity == 0:
+                    logger.warning(f"Skipping {signal['symbol']} - insufficient capital for position")
+                    continue
+                
                 self.trader.enter_trade(
                     symbol=signal['symbol'],
                     action=signal['action'],
-                    quantity=signal.get('quantity', 100),
+                    quantity=quantity,
                     price=signal['price'],
                     stop_loss=signal.get('stop_loss', signal['price'] * 0.95),
                     take_profit=signal.get('take_profit', signal['price'] * 1.10)
                 )
+            
+            # Check for exits (Stop Loss / Take Profit) - ALWAYS RUN
+            if len(self.trader.open_positions) > 0:
+                self._check_exits(current_date)
+            
+            # Check and update trailing stops if enabled
+            if self.use_trailing_stop and len(self.trader.open_positions) > 0:
+                self._update_trailing_stops(current_date)
             
             # Track equity
             self.daily_equity.append({
@@ -503,11 +590,110 @@ class SimulationMode:
         )
         return value
     
+    def _check_exits(self, current_date: pd.Timestamp):
+        """Check if any positions hit Stop Loss or Take Profit"""
+        for trade_id, trade in list(self.trader.open_positions.items()):
+            symbol = trade.symbol
+            
+            # Skip if trade was just entered today (avoid same-day exit)
+            if trade.entry_time.date() == current_date.date():
+                continue
+            
+            # Get historical data for this symbol
+            if symbol not in self.historical_data:
+                continue
+            
+            df = self.historical_data[symbol]
+            
+            # Get current price daily bar
+            current_bar = df[df.index.date == current_date.date()]
+            if len(current_bar) == 0:
+                continue
+            
+            current_high = float(current_bar.iloc[-1]['high'])
+            current_low = float(current_bar.iloc[-1]['low'])
+            current_open = float(current_bar.iloc[-1]['open'])
+            
+            # Check if stop loss was hit
+            if current_low <= trade.stop_loss:
+                # Determine exit price (Stop Price or Open if gap down)
+                exit_price = trade.stop_loss
+                if current_open < trade.stop_loss:
+                     exit_price = current_open
+                
+                logger.info(f"🛑 Stop hit for {symbol} @ ${exit_price:.2f}")
+                self.trader.exit_trade(symbol, exit_price, 'Stop Loss')
+                continue 
+                
+            # Check if take profit was hit
+            elif current_high >= trade.take_profit:
+                logger.info(f"🎯 Take profit hit for {symbol} @ ${trade.take_profit:.2f}")
+                self.trader.exit_trade(symbol, trade.take_profit, 'Take Profit')
+
+    def _update_trailing_stops(self, current_date: pd.Timestamp):
+        """Update trailing stops based on current prices and ATR"""
+        for trade_id, trade in list(self.trader.open_positions.items()):
+            symbol = trade.symbol
+            
+            # Skip if trade was just entered today
+            if trade.entry_time.date() == current_date.date():
+                continue
+                
+            # Get historical data
+            if symbol not in self.historical_data:
+                continue
+                
+            df = self.historical_data[symbol]
+            df_up_to_date = df[df.index <= current_date]
+            
+            if len(df_up_to_date) < 14:
+                continue
+            
+            # Get current price
+            current_bar = df_up_to_date[df_up_to_date.index.date == current_date.date()]
+            if len(current_bar) == 0:
+                continue
+                
+            current_price = float(current_bar.iloc[-1]['close'])
+            
+            # Check profit threshold activation
+            profit_pct = (current_price - trade.entry_price) / trade.entry_price
+            
+            # Only update stop if profit condition met
+            if profit_pct >= self.trailing_stop_activation_pct:
+                # Calculate ATR (14-period)
+                df_atr = df_up_to_date.tail(14).copy()
+                df_atr['h-l'] = df_atr['high'] - df_atr['low']
+                df_atr['h-pc'] = abs(df_atr['high'] - df_atr['close'].shift(1))
+                df_atr['l-pc'] = abs(df_atr['low'] - df_atr['close'].shift(1))
+                df_atr['tr'] = df_atr[['h-l', 'h-pc', 'l-pc']].max(axis=1)
+                atr = df_atr['tr'].mean()
+                
+                # Calculate new trailing stop
+                new_stop = current_price - (atr * self.trailing_stop_atr_mult)
+                
+                # Only update if new stop is higher than current stop
+                if new_stop > trade.stop_loss:
+                    old_stop = trade.stop_loss
+                    trade.stop_loss = new_stop
+                    logger.debug(f"📈 Trailing stop updated for {symbol}: ${old_stop:.2f} → ${new_stop:.2f} (ATR: ${atr:.2f})")
+    
     def _close_all_positions(self):
         """Close all open positions at end of simulation"""
-        for symbol, trade in list(self.trader.open_positions.items()):
-            # Close at entry price (neutral)
-            self.trader.exit_trade(symbol, trade.entry_price, 'Simulation End')
+        logger.info(f"📊 Closing {len(self.trader.open_positions)} remaining positions...")
+        
+        for trade_id, trade in list(self.trader.open_positions.items()):
+            symbol = trade.symbol  # Extract symbol from trade
+            
+            # Get actual end price from simulation data if available
+            end_price = trade.entry_price  # Default fallback
+            
+            # Try to get the actual end price from stored data
+            if hasattr(self, 'end_prices') and symbol in self.end_prices:
+                end_price = self.end_prices[symbol]
+            
+            # Close at actual end price
+            self.trader.exit_trade(symbol, end_price, 'Simulation End')
     
     def generate_report(self) -> Dict:
         """Generate simulation report"""
