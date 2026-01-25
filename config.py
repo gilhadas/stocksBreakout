@@ -117,29 +117,28 @@ DATA_DURATION = {
 # --- Output Settings ---
 OUTPUT_DIR = 'scanner_output'  # Directory for all output files
 
-# --- Notification Settings ---
 NOTIFICATIONS = {
+    # Email notifications via SMTP
     'email': {
-        'enabled': False,
+        'enabled': True,  # Set to True to enable
         'smtp_server': 'smtp.gmail.com',
         'smtp_port': 587,
-        'sender_email': '',  # Set your email
-        'sender_password': '',  # Use app password
-        'recipient_email': '',  # Where to send alerts
+        'sender_email': 'gil.hadas@gmail.com',
+        'sender_password': 'xjby qirq zotu jqdk',  # Use Gmail App Password
+        'recipient_email': 'gil.hadas@gmail.com',
     },
+    
+    # Telegram notifications
     'telegram': {
         'enabled': False,
         'bot_token': '',  # Get from @BotFather
         'chat_id': '',  # Your chat ID
     },
+    
+    # Discord notifications via webhook
     'discord': {
-        'enabled': False,
-        'webhook_url': '',  # Discord webhook URL
-    },
-    'webhook': {
-        'enabled': False,
-        'url': '',  # Your webhook endpoint (e.g., http://localhost:5000/webhook)
-        'auth_token': '',  # Optional: Bearer token for authentication
-        'default_quantity': 100,  # Default order size for automated trading
+        'enabled': True,  # Set to True to enable
+        'webhook_url': 'https://discordapp.com/api/webhooks/1464758074941112353/dzvWJZwybS21NQ432EVRzZXBdYuymCcLu85vjYnDheDbyqECN_psBneA7neqUNQfTndX',
     }
 }
+
