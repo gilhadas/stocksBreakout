@@ -312,21 +312,25 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                     from scanner import BreakoutDetector
                     detector = BreakoutDetector()
                     signal = detector.detect(
-                        df_up_to_date, 
-                        symbol, 
-                        args.mode, 
-                        timeframe, 
+                        df_up_to_date,
+                        symbol,
+                        args.mode,
+                        timeframe,
                         spy_perf=0.0,
-                        regime='NORMAL'
+                        regime='NORMAL',
+                        use_scoring=True,
+                        use_legacy_momentum=False
                     )
                 else:
                     signal = orchestrator.detector.detect(
-                        df_up_to_date, 
-                        symbol, 
-                        args.mode, 
-                        timeframe, 
+                        df_up_to_date,
+                        symbol,
+                        args.mode,
+                        timeframe,
                         spy_perf=0.0,
-                        regime='NORMAL'
+                        regime='NORMAL',
+                        use_scoring=True,
+                        use_legacy_momentum=False
                     )
                 
                 if signal:

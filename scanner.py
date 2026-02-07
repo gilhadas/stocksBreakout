@@ -98,7 +98,8 @@ class BreakoutDetector:
         vwap_ok = self._check_vwap_position(latest, mode_name)
         
         # 4. Consolidation
-        was_consolidating = self._check_consolidation(df, cfg, mode_name)
+        use_legacy = kwargs.get('use_legacy_momentum', False)
+        was_consolidating = self._check_consolidation(df, cfg, mode_name, use_legacy=use_legacy)
         
         # 5. Liquidity
         liquid_ok = check_liquidity(df)
@@ -116,7 +117,9 @@ class BreakoutDetector:
         vol_divergence = check_volume_divergence(df)
         
         # --- RISK/REWARD CALCULATION ---
-        sl, tp, rr = self._calculate_rr(latest, cfg, mode_name, spread_pct)
+        use_structural = not kwargs.get('use_legacy_momentum', False)
+        sl, tp, rr = self._calculate_rr(latest, cfg, mode_name, spread_pct,
+                                         df=df, use_structural=use_structural)
         rr_ok = rr >= cfg['min_rr']
         
         # --- REJECTION LOGGING ---
@@ -137,19 +140,87 @@ class BreakoutDetector:
                 'reasons': ', '.join(rejection_reasons),
             })
         
-        # --- FINAL CHECK ---
-        conditions = [
-            price_break, vol_confirm, dist_confirm, trend_ok,
-            vwap_ok, liquid_ok, candle_ok, rr_ok, not vol_divergence
-        ]
-        if mode_name != 'scalping':
-            conditions.extend([rs_ok, was_consolidating])
-        
-        if not all(conditions):
-            return None
-        
-        # --- QUALITY SCORING ---
-        quality = self._determine_quality(mode_name, latest, df, has_gap_up)
+        # --- MOMENTUM INDICATORS ---
+        rsi_val = latest.get('RSI', 50)
+        macd_hist_val = latest.get('MACD_Hist', 0)
+        macd_prev_hist = df['MACD_Hist'].iloc[-2] if len(df) >= 2 and 'MACD_Hist' in df.columns else 0
+        adx_val = latest.get('ADX', 0)
+
+        use_legacy = kwargs.get('use_legacy_momentum', False)
+        if use_legacy:
+            # V1: Original binary checks
+            rsi_favorable = 40 <= rsi_val <= 75 if not pd.isna(rsi_val) else True
+            macd_favorable = macd_hist_val > 0 if not pd.isna(macd_hist_val) else True
+            adx_trending = adx_val > 20 if not pd.isna(adx_val) else True
+        else:
+            # V2: Tightened thresholds
+            rsi_favorable = 45 <= rsi_val <= 70 if not pd.isna(rsi_val) else True
+            macd_favorable = (macd_hist_val > 0 and macd_hist_val > macd_prev_hist) if not pd.isna(macd_hist_val) else True
+            adx_trending = adx_val > 25 if not pd.isna(adx_val) else True
+
+        # V2 composite scores
+        momentum_score_val = latest.get('Momentum_Score', 0)
+        conviction_score_val = latest.get('Conviction_Score', 0)
+        momentum_strong = momentum_score_val >= 50 if not pd.isna(momentum_score_val) else False
+        conviction_strong = conviction_score_val >= 40 if not pd.isna(conviction_score_val) else False
+
+        # --- SIGNAL SCORING SYSTEM ---
+        use_scoring = kwargs.get('use_scoring', False)
+
+        if use_scoring:
+            # Mandatory gate: price must break above previous high
+            if not price_break or not liquid_ok:
+                return None
+
+            if use_legacy:
+                # V1: 3 binary momentum checks
+                checks = {
+                    'vol_confirm': vol_confirm,
+                    'trend_ok': trend_ok,
+                    'dist_confirm': dist_confirm,
+                    'candle_ok': candle_ok,
+                    'rr_ok': rr_ok,
+                    'no_vol_divergence': not vol_divergence,
+                    'vwap_ok': vwap_ok,
+                    'rsi_favorable': rsi_favorable,
+                    'macd_favorable': macd_favorable,
+                    'adx_trending': adx_trending,
+                }
+            else:
+                # V2: Composite momentum + conviction scores
+                checks = {
+                    'vol_confirm': vol_confirm,
+                    'trend_ok': trend_ok,
+                    'momentum_strong': momentum_strong,
+                    'dist_confirm': dist_confirm,
+                    'candle_ok': candle_ok,
+                    'rr_ok': rr_ok,
+                    'no_vol_divergence': not vol_divergence,
+                    'conviction_strong': conviction_strong,
+                }
+
+            if mode_name != 'scalping':
+                checks['rs_ok'] = rs_ok
+                checks['consolidation'] = was_consolidating
+
+            score, max_score, quality = self._calculate_signal_score(checks)
+
+            if quality == 'REJECT':
+                return None
+        else:
+            # Original all-or-nothing logic
+            conditions = [
+                price_break, vol_confirm, dist_confirm, trend_ok,
+                vwap_ok, liquid_ok, candle_ok, rr_ok, not vol_divergence
+            ]
+            if mode_name != 'scalping':
+                conditions.extend([rs_ok, was_consolidating])
+
+            if not all(conditions):
+                return None
+
+            quality = self._determine_quality(mode_name, latest, df, has_gap_up)
+            score = 100
         
         # Build signal
         signal = {
@@ -197,17 +268,55 @@ class BreakoutDetector:
             return latest['close'] > vwap_val
         return True
     
-    def _check_consolidation(self, df, cfg, mode_name: str) -> bool:
+    def _check_consolidation(self, df, cfg, mode_name: str, use_legacy: bool = False) -> bool:
         """Check consolidation before breakout"""
         if mode_name == 'scalping':
             return True
-        
+
         min_cons_bars = cfg['min_consolidation_bars']
-        return bool(df['Is_Consolidating'].iloc[-min_cons_bars-1:-1].any())
+
+        if use_legacy:
+            # V1: any single narrow bar counts
+            return bool(df['Is_Consolidating'].iloc[-min_cons_bars-1:-1].any())
+
+        # V2: Require 3+ consecutive narrow-range bars AND low volume
+        check_window = df.iloc[-20:-1]  # Look at last 20 bars before current
+        if len(check_window) < 3:
+            return False
+
+        is_narrow = check_window['Is_Consolidating']
+        # Count max consecutive narrow bars
+        max_consecutive = 0
+        current_streak = 0
+        for val in is_narrow:
+            if val:
+                current_streak += 1
+                max_consecutive = max(max_consecutive, current_streak)
+            else:
+                current_streak = 0
+
+        if max_consecutive < 3:
+            return False
+
+        # Check volume during consolidation is below average
+        consol_vol = check_window.loc[is_narrow, 'volume'].mean() if is_narrow.any() else float('inf')
+        avg_vol = df['volume'].rolling(20).mean().iloc[-2]
+        if pd.isna(avg_vol) or pd.isna(consol_vol):
+            return max_consecutive >= 3
+        return consol_vol < avg_vol * 0.8
     
-    def _calculate_rr(self, latest, cfg, mode_name: str, spread_pct: Optional[float]) -> tuple:
+    def _calculate_rr(self, latest, cfg, mode_name: str, spread_pct: Optional[float],
+                      df: pd.DataFrame = None, use_structural: bool = True) -> tuple:
         """Calculate stop loss, target, and risk/reward ratio"""
-        sl = latest['close'] - (cfg['sl_mult'] * latest['ATR'])
+        atr_stop = latest['close'] - (cfg['sl_mult'] * latest['ATR'])
+
+        # Structural stop: use swing low of last 20 bars (take the higher/tighter stop)
+        if use_structural and df is not None and len(df) >= 20:
+            swing_low = df['low'].iloc[-20:].min()
+            sl = max(swing_low, atr_stop)  # Tighter stop = less risk
+        else:
+            sl = atr_stop
+
         tp = latest['close'] + (cfg['tp_mult'] * latest['ATR'])
         
         if mode_name == 'scalping' and spread_pct is not None:
@@ -272,3 +381,161 @@ class BreakoutDetector:
             return 'HIGH'
         
         return 'PREMIUM' if has_gap_up else 'HIGH'
+
+    # --- Scoring weights for each check ---
+    # V1 keys (legacy): rsi_favorable, macd_favorable, adx_trending, vwap_ok
+    # V2 keys (new): momentum_strong, conviction_strong
+    SCORING_WEIGHTS = {
+        'vol_confirm': 18,
+        'trend_ok': 18,
+        'momentum_strong': 15,
+        'dist_confirm': 10,
+        'candle_ok': 8,
+        'rr_ok': 10,
+        'no_vol_divergence': 5,
+        'conviction_strong': 10,
+        'rs_ok': 8,
+        'consolidation': 8,
+        # V1 legacy weights (used when use_legacy_momentum=True)
+        'vwap_ok': 8,
+        'rsi_favorable': 8,
+        'macd_favorable': 7,
+        'adx_trending': 5,
+    }
+
+    def _calculate_signal_score(self, checks: dict) -> tuple:
+        """Calculate weighted signal score from boolean checks"""
+        score = 0
+        max_score = 0
+        for key, passed in checks.items():
+            weight = self.SCORING_WEIGHTS.get(key, 5)
+            max_score += weight
+            if passed:
+                score += weight
+
+        pct = (score / max_score * 100) if max_score > 0 else 0
+
+        if pct >= 80:
+            quality = 'PREMIUM'
+        elif pct >= 65:
+            quality = 'HIGH'
+        elif pct >= 55:
+            quality = 'STANDARD'
+        else:
+            quality = 'REJECT'
+
+        return score, max_score, quality
+
+    def detect_pullback(self, df: pd.DataFrame, symbol: str, mode_name: str,
+                        timeframe: str, spy_perf: float, **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        Detect pullback re-entry after a prior breakout.
+        Finds stocks that broke out recently and pulled back to support.
+        """
+        cfg = MODES[mode_name]
+        lookback = kwargs.get('lookback') or cfg['lookback']
+
+        min_bars = max(50, lookback + 20)
+        if len(df) < min_bars:
+            return None
+
+        df = calculate_all_indicators(
+            df, cfg['trend_type'], cfg.get('trend_period'), timeframe
+        )
+
+        latest = df.iloc[-1]
+
+        # 1. Find if a breakout happened in the last 20 bars
+        breakout_bar = None
+        for i in range(-20, -1):
+            if abs(i) >= len(df):
+                continue
+            bar = df.iloc[i]
+            prev_high = df['high'].iloc[:i].rolling(lookback).max().iloc[-1] if len(df[:i]) > lookback else None
+            if prev_high is None:
+                continue
+            if bar['close'] > prev_high and bar['Vol_Ratio'] >= cfg['vol_thresh']:
+                breakout_bar = i
+                break
+
+        if breakout_bar is None:
+            return None
+
+        breakout_price = df.iloc[breakout_bar]['close']
+
+        # 2. Price must have pulled back from the breakout high
+        post_breakout = df.iloc[breakout_bar:]
+        post_high = post_breakout['high'].max()
+        pullback_depth = (post_high - latest['close']) / latest['ATR']
+
+        if pullback_depth < 0.3 or pullback_depth > 4.0:
+            return None  # Too shallow or too deep
+
+        # 3. Price sitting near EMA support (8 or 21)
+        ema8 = df['close'].ewm(span=8, adjust=False).mean().iloc[-1]
+        ema21 = df['close'].ewm(span=21, adjust=False).mean().iloc[-1]
+        near_ema = (
+            abs(latest['close'] - ema8) / latest['ATR'] < 1.0 or
+            abs(latest['close'] - ema21) / latest['ATR'] < 1.0
+        )
+
+        # 4. Volume contracting on pullback (healthy dip)
+        recent_vol = df['volume'].iloc[-3:].mean()
+        breakout_vol = df['volume'].iloc[breakout_bar]
+        vol_contracting = recent_vol < breakout_vol * 0.7
+
+        # 5. RSI reset (not overbought)
+        rsi_val = latest.get('RSI', 50)
+        rsi_reset = 35 <= rsi_val <= 60 if not pd.isna(rsi_val) else True
+
+        # 6. Bullish candle forming
+        bullish_candle = latest['close'] > latest['open']
+
+        # 7. Still above breakout level
+        above_breakout = latest['close'] >= breakout_price * 0.98
+
+        # Score the pullback
+        checks = {
+            'near_ema': near_ema,
+            'vol_contracting': vol_contracting,
+            'rsi_reset': rsi_reset,
+            'bullish_candle': bullish_candle,
+            'above_breakout': above_breakout,
+        }
+        passed = sum(1 for v in checks.values() if v)
+
+        if passed < 2:
+            return None
+
+        # Calculate R:R
+        sl = min(ema21, latest['close'] - cfg['sl_mult'] * latest['ATR'])
+        tp = post_high + (0.5 * latest['ATR'])  # Target above prior high
+        risk = latest['close'] - sl
+        reward = tp - latest['close']
+        rr = reward / max(risk, 1e-6)
+
+        if rr < cfg['min_rr']:
+            return None
+
+        quality = 'HIGH' if passed >= 4 else 'STANDARD'
+
+        signal = {
+            'Symbol': symbol,
+            'Price': round(latest['close'], 2),
+            'Vol': round(latest['Vol_Ratio'], 2),
+            'Dist': round(pullback_depth, 2),
+            'Stop': round(sl, 2),
+            'Target': round(tp, 2),
+            'R:R': round(rr, 2),
+            'Gap%': 0,
+            'Mode': mode_name,
+            'Quality': quality,
+            'Type': 'PULLBACK',
+        }
+
+        logger.info(
+            f"🔄 PULLBACK {symbol} {mode_name.upper()} @ ${latest['close']:.2f} | "
+            f"SL: ${sl:.2f} | TP: ${tp:.2f} | R:R={rr:.2f} | {quality}"
+        )
+
+        return signal

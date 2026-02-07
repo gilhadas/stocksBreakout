@@ -38,25 +38,19 @@ pip install ib_insync pandas numpy
 
 ```bash
 # Swing trading scan
-python3 breakout_scanner.py watchlist.txt --mode swing
-
-# Mock trading (no IB connection needed - perfect for testing!)
-python3 breakout_scanner.py watchlist.txt --mode swing --mock
+python breakout_scanner.py watchlist.txt --mode swing
 
 # Day trading scan
-python3 breakout_scanner.py watchlist.txt --mode daytrade
+python breakout_scanner.py watchlist.txt --mode daytrade
 
 # Scalping (1min bars)
-python3 breakout_scanner.py watchlist.txt --mode scalping
+python breakout_scanner.py watchlist.txt --mode scalping
 
 # With Level 2 market depth analysis
-python3 breakout_scanner.py watchlist.txt --mode swing --level2
-
-# Historical simulation
-python3 breakout_scanner.py watchlist.txt --mode swing --simulate --sim-start 2025-01-01 --sim-end 2025-12-31
+python breakout_scanner.py watchlist.txt --mode swing --level2
 
 # Exit evaluation
-python3 breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv
+python breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv
 ```
 
 ## 📋 File Formats
@@ -167,31 +161,31 @@ Priority-ordered exit signals:
 
 ```bash
 # Long-term position trading (weekly bars)
-python3 breakout_scanner.py watchlist.txt --mode longterm
+python breakout_scanner.py watchlist.txt --mode longterm
 
 # Combined scan + exit evaluation
-python3 breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv --both
+python breakout_scanner.py watchlist.txt --mode swing --exit-file positions.csv --both
 
 # With Level 2 market depth analysis
-python3 breakout_scanner.py watchlist.txt --mode swing --level2
+python breakout_scanner.py watchlist.txt --mode swing --level2
 
 # Cron mode (silent, notifications only)
-python3 breakout_scanner.py watchlist.txt --mode swing --cron --notify
+python breakout_scanner.py watchlist.txt --mode swing --cron --notify
 
 # Custom volume threshold
-python3 breakout_scanner.py watchlist.txt --mode swing --vol 1.5
+python breakout_scanner.py watchlist.txt --mode swing --vol 1.5
 
 # Custom ATR multiplier
-python3 breakout_scanner.py watchlist.txt --mode daytrade --atr 0.3
+python breakout_scanner.py watchlist.txt --mode daytrade --atr 0.3
 
 # Custom timeframe
-python3 breakout_scanner.py watchlist.txt --mode swing --tf "4 hour"
+python breakout_scanner.py watchlist.txt --mode swing --tf "4 hour"
 
 # Live trading (requires real-time data subscription)
-python3 breakout_scanner.py watchlist.txt --mode swing --live
+python breakout_scanner.py watchlist.txt --mode swing --live
 
 # Full-featured example
-python3 breakout_scanner.py watchlist.txt --mode swing --level2 --notify --exit-file positions.csv --both
+python breakout_scanner.py watchlist.txt --mode swing --level2 --notify --exit-file positions.csv --both
 ```
 
 ## 🔔 Notifications ⭐ NEW
@@ -236,7 +230,7 @@ NOTIFICATIONS = {
 
 Enable notifications with `--notify` flag:
 ```bash
-python3 breakout_scanner.py watchlist.txt --mode swing --notify
+python breakout_scanner.py watchlist.txt --mode swing --notify
 ```
 
 ### Mac Native Notifications ⭐ NEW
@@ -327,7 +321,7 @@ crontab -e
 Enable advanced order flow analysis:
 
 ```bash
-python3 breakout_scanner.py watchlist.txt --mode swing --level2
+python breakout_scanner.py watchlist.txt --mode swing --level2
 ```
 
 ### What Level 2 Adds:
@@ -384,90 +378,6 @@ CONFIG = {
 - ✅ Automated execution monitoring
 
 **See [ALGO_TRADING_GUIDE.md](ALGO_TRADING_GUIDE.md) for complete documentation.**
-
-## 🧪 Mock Trading & Simulation ⭐ NEW
-
-Test all features without risking real money or needing IB connection!
-
-### Mock Trading Mode
-
-Perfect for testing strategies, learning the system, or developing new features.
-
-```bash
-# Run scanner with mock trading (no IB needed!)
-python3 breakout_scanner.py input/watchlist.txt --mode swing --mock
-
-# Test different scenarios
-python3 breakout_scanner.py input/watchlist.txt --mode swing --mock --mock-mode realistic
-python3 breakout_scanner.py input/watchlist.txt --mode swing --mock --mock-mode optimistic
-python3 breakout_scanner.py input/watchlist.txt --mode swing --mock --mock-mode pessimistic
-```
-
-**Mock Modes:**
-- `realistic` - Simulates real market conditions (default)
-- `optimistic` - Best case scenario (0.01% slippage)
-- `pessimistic` - Worst case scenario (0.5% slippage)
-
-**Features:**
-- ✅ No IB connection required
-- ✅ Realistic price data simulation
-- ✅ Simulated order fills with slippage
-- ✅ Level 2 market depth simulation
-- ✅ Full P&L tracking
-- ✅ Trade statistics and reports
-- ✅ Safe testing environment
-
-### Historical Simulation
-
-Backtest your strategy on historical periods:
-
-```bash
-# Run simulation on 2025 data
-python3 breakout_scanner.py input/watchlist.txt \
-  --mode swing \
-  --simulate \
-  --sim-start 2025-01-01 \
-  --sim-end 2025-12-31
-```
-
-**Simulation Features:**
-- 📊 Historical performance analysis
-- 📈 Win rate calculation
-- 💰 P&L tracking
-- 📉 Max drawdown measurement
-- 🎯 Sharpe ratio calculation
-- 📝 Detailed trade log
-- 💾 JSON report export
-
-**Output Example:**
-```
-Simulation Report:
-  Total Return: +15.3%
-  Win Rate: 62.5%
-  Sharpe Ratio: 1.85
-  Max Drawdown: -8.2%
-  Total Trades: 48
-```
-
-### Mock Trading Statistics
-
-```bash
-# After running mock trades, check stats
-# Report saved to: mock_trading_report.json
-```
-
-```json
-{
-  "stats": {
-    "total_trades": 25,
-    "win_rate": 64.0,
-    "total_pnl": 15340.50,
-    "total_return": 15.34,
-    "sharpe_ratio": 1.82
-  },
-  "trades": [...]
-}
-```
 
 ## ⚙️ Configuration
 

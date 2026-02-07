@@ -117,7 +117,9 @@ class ScannerOrchestrator:
                     vol_thresh=vol_thresh,
                     atr_mult=atr_mult,
                     spread_pct=spread_pct,
-                    regime=regime
+                    regime=regime,
+                    use_scoring=True,
+                    use_legacy_momentum=False
                 )
                 
                 # If signal found and Level 2 enabled, analyze depth

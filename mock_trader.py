@@ -301,38 +301,41 @@ class MockTrader:
         self.open_positions: Dict[int, MockTrade] = {}  # trade_id -> MockTrade
         self.trade_id_counter = 1
     
-    def calculate_position_size(self, price: float, stop_loss: float) -> int:
+    # Position size multipliers by signal quality
+    QUALITY_MULTIPLIERS = {
+        'PREMIUM': 3.0,   # Up to 15% of capital
+        'HIGH': 2.0,      # Up to 10% of capital
+        'STANDARD': 1.0,  # 5% of capital (default)
+    }
+
+    def calculate_position_size(self, price: float, stop_loss: float,
+                                quality: str = 'STANDARD') -> int:
         """
-        Calculate position size based on risk management rules
-        
-        Args:
-            price: Entry price
-            stop_loss: Stop loss price
-        
-        Returns:
-            Quantity to trade
+        Calculate position size based on risk management rules and signal quality.
+
+        PREMIUM signals get 3x base size, HIGH gets 2x, STANDARD gets 1x.
         """
-        # Calculate max position value (5% of capital)
-        max_position_value = self.capital * self.max_position_pct
-        
-        # Calculate max shares based on position size limit
+        multiplier = self.QUALITY_MULTIPLIERS.get(quality, 1.0)
+
+        # Calculate max position value (scaled by quality)
+        max_position_value = self.capital * self.max_position_pct * multiplier
         max_shares_by_position = int(max_position_value / price)
-        
-        # Calculate max shares based on risk limit (1% of capital)
+
+        # Calculate max shares based on risk limit (scaled by quality)
         risk_per_share = abs(price - stop_loss)
         if risk_per_share > 0:
-            max_risk_amount = self.capital * self.max_risk_pct
+            max_risk_amount = self.capital * self.max_risk_pct * multiplier
             max_shares_by_risk = int(max_risk_amount / risk_per_share)
         else:
             max_shares_by_risk = max_shares_by_position
-        
+
         # Take the smaller of the two limits
         quantity = min(max_shares_by_position, max_shares_by_risk)
-        
+
         # Ensure at least 1 share if we have enough capital
         if quantity < 1 and self.capital >= price:
             quantity = 1
-        
+
         return quantity
     
     def enter_trade(self, symbol: str, action: str, quantity: int, 
@@ -381,14 +384,16 @@ class MockTrader:
         trade.exit_price = exit_price
         trade.exit_time = datetime.now()
         
-        # Calculate P&L
+        # Calculate P&L on remaining shares
         if trade.action == 'BUY':
-            pnl = (exit_price - trade.entry_price) * trade.quantity
+            remaining_pnl = (exit_price - trade.entry_price) * trade.quantity
         else:
-            pnl = (trade.entry_price - exit_price) * trade.quantity
-        
-        trade.pnl = pnl
-        trade.pnl_pct = (pnl / (trade.entry_price * trade.quantity)) * 100
+            remaining_pnl = (trade.entry_price - exit_price) * trade.quantity
+
+        # Add to any accumulated scale-out PnL
+        trade.pnl += remaining_pnl
+        original_cost = trade.entry_price * (trade.quantity + getattr(trade, '_scaled_qty', 0))
+        trade.pnl_pct = (trade.pnl / max(original_cost, 1e-6)) * 100
         
         # Determine status
         if reason == 'Stop Loss':
@@ -405,7 +410,7 @@ class MockTrader:
         
         logger.info(
             f"📊 Mock trade closed: {symbol} @ ${exit_price:.2f} | "
-            f"P&L: ${pnl:+.2f} ({trade.pnl_pct:+.2f}%) | Reason: {reason}"
+            f"P&L: ${trade.pnl:+.2f} ({trade.pnl_pct:+.2f}%) | Reason: {reason}"
         )
         
         return trade
@@ -539,17 +544,19 @@ class SimulationMode:
             
             # Execute signals
             for _, signal in day_signals.iterrows():
-                # Calculate position size based on risk management
+                # Calculate position size based on risk management and signal quality
+                quality = signal.get('quality', 'STANDARD')
                 quantity = self.trader.calculate_position_size(
                     price=signal['price'],
-                    stop_loss=signal.get('stop_loss', signal['price'] * 0.95)
+                    stop_loss=signal.get('stop_loss', signal['price'] * 0.95),
+                    quality=quality
                 )
-                
+
                 # Skip if quantity is 0 (insufficient capital)
                 if quantity == 0:
                     logger.warning(f"Skipping {signal['symbol']} - insufficient capital for position")
                     continue
-                
+
                 self.trader.enter_trade(
                     symbol=signal['symbol'],
                     action=signal['action'],
@@ -620,13 +627,40 @@ class SimulationMode:
                 exit_price = trade.stop_loss
                 if current_open < trade.stop_loss:
                      exit_price = current_open
-                
+
                 logger.info(f"🛑 Stop hit for {symbol} @ ${exit_price:.2f}")
                 self.trader.exit_trade(symbol, exit_price, 'Stop Loss')
-                continue 
-                
-            # Check if take profit was hit
-            elif current_high >= trade.take_profit:
+                continue
+
+            # Scale-out: partial exit at 1R profit
+            risk = trade.entry_price - trade.stop_loss
+            if risk > 0 and not getattr(trade, '_scaled_1r', False):
+                target_1r = trade.entry_price + risk
+                if current_high >= target_1r and trade.quantity >= 3:
+                    partial_qty = trade.quantity // 3
+                    trade.quantity -= partial_qty
+                    trade._scaled_qty = getattr(trade, '_scaled_qty', 0) + partial_qty
+                    pnl = (target_1r - trade.entry_price) * partial_qty
+                    trade.pnl += pnl
+                    self.trader.capital += target_1r * partial_qty
+                    trade._scaled_1r = True
+                    logger.debug(f"📊 Scale-out 1R: {symbol} sold {partial_qty} @ ${target_1r:.2f}")
+
+            # Scale-out: partial exit at 2R profit
+            if risk > 0 and getattr(trade, '_scaled_1r', False) and not getattr(trade, '_scaled_2r', False):
+                target_2r = trade.entry_price + 2 * risk
+                if current_high >= target_2r and trade.quantity >= 2:
+                    partial_qty = trade.quantity // 2
+                    trade.quantity -= partial_qty
+                    trade._scaled_qty = getattr(trade, '_scaled_qty', 0) + partial_qty
+                    pnl = (target_2r - trade.entry_price) * partial_qty
+                    trade.pnl += pnl
+                    self.trader.capital += target_2r * partial_qty
+                    trade._scaled_2r = True
+                    logger.debug(f"📊 Scale-out 2R: {symbol} sold {partial_qty} @ ${target_2r:.2f}")
+
+            # Check if take profit was hit on remaining
+            if current_high >= trade.take_profit:
                 logger.info(f"🎯 Take profit hit for {symbol} @ ${trade.take_profit:.2f}")
                 self.trader.exit_trade(symbol, trade.take_profit, 'Take Profit')
 
