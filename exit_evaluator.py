@@ -7,7 +7,7 @@ from typing import Dict, Any
 import pandas as pd
 import numpy as np
 
-from config import MODES
+from config import MODES, MAX_HOLD_BARS
 from indicators import calculate_all_indicators
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,8 @@ class ExitEvaluator:
     
     def evaluate(self, df: pd.DataFrame, symbol: str, mode_name: str,
                 entry_price: float, stop_price: float, target_price: float,
-                timeframe: str, regime: str = "NORMAL") -> Dict[str, Any]:
+                timeframe: str, regime: str = "NORMAL",
+                days_held: int = 0) -> Dict[str, Any]:
         """
         Evaluate exit conditions for a LONG position
         
@@ -106,7 +107,16 @@ class ExitEvaluator:
         )
         if choppy_signal:
             exit_signals.append(choppy_signal)
-        
+
+        # 6b. Max hold period (V3)
+        max_hold = MAX_HOLD_BARS.get(mode_name, 30)
+        if max_hold > 0 and days_held >= max_hold:
+            exit_signals.append((
+                'EXIT_FULL',
+                f'Max hold period reached ({days_held}/{max_hold} days)',
+                55
+            ))
+
         # 7. Trail stop suggestion
         trail_signal = self._check_trail_stop(
             df, mode_name, stop_price, atr, unrealized_r

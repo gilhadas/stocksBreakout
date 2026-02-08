@@ -61,6 +61,25 @@ def calculate_bollinger_bands(df: pd.DataFrame, period: int = 20, std_dev: float
     return upper, lower, width, avg_width, is_consolidating
 
 
+def calculate_bb_trend(df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> tuple:
+    """
+    Calculate Bollinger Band trend position.
+    Returns: (bb_position, bb_trend)
+    - bb_position: 0-100 scale of where price sits within bands
+    - bb_trend: 'bullish' (>=80), 'bearish' (<=20), or 'neutral'
+    """
+    upper, lower, _, _, _ = calculate_bollinger_bands(df, period, std_dev)
+    band_width = upper - lower
+    bb_position = ((df['close'] - lower) / band_width.replace(0, 1e-10)) * 100
+    bb_position = bb_position.clip(0, 100)
+
+    bb_trend = pd.Series('neutral', index=df.index)
+    bb_trend = bb_trend.where(bb_position < 80, 'bullish')
+    bb_trend = bb_trend.where(bb_position > 20, 'bearish')
+
+    return bb_position, bb_trend
+
+
 def calculate_trend_line(df: pd.DataFrame, trend_type: str, period: int) -> pd.Series:
     """
     Calculate trend line based on type
@@ -292,6 +311,11 @@ def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
     df['BB_Width'] = width
     df['Avg_BB_Width'] = avg_width
     df['Is_Consolidating'] = is_consol
+
+    # BB Trend
+    bb_position, bb_trend = calculate_bb_trend(df)
+    df['BB_Position'] = bb_position
+    df['BB_Trend'] = bb_trend
 
     # Momentum indicators
     df['RSI'] = calculate_rsi(df)

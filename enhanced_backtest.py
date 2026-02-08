@@ -70,9 +70,12 @@ def fetch_all_data(symbols, start_date, end_date):
     historical = {}
     end_prices = {}
 
+    # Need extra history for indicators (trend_period=150)
+    fetch_start = (pd.to_datetime(start_date) - timedelta(days=365)).strftime('%Y-%m-%d')
+
     # Fetch SPY first for RS calculation
     spy_df = yf_adapter.get_historical_data('SPY', '1 day',
-                                             start_date=start_date,
+                                             start_date=fetch_start,
                                              end_date=end_date)
     if spy_df is not None and len(spy_df) > 0:
         historical['SPY'] = spy_df
@@ -83,7 +86,7 @@ def fetch_all_data(symbols, start_date, end_date):
             continue
         try:
             df = yf_adapter.get_historical_data(symbol, '1 day',
-                                                 start_date=start_date,
+                                                 start_date=fetch_start,
                                                  end_date=end_date)
             if df is not None and len(df) > 20:
                 historical[symbol] = df
@@ -140,7 +143,7 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
             df = historical[symbol]
             df_slice = df[df.index <= sim_date]
 
-            if len(df_slice) < 50:
+            if len(df_slice) < 150:
                 continue
             if df_slice.index[-1].date() != sim_date.date():
                 continue
@@ -175,6 +178,9 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
                         'quality': sig['Quality'],
                         'mode': mode_name,
                         'type': 'BREAKOUT',
+                        'win_probability': sig.get('WinProb', 0.50),
+                        'rr_grade': sig.get('RR_Grade', ''),
+                        'patterns': sig.get('Patterns', ''),
                     })
                     cooldowns[symbol] = sim_date
                     break  # One signal per symbol per day
@@ -362,7 +368,7 @@ async def main():
 
     # Scan for all signals — V1 (legacy) and V2 (new composite)
     print("\n" + "=" * 80)
-    print("SCANNING FOR SIGNALS — V1 (Legacy) vs V2 (Optimized)")
+    print("SCANNING FOR SIGNALS — V1 (Legacy) vs V2/V3 (Optimized + BB/Patterns)")
     print("=" * 80)
 
     v1_signals = run_enhanced_scan(historical, start_date, end_date,
@@ -371,6 +377,10 @@ async def main():
     v2_signals = run_enhanced_scan(historical, start_date, end_date,
                                     modes=['swing', 'longterm'],
                                     use_legacy_momentum=False)
+
+    # V3 signals use the same scan as V2 — the new BB filter, pattern scoring,
+    # and Grade D rejection are automatically applied by the updated scanner
+    v3_signals = v2_signals  # V3 features are baked into the scanner
 
     if not v1_signals and not v2_signals:
         print("\nNo signals generated. Exiting.")
@@ -426,6 +436,39 @@ async def main():
             'pos_pct': 0.15, 'risk_pct': 0.03,
             'trailing': False,
         },
+        # V3 configs (BB filter + patterns + Grade D rejection + SPY hedge)
+        {
+            'name': 'V3-A) HIGH+, BB filter, patterns',
+            'signals': v3_signals,
+            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'spy_hedge': False, 'spy_alloc': 0.0,
+        },
+        {
+            'name': 'V3-B) HIGH+, 30% SPY hedge',
+            'signals': v3_signals,
+            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'spy_hedge': True, 'spy_alloc': 0.30,
+        },
+        {
+            'name': 'V3-C) PREMIUM only, 50% SPY hedge',
+            'signals': v3_signals,
+            'filter': lambda s: s.get('quality') == 'PREMIUM',
+            'pos_pct': 0.15, 'risk_pct': 0.03,
+            'trailing': False,
+            'spy_hedge': True, 'spy_alloc': 0.50,
+        },
+        {
+            'name': 'V3-D) ALL quality, 40% SPY hedge',
+            'signals': v3_signals,
+            'filter': lambda s: True,
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'spy_hedge': True, 'spy_alloc': 0.40,
+        },
     ]
 
     results_list = []
@@ -448,6 +491,8 @@ async def main():
             use_trailing_stop=cfg.get('trailing', False),
             trailing_stop_atr_mult=cfg.get('trail_atr', 4.0),
             trailing_stop_activation_pct=cfg.get('trail_act', 0.10),
+            spy_hedge_enabled=cfg.get('spy_hedge', False),
+            spy_allocation_pct=cfg.get('spy_alloc', 0.0),
         )
 
         report = sim.run_simulation(filtered, end_prices=end_prices,
@@ -459,7 +504,7 @@ async def main():
 
     # Print comparison table
     print("\n\n" + "=" * 120)
-    print("V1 vs V2 COMPARISON vs SPY")
+    print("V1 vs V2 vs V3 COMPARISON vs SPY")
     print("=" * 120)
 
     spy_ret = spy_report['total_return'] if spy_report else 0

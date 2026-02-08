@@ -14,6 +14,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
 
+from config import MAX_HOLD_BARS, WIN_PROBABILITY
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,9 @@ class MockTrade:
     pnl: float = 0
     pnl_pct: float = 0
     status: str = 'OPEN'  # OPEN | CLOSED | STOPPED
+    mode: str = 'swing'
+    hold_days: int = 0
+    win_probability: float = 0.50
     
     def to_dict(self):
         d = asdict(self)
@@ -309,19 +314,29 @@ class MockTrader:
     }
 
     def calculate_position_size(self, price: float, stop_loss: float,
-                                quality: str = 'STANDARD') -> int:
+                                quality: str = 'STANDARD',
+                                win_probability: float = 0.50) -> int:
         """
-        Calculate position size based on risk management rules and signal quality.
+        Calculate position size based on risk management rules, signal quality,
+        and win probability.
 
         PREMIUM signals get 3x base size, HIGH gets 2x, STANDARD gets 1x.
+        Win probability adjusts: HIGH prob = 1.2x, LOW prob = 0.7x.
         """
         multiplier = self.QUALITY_MULTIPLIERS.get(quality, 1.0)
 
-        # Calculate max position value (scaled by quality)
+        # Win probability sizing adjustment
+        wp_cfg = WIN_PROBABILITY
+        if win_probability >= wp_cfg['high_threshold']:
+            multiplier *= wp_cfg['high_size_mult']
+        elif win_probability < wp_cfg['low_threshold']:
+            multiplier *= wp_cfg['low_size_mult']
+
+        # Calculate max position value (scaled by quality + win prob)
         max_position_value = self.capital * self.max_position_pct * multiplier
         max_shares_by_position = int(max_position_value / price)
 
-        # Calculate max shares based on risk limit (scaled by quality)
+        # Calculate max shares based on risk limit (scaled by quality + win prob)
         risk_per_share = abs(price - stop_loss)
         if risk_per_share > 0:
             max_risk_amount = self.capital * self.max_risk_pct * multiplier
@@ -492,7 +507,8 @@ class SimulationMode:
     def __init__(self, start_date: str, end_date: str, initial_capital: float = 100000,
                  max_position_pct: float = 0.05, max_risk_pct: float = 0.01,
                  use_trailing_stop: bool = False, trailing_stop_atr_mult: float = 2.0,
-                 trailing_stop_activation_pct: float = 0.0):
+                 trailing_stop_activation_pct: float = 0.0,
+                 spy_hedge_enabled: bool = False, spy_allocation_pct: float = 0.0):
         """
         Args:
             start_date: YYYY-MM-DD
@@ -503,6 +519,8 @@ class SimulationMode:
             use_trailing_stop: Enable ATR-based trailing stop (default False)
             trailing_stop_atr_mult: ATR multiplier for trailing stop (default 2.0)
             trailing_stop_activation_pct: Only activate trailing stop after this % profit (default 0.0)
+            spy_hedge_enabled: Enable SPY hedge allocation (default False)
+            spy_allocation_pct: Percentage of capital allocated to SPY (default 0.0)
         """
         self.start_date = pd.to_datetime(start_date)
         self.end_date = pd.to_datetime(end_date)
@@ -513,6 +531,11 @@ class SimulationMode:
         self.trailing_stop_atr_mult = trailing_stop_atr_mult
         self.trailing_stop_activation_pct = trailing_stop_activation_pct
         self.historical_data = {}  # Store historical data for each symbol
+        # SPY hedge
+        self.spy_hedge_enabled = spy_hedge_enabled
+        self.spy_allocation_pct = spy_allocation_pct
+        self.spy_shares = 0
+        self.spy_entry_price = 0.0
     
     def run_simulation(self, signals: List[Dict], end_prices: Dict[str, float] = None,
                        historical_data: Dict[str, pd.DataFrame] = None):
@@ -525,16 +548,32 @@ class SimulationMode:
             historical_data: Dict of symbol -> DataFrame with historical prices for trailing stops
         """
         logger.info(f"🔄 Running simulation: {self.start_date.date()} to {self.end_date.date()}")
-        
+
         # Store end prices and historical data for closing positions
         self.end_prices = end_prices or {}
         self.historical_data = historical_data or {}
-        
+
+        # --- SPY HEDGE: Buy at start ---
+        if self.spy_hedge_enabled and self.spy_allocation_pct > 0:
+            spy_df = self.historical_data.get('SPY')
+            if spy_df is not None and len(spy_df) > 0:
+                spy_start = spy_df[spy_df.index >= self.start_date]
+                if len(spy_start) > 0:
+                    self.spy_entry_price = float(spy_start.iloc[0]['close'])
+                    spy_capital = self.trader.capital * self.spy_allocation_pct
+                    self.spy_shares = int(spy_capital / self.spy_entry_price)
+                    if self.spy_shares > 0:
+                        self.trader.capital -= self.spy_shares * self.spy_entry_price
+                        logger.info(
+                            f"🛡️ SPY hedge: bought {self.spy_shares} shares @ "
+                            f"${self.spy_entry_price:.2f} ({self.spy_allocation_pct*100:.0f}% allocation)"
+                        )
+
         # Sort signals by date
         signals_df = pd.DataFrame(signals)
         signals_df['date'] = pd.to_datetime(signals_df['date'])
         signals_df = signals_df.sort_values('date')
-        
+
         # Simulate day by day
         current_date = self.start_date
         
@@ -544,12 +583,14 @@ class SimulationMode:
             
             # Execute signals
             for _, signal in day_signals.iterrows():
-                # Calculate position size based on risk management and signal quality
+                # Calculate position size based on risk management, quality, and win prob
                 quality = signal.get('quality', 'STANDARD')
+                win_prob = signal.get('win_probability', 0.50)
                 quantity = self.trader.calculate_position_size(
                     price=signal['price'],
                     stop_loss=signal.get('stop_loss', signal['price'] * 0.95),
-                    quality=quality
+                    quality=quality,
+                    win_probability=win_prob
                 )
 
                 # Skip if quantity is 0 (insufficient capital)
@@ -557,7 +598,7 @@ class SimulationMode:
                     logger.warning(f"Skipping {signal['symbol']} - insufficient capital for position")
                     continue
 
-                self.trader.enter_trade(
+                trade = self.trader.enter_trade(
                     symbol=signal['symbol'],
                     action=signal['action'],
                     quantity=quantity,
@@ -565,6 +606,9 @@ class SimulationMode:
                     stop_loss=signal.get('stop_loss', signal['price'] * 0.95),
                     take_profit=signal.get('take_profit', signal['price'] * 1.10)
                 )
+                # Set V3 fields
+                trade.mode = signal.get('mode', 'swing')
+                trade.win_probability = win_prob
             
             # Check for exits (Stop Loss / Take Profit) - ALWAYS RUN
             if len(self.trader.open_positions) > 0:
@@ -577,7 +621,7 @@ class SimulationMode:
             # Track equity
             self.daily_equity.append({
                 'date': current_date,
-                'equity': self.trader.capital + self._calculate_open_position_value()
+                'equity': self.trader.capital + self._calculate_open_position_value(current_date)
             })
             
             current_date += timedelta(days=1)
@@ -588,13 +632,23 @@ class SimulationMode:
         # Generate report
         return self.generate_report()
     
-    def _calculate_open_position_value(self) -> float:
-        """Calculate value of open positions"""
-        # In simulation, assume positions maintain entry price
+    def _calculate_open_position_value(self, current_date=None) -> float:
+        """Calculate value of open positions including SPY hedge"""
         value = sum(
-            t.entry_price * t.quantity 
+            t.entry_price * t.quantity
             for t in self.trader.open_positions.values()
         )
+
+        # Include SPY hedge value
+        if self.spy_hedge_enabled and self.spy_shares > 0:
+            spy_price = self.spy_entry_price  # Default
+            spy_df = self.historical_data.get('SPY')
+            if spy_df is not None and current_date is not None:
+                spy_bar = spy_df[spy_df.index.date == current_date.date()]
+                if len(spy_bar) > 0:
+                    spy_price = float(spy_bar.iloc[-1]['close'])
+            value += self.spy_shares * spy_price
+
         return value
     
     def _check_exits(self, current_date: pd.Timestamp):
@@ -620,7 +674,16 @@ class SimulationMode:
             current_high = float(current_bar.iloc[-1]['high'])
             current_low = float(current_bar.iloc[-1]['low'])
             current_open = float(current_bar.iloc[-1]['open'])
-            
+            current_close = float(current_bar.iloc[-1]['close'])
+
+            # --- MAX HOLD PERIOD EXIT (V3) ---
+            days_held = (current_date - trade.entry_time).days
+            max_hold = MAX_HOLD_BARS.get(trade.mode, 30)
+            if max_hold > 0 and days_held >= max_hold:
+                logger.info(f"⏰ Max hold ({max_hold}d) reached for {symbol}, exiting @ ${current_close:.2f}")
+                self.trader.exit_trade(symbol, current_close, 'Max Hold Period')
+                continue
+
             # Check if stop loss was hit
             if current_low <= trade.stop_loss:
                 # Determine exit price (Stop Price or Open if gap down)
@@ -713,19 +776,33 @@ class SimulationMode:
                     logger.debug(f"📈 Trailing stop updated for {symbol}: ${old_stop:.2f} → ${new_stop:.2f} (ATR: ${atr:.2f})")
     
     def _close_all_positions(self):
-        """Close all open positions at end of simulation"""
+        """Close all open positions at end of simulation (including SPY hedge)"""
         logger.info(f"📊 Closing {len(self.trader.open_positions)} remaining positions...")
-        
+
+        # Close SPY hedge first
+        if self.spy_hedge_enabled and self.spy_shares > 0:
+            spy_end_price = self.spy_entry_price  # Default
+            spy_df = self.historical_data.get('SPY')
+            if spy_df is not None and len(spy_df) > 0:
+                spy_end_price = float(spy_df.iloc[-1]['close'])
+            spy_pnl = (spy_end_price - self.spy_entry_price) * self.spy_shares
+            self.trader.capital += self.spy_shares * spy_end_price
+            logger.info(
+                f"🛡️ SPY hedge closed: {self.spy_shares} shares @ ${spy_end_price:.2f} | "
+                f"PnL: ${spy_pnl:+,.2f}"
+            )
+            self.spy_shares = 0
+
         for trade_id, trade in list(self.trader.open_positions.items()):
-            symbol = trade.symbol  # Extract symbol from trade
-            
+            symbol = trade.symbol
+
             # Get actual end price from simulation data if available
             end_price = trade.entry_price  # Default fallback
-            
+
             # Try to get the actual end price from stored data
             if hasattr(self, 'end_prices') and symbol in self.end_prices:
                 end_price = self.end_prices[symbol]
-            
+
             # Close at actual end price
             self.trader.exit_trade(symbol, end_price, 'Simulation End')
     

@@ -19,28 +19,70 @@ PORTFOLIO = {
 # --- Signal Scoring Configuration ---
 # V2: Composite momentum + conviction scoring (replaces 3 binary checks)
 SCORING_WEIGHTS = {
-    'vol_confirm': 18,          # Volume is king
-    'trend_ok': 18,             # Trend is king
-    'momentum_strong': 15,      # Composite RSI+MACD+ADX+ROC score >= 50
+    'vol_confirm': 16,          # Volume is king
+    'trend_ok': 16,             # Trend is king
+    'momentum_strong': 13,      # Composite RSI+MACD+ADX+ROC score >= 50
     'dist_confirm': 10,
     'candle_ok': 8,
     'rr_ok': 10,
     'no_vol_divergence': 5,
-    'conviction_strong': 10,    # Breakout conviction score >= 40
+    'conviction_strong': 8,     # Breakout conviction score >= 40
     'rs_ok': 8,
-    'consolidation': 8,         # Tighter: 3+ consecutive narrow bars + low vol
+    'consolidation': 8,
+    'has_bullish_pattern': 10,  # V3: Pattern confirmation bonus
 }
 
 SCORE_THRESHOLDS = {
     'PREMIUM': 80,
     'HIGH': 65,
-    'STANDARD': 50,
+    'STANDARD': 60,
 }
 
 QUALITY_SIZING = {
     'PREMIUM': 3.0,   # Up to 15% of capital
     'HIGH': 2.0,      # Up to 10% of capital
     'STANDARD': 1.0,  # 5% of capital (base)
+}
+
+# --- R:R Grade Configuration ---
+RR_GRADE_CONFIG = {
+    'A': {'min_rr': 3.0, 'reject': False},
+    'B': {'min_rr': 2.0, 'reject': False},
+    'C': {'min_rr': 1.5, 'reject': False},
+    'D': {'min_rr': 0.0, 'reject': True},  # R:R < 1.5 = reject
+}
+
+# --- Max Hold Period (bars) ---
+MAX_HOLD_BARS = {
+    'swing': 30,
+    'longterm': 60,
+    'daytrade': 1,
+    'scalping': 0,   # No max hold for scalping
+}
+
+# --- SPY Hedge Configuration ---
+SPY_HEDGE = {
+    'enabled': True,
+    'min_allocation': 0.30,    # 30% of capital
+    'max_allocation': 0.50,    # 50% of capital
+    'rebalance_days': 5,       # Rebalance every 5 trading days
+}
+
+# --- BB Trend Filter ---
+BB_TREND_FILTER = {
+    'enabled': True,
+    'reject_bearish': True,    # Reject breakouts during bearish BB trend
+}
+
+# --- Win Probability Estimation ---
+WIN_PROBABILITY = {
+    'base_probability': 0.30,  # 30% base
+    'max_bonus': 0.45,         # Up to +45% bonus from confluence
+    'confluence_signals': 7,   # Number of confluence signals checked
+    'high_threshold': 0.65,    # >= 65% = HIGH conviction
+    'low_threshold': 0.50,     # < 50% = LOW conviction
+    'high_size_mult': 1.2,     # HIGH prob = 1.2x position size
+    'low_size_mult': 0.7,      # LOW prob = 0.7x position size
 }
 
 # --- Mode Configurations ---

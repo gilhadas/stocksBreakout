@@ -7,14 +7,16 @@ from typing import Optional, Dict, Any
 import pandas as pd
 import numpy as np
 
-from config import MODES, REGIME_CONFIG
+from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, BB_TREND_FILTER,
+                    WIN_PROBABILITY)
 from indicators import (
-    calculate_all_indicators, 
+    calculate_all_indicators,
     calculate_gap_percent,
     check_volume_divergence,
     check_candle_structure
 )
 from market_data import check_liquidity
+from pattern_recognition import get_pattern_score
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,16 @@ class BreakoutDetector:
             latest, latest['ATR'], cfg['max_wick_atr'], cfg['max_body_top_pct']
         )
         
+        # --- BB TREND GATE (V3) ---
+        bb_trend = latest.get('BB_Trend', 'neutral')
+        if BB_TREND_FILTER['enabled'] and BB_TREND_FILTER['reject_bearish']:
+            if bb_trend == 'bearish':
+                return None
+
+        # --- PATTERN DETECTION (V3) ---
+        has_bullish_pattern, has_bearish_pattern, pattern_target, pattern_names = \
+            get_pattern_score(df.tail(30), symbol)
+
         # --- FILTERS ---
         # 1. Relative Strength
         if mode_name != 'scalping':
@@ -119,8 +131,18 @@ class BreakoutDetector:
         # --- RISK/REWARD CALCULATION ---
         use_structural = not kwargs.get('use_legacy_momentum', False)
         sl, tp, rr = self._calculate_rr(latest, cfg, mode_name, spread_pct,
-                                         df=df, use_structural=use_structural)
+                                         df=df, use_structural=use_structural,
+                                         pattern_target=pattern_target)
         rr_ok = rr >= cfg['min_rr']
+
+        # --- R:R GRADE + GRADE D REJECTION (V3) ---
+        rr_grade = 'D'
+        for grade in ['A', 'B', 'C']:
+            if rr >= RR_GRADE_CONFIG[grade]['min_rr']:
+                rr_grade = grade
+                break
+        if RR_GRADE_CONFIG['D']['reject'] and rr_grade == 'D':
+            return None
         
         # --- REJECTION LOGGING ---
         rejection_reasons = self._collect_rejections(
@@ -187,7 +209,7 @@ class BreakoutDetector:
                     'adx_trending': adx_trending,
                 }
             else:
-                # V2: Composite momentum + conviction scores
+                # V2/V3: Composite momentum + conviction + pattern scores
                 checks = {
                     'vol_confirm': vol_confirm,
                     'trend_ok': trend_ok,
@@ -197,6 +219,7 @@ class BreakoutDetector:
                     'rr_ok': rr_ok,
                     'no_vol_divergence': not vol_divergence,
                     'conviction_strong': conviction_strong,
+                    'has_bullish_pattern': has_bullish_pattern,
                 }
 
             if mode_name != 'scalping':
@@ -222,6 +245,12 @@ class BreakoutDetector:
             quality = self._determine_quality(mode_name, latest, df, has_gap_up)
             score = 100
         
+        # --- WIN PROBABILITY ESTIMATION (V3) ---
+        win_prob, win_grade = self._estimate_win_probability(
+            trend_ok, momentum_strong, vol_confirm, has_bullish_pattern,
+            bb_trend, rr_grade, conviction_strong
+        )
+
         # Build signal
         signal = {
             'Symbol': symbol,
@@ -234,6 +263,10 @@ class BreakoutDetector:
             'Gap%': round(gap_percent, 2) if abs(gap_percent) > 0.5 else 0,
             'Mode': mode_name,
             'Quality': quality,
+            'RR_Grade': rr_grade,
+            'WinProb': win_prob,
+            'WinGrade': win_grade,
+            'Patterns': ', '.join(pattern_names) if pattern_names else '',
         }
         
         if mode_name == 'scalping' and spread_pct is not None:
@@ -306,7 +339,8 @@ class BreakoutDetector:
         return consol_vol < avg_vol * 0.8
     
     def _calculate_rr(self, latest, cfg, mode_name: str, spread_pct: Optional[float],
-                      df: pd.DataFrame = None, use_structural: bool = True) -> tuple:
+                      df: pd.DataFrame = None, use_structural: bool = True,
+                      pattern_target: float = 0.0) -> tuple:
         """Calculate stop loss, target, and risk/reward ratio"""
         atr_stop = latest['close'] - (cfg['sl_mult'] * latest['ATR'])
 
@@ -317,7 +351,9 @@ class BreakoutDetector:
         else:
             sl = atr_stop
 
-        tp = latest['close'] + (cfg['tp_mult'] * latest['ATR'])
+        atr_target = latest['close'] + (cfg['tp_mult'] * latest['ATR'])
+        # Use the higher of ATR target and pattern-derived target
+        tp = max(atr_target, pattern_target) if pattern_target > 0 else atr_target
         
         if mode_name == 'scalping' and spread_pct is not None:
             spread_price = latest['close'] * (spread_pct / 100.0)
@@ -386,16 +422,17 @@ class BreakoutDetector:
     # V1 keys (legacy): rsi_favorable, macd_favorable, adx_trending, vwap_ok
     # V2 keys (new): momentum_strong, conviction_strong
     SCORING_WEIGHTS = {
-        'vol_confirm': 18,
-        'trend_ok': 18,
-        'momentum_strong': 15,
+        'vol_confirm': 16,
+        'trend_ok': 16,
+        'momentum_strong': 13,
         'dist_confirm': 10,
         'candle_ok': 8,
         'rr_ok': 10,
         'no_vol_divergence': 5,
-        'conviction_strong': 10,
+        'conviction_strong': 8,
         'rs_ok': 8,
         'consolidation': 8,
+        'has_bullish_pattern': 10,  # V3: Pattern confirmation
         # V1 legacy weights (used when use_legacy_momentum=True)
         'vwap_ok': 8,
         'rsi_favorable': 8,
@@ -419,12 +456,48 @@ class BreakoutDetector:
             quality = 'PREMIUM'
         elif pct >= 65:
             quality = 'HIGH'
-        elif pct >= 55:
+        elif pct >= 60:
             quality = 'STANDARD'
         else:
             quality = 'REJECT'
 
         return score, max_score, quality
+
+    def _estimate_win_probability(self, trend_ok: bool, momentum_strong: bool,
+                                   vol_confirm: bool, has_bullish_pattern: bool,
+                                   bb_trend: str, rr_grade: str,
+                                   conviction_strong: bool) -> tuple:
+        """
+        Estimate win probability based on confluence of signals.
+
+        Returns:
+            (probability: float 0-1, grade: str 'HIGH'|'MEDIUM'|'LOW')
+        """
+        cfg = WIN_PROBABILITY
+        base = cfg['base_probability']
+        bonus_per_signal = cfg['max_bonus'] / cfg['confluence_signals']
+
+        signals_met = sum([
+            trend_ok,
+            momentum_strong,
+            vol_confirm,
+            has_bullish_pattern,
+            bb_trend == 'bullish',
+            rr_grade in ('A', 'B'),
+            conviction_strong,
+        ])
+
+        probability = base + (signals_met * bonus_per_signal)
+        probability = min(probability, base + cfg['max_bonus'])
+
+        if probability >= cfg['high_threshold']:
+            grade = 'HIGH'
+        elif probability >= cfg['low_threshold']:
+            grade = 'MEDIUM'
+        else:
+            grade = 'LOW'
+
+        return round(probability, 3), grade
 
     def detect_pullback(self, df: pd.DataFrame, symbol: str, mode_name: str,
                         timeframe: str, spy_perf: float, **kwargs) -> Optional[Dict[str, Any]]:
