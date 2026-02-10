@@ -62,9 +62,9 @@ MAX_HOLD_BARS = {
 
 # --- SPY Hedge Configuration ---
 SPY_HEDGE = {
-    'enabled': True,
-    'min_allocation': 0.30,    # 30% of capital
-    'max_allocation': 0.50,    # 50% of capital
+    'enabled': True,           # Enable SPY hedge (V3 default)
+    'min_allocation': 0.40,    # Fixed 40% allocation (Balanced mode)
+    'max_allocation': 0.40,    # Fixed 40% allocation
     'rebalance_days': 5,       # Rebalance every 5 trading days
 }
 

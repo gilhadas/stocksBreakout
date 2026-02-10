@@ -8,6 +8,7 @@ import asyncio
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 # Python 3.14 compatibility: Create event loop before importing ib_insync
 # This prevents "RuntimeError: There is no current event loop" from eventkit
@@ -79,7 +80,9 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         mode=args.mode,
         timeframe=args.timeframe,
         vol_thresh=args.vol,
-        atr_mult=args.atr
+        atr_mult=args.atr,
+        lookback=args.lookback,
+        detect_bounces=getattr(args, 'bounce', False)
     )
     
     # Display and save results
@@ -95,12 +98,14 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         
         output_file = orchestrator.save_results(results, args.mode, 'signals')
         
-        # Send notifications
+        # Send notifications with CSV attachment
         mode_desc = MODES[args.mode]['description']
+        watchlist_name = Path(args.file).stem  # Get filename without extension
         notifier.send_all(
-            subject=f"🚨 {args.mode.upper()} Breakout Signals",
-            message=f"{len(results)} {mode_desc} breakout signals detected",
-            signals=results
+            subject=f"🚨 {args.mode.upper()} Breakout Signals [{watchlist_name}]",
+            message=f"{len(results)} {mode_desc} breakout signals detected from {watchlist_name}",
+            signals=results,
+            csv_path=output_file
         )
         
         # Scalping warnings
@@ -113,9 +118,25 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     else:
         logger.info("No signals found")
     
-    # Save rejections
+    # Show and save rejections (near misses)
     rejections = orchestrator.get_rejection_reasons()
     if rejections:
+        logger.info(f"\n{'='*90}")
+        logger.info(f" NEAR MISSES: {len(rejections)} stocks broke out but were rejected")
+        logger.info(f"{'='*90}")
+        
+        # Show top 10 rejections with score details
+        rej_df = pd.DataFrame(rejections[:10])
+        if 'momentum' in rej_df.columns:
+            display_cols = ['symbol', 'price', 'vol_ratio', 'momentum', 'conviction', 'rsi', 'reasons']
+            display_cols = [c for c in display_cols if c in rej_df.columns]
+            print(rej_df[display_cols].to_string(index=False))
+        else:
+            print(rej_df.to_string(index=False))
+        
+        if len(rejections) > 10:
+            logger.info(f"   ... and {len(rejections) - 10} more")
+        
         orchestrator.save_results(rejections, args.mode, 'rejections')
         logger.info("   (Saved near-miss signals for analysis)")
     
@@ -269,6 +290,8 @@ async def run_simulation_mode(args, ib, data_source='auto'):
     end_date = pd.to_datetime(args.sim_end)
     
     # For each symbol, scan historical data and find breakouts
+    all_historical_data = {}
+    
     for idx, symbol in enumerate(watchlist, 1):
         print(f"[{idx}/{len(watchlist)}] Scanning {symbol:6}...", end="\r")
         
@@ -287,6 +310,10 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                 )
             else:
                 df = await orchestrator.market_data.get_historical_data(symbol, timeframe)
+            
+            # Cache full historical data for later use
+            if df is not None:
+                all_historical_data[symbol] = df
             
             if df is None or len(df) < 50:
                 continue
@@ -319,7 +346,10 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                         spy_perf=0.0,
                         regime='NORMAL',
                         use_scoring=True,
-                        use_legacy_momentum=False
+                        use_legacy_momentum=False,
+                        vol_thresh=args.vol,
+                        atr_mult=args.atr,
+                        lookback=args.lookback
                     )
                 else:
                     signal = orchestrator.detector.detect(
@@ -330,7 +360,10 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                         spy_perf=0.0,
                         regime='NORMAL',
                         use_scoring=True,
-                        use_legacy_momentum=False
+                        use_legacy_momentum=False,
+                        vol_thresh=args.vol,
+                        atr_mult=args.atr,
+                        lookback=args.lookback
                     )
                 
                 if signal:
@@ -362,7 +395,9 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                     # (removed the break statement to capture all signals)
         
         except Exception as e:
-            logger.debug(f"Failed to scan {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            logger.error(f"Failed to scan {symbol}: {e}")
             continue
     
     print()  # Clear progress line
@@ -382,14 +417,16 @@ async def run_simulation_mode(args, ib, data_source='auto'):
     
     for symbol in set(sig['symbol'] for sig in all_signals):
         try:
-            if use_yfinance:
-                df = yf_adapter.get_historical_data(
-                    symbol, timeframe,
-                    start_date=data_start,
-                    end_date=args.sim_end
-                )
-            else:
-                df = await orchestrator.market_data.get_historical_data(symbol, timeframe)
+            # key in all_historical_data might be different if symbol format changed? 
+            # But we used 'symbol' variable in loop, so it should be same.
+            df = all_historical_data.get(symbol)
+            
+            if df is None:
+                # Fallback if not cached (shouldn't happen if signal generated)
+                if use_yfinance:
+                     df = yf_adapter.get_historical_data(symbol, timeframe, start_date=data_start, end_date=args.sim_end)
+                else:
+                     df = await orchestrator.market_data.get_historical_data(symbol, timeframe)
             
             if df is not None and len(df) > 0:
                 # Get the last price in the simulation period
@@ -413,6 +450,8 @@ async def run_simulation_mode(args, ib, data_source='auto'):
     sim.trader.save_report(str(report_file))
     
     logger.info("✓ Simulation complete!")
+    
+    return report
 
 
 
@@ -462,6 +501,7 @@ Examples:
     )
     parser.add_argument('--vol', type=float, help='Volume threshold override')
     parser.add_argument('--atr', type=float, help='ATR multiplier override')
+    parser.add_argument('--lookback', type=int, help='Lookback period override')
     parser.add_argument('--tf', type=str, help='Timeframe override')
     parser.add_argument(
         '--live',
@@ -530,6 +570,11 @@ Examples:
         action='store_true',
         help='Use mock data for simulation (shorthand for --sim-data-source mock)'
     )
+    parser.add_argument(
+        '--bounce',
+        action='store_true',
+        help='Also detect bounce/recovery signals (oversold stocks showing strong recovery)'
+    )
     
     args = parser.parse_args()
     
@@ -583,6 +628,19 @@ Examples:
         logger.info(f"   Simulation: {args.mock_mode}")
         logger.info("   No real orders will be placed")
         logger.info("   Perfect for testing strategies!")
+        
+        # Scalping warning for mock mode
+        if args.mode == 'scalping':
+            logger.warning("")
+            logger.warning("⚠️  SCALPING + MOCK MODE WARNING:")
+            logger.warning("   • yfinance provides limited 1-min data (5 days only)")
+            logger.warning("   • No real-time bid/ask spreads available")
+            logger.warning("   • VWAP calculations may be inaccurate")
+            logger.warning("   • Signals may be unreliable or missing")
+            logger.warning("")
+            logger.warning("   For accurate scalping, use live IB connection:")
+            logger.warning("   python3 breakout_scanner.py input/watchlist.txt --mode scalping --live")
+            logger.warning("")
     
     # Simulation mode
     if args.simulate:
@@ -617,7 +675,7 @@ Examples:
         
         try:
             # Run simulation with selected data source
-            await run_simulation_mode(args, ib, data_source=data_source)
+            return await run_simulation_mode(args, ib, data_source=data_source)
         finally:
             ib.disconnect()
             logger.info("✓ Disconnected from IB")

@@ -95,6 +95,7 @@ class MarketDataHandler:
         """
         Get current bid-ask spread percentage
         """
+        contract = None
         try:
             contract = Stock(symbol, exchange, currency)
             await self.ib.qualifyContractsAsync(contract)
@@ -104,15 +105,24 @@ class MarketDataHandler:
             
             if ticker.bid and ticker.ask and ticker.bid > 0:
                 spread_pct = ((ticker.ask - ticker.bid) / ticker.bid) * 100
-                self.ib.cancelMktData(contract)
+                self._safe_cancel_mkt_data(contract)
                 return spread_pct
             
-            self.ib.cancelMktData(contract)
+            self._safe_cancel_mkt_data(contract)
             return None
             
         except Exception as e:
             logger.debug(f"Spread check failed for {symbol}: {e}")
+            if contract:
+                self._safe_cancel_mkt_data(contract)
             return None
+    
+    def _safe_cancel_mkt_data(self, contract):
+        """Safely cancel market data subscription, ignoring errors if already cancelled"""
+        try:
+            self.ib.cancelMktData(contract)
+        except Exception:
+            pass  # Ignore Error 300 and similar benign errors
     
     async def get_spy_performance(self, timeframe: str, 
                                   lookback: int) -> Tuple[float, float]:

@@ -144,7 +144,7 @@ class BreakoutDetector:
         if RR_GRADE_CONFIG['D']['reject'] and rr_grade == 'D':
             return None
         
-        # --- REJECTION LOGGING ---
+        # --- REJECTION LOGGING (with score preview) ---
         rejection_reasons = self._collect_rejections(
             price_break, vol_confirm, trend_ok, rs_ok, vwap_ok,
             was_consolidating, liquid_ok, dist_confirm, candle_ok,
@@ -152,13 +152,20 @@ class BreakoutDetector:
             dist_atr, rr
         )
         
-        if rejection_reasons and len(rejection_reasons) <= 2:
+        # Calculate score preview for near-misses (even if rejected)
+        momentum_score_preview = latest.get('Momentum_Score', 0)
+        conviction_score_preview = latest.get('Conviction_Score', 0)
+        
+        # Log all stocks that broke out but were rejected (near misses)
+        if price_break and vol_confirm and rejection_reasons:
             self.rejection_reasons.append({
                 'symbol': symbol,
                 'price': round(latest['close'], 2),
                 'vol_ratio': round(latest['Vol_Ratio'], 2),
+                'momentum': int(momentum_score_preview) if not pd.isna(momentum_score_preview) else 0,
+                'conviction': int(conviction_score_preview) if not pd.isna(conviction_score_preview) else 0,
+                'rsi': int(latest.get('RSI', 0)),
                 'mode': mode_name,
-                'timeframe': timeframe,
                 'reasons': ', '.join(rejection_reasons),
             })
         
@@ -611,4 +618,168 @@ class BreakoutDetector:
             f"SL: ${sl:.2f} | TP: ${tp:.2f} | R:R={rr:.2f} | {quality}"
         )
 
+        return signal
+
+    def detect_bounce(self, df: pd.DataFrame, symbol: str, mode_name: str,
+                      timeframe: str, **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        Detect bounce/recovery signals for oversold stocks
+        
+        Criteria:
+        1. Stock is down significantly from recent highs (oversold)
+        2. Strong daily move (>3% gain)
+        3. Volume spike (>1.5x average)
+        4. RSI was oversold (<35) and is now recovering
+        5. Price reclaiming key moving average (20 EMA)
+        """
+        cfg = MODES.get(mode_name, MODES['swing'])
+        
+        if len(df) < 50:
+            return None
+        
+        # Calculate indicators if not present
+        if 'ATR' not in df.columns:
+            df = calculate_all_indicators(df, cfg['trend_type'], cfg.get('trend_period'), timeframe)
+        
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # --- BOUNCE CONDITIONS ---
+        
+        # 1. Strong daily gain (>3%)
+        daily_gain = (latest['close'] - prev['close']) / prev['close']
+        strong_move = daily_gain >= 0.03  # 3%+ move
+        
+        if not strong_move:
+            logger.debug(f"BOUNCE {symbol}: daily gain {daily_gain:.2%} < 3%")
+            return None
+        
+        # 2. Oversold condition - stock down from recent high
+        high_20 = df['high'].rolling(20).max().iloc[-2]  # 20-day high before today
+        drawdown = (prev['close'] - high_20) / high_20  # How far down from high
+        was_beaten_down = drawdown <= -0.15  # At least 15% off highs
+        
+        if not was_beaten_down:
+            return None
+        
+        # 3. Volume - adjust for time of day (market open 6.5 hours = 390 mins)
+        #    If checking mid-day, extrapolate current volume to full-day equivalent
+        vol_ratio = latest.get('Vol_Ratio', 1.0)
+        if vol_ratio == 1.0 and 'Vol_Ratio' not in df.columns:
+            vol_avg = df['volume'].rolling(20).mean().iloc[-1]
+            
+            # Time adjustment for intraday volume
+            from datetime import datetime
+            import pytz
+            try:
+                now = datetime.now(pytz.timezone('US/Eastern'))
+                market_open = now.replace(hour=9, minute=30, second=0)
+                market_close = now.replace(hour=16, minute=0, second=0)
+                
+                if market_open <= now <= market_close:
+                    # Calculate what fraction of the day has passed
+                    elapsed_mins = (now - market_open).seconds / 60
+                    total_mins = 390  # 6.5 hours
+                    day_fraction = elapsed_mins / total_mins
+                    
+                    if day_fraction > 0.1:  # At least 10% of day passed
+                        # Extrapolate current volume to full-day equivalent
+                        extrapolated_vol = latest['volume'] / day_fraction
+                        vol_ratio = extrapolated_vol / vol_avg if vol_avg > 0 else 1.0
+                    else:
+                        vol_ratio = latest['volume'] / vol_avg if vol_avg > 0 else 1.0
+                else:
+                    # After market close, use actual volume
+                    vol_ratio = latest['volume'] / vol_avg if vol_avg > 0 else 1.0
+            except:
+                # Fallback if timezone not available
+                vol_ratio = latest['volume'] / vol_avg if vol_avg > 0 else 1.0
+        
+        vol_strong = vol_ratio >= 1.5  # Strong volume is a bonus
+        vol_ok = vol_ratio >= 0.8  # At least 80% of average (not extremely low)
+        
+        # 4. RSI recovery from oversold
+        rsi = latest.get('RSI', 50)
+        rsi_prev = prev.get('RSI', prev.get('RSI', 50)) if 'RSI' in df.columns else 50
+        rsi_recovering = rsi > rsi_prev and rsi < 60  # Rising but not overbought
+        rsi_was_low = rsi_prev < 40 or rsi < 45  # Was in oversold territory
+        
+        # 5. Reclaiming moving average (20 EMA or similar)
+        ema_20 = df['close'].ewm(span=20).mean().iloc[-1]
+        reclaiming_ema = latest['close'] > ema_20 and prev['close'] <= ema_20
+        above_ema = latest['close'] > ema_20
+        
+        # 6. MACD improving (histogram less negative or turning positive)
+        macd_hist = latest.get('MACD_Hist', 0)
+        macd_prev = df['MACD_Hist'].iloc[-2] if 'MACD_Hist' in df.columns else 0
+        macd_improving = macd_hist > macd_prev
+        
+        # --- SCORING ---
+        checks = {
+            'strong_move': strong_move,           # Required
+            'was_beaten_down': was_beaten_down,   # Required  
+            'vol_ok': vol_ok,                     # Reasonable volume
+            'vol_strong': vol_strong,             # Bonus: strong volume
+            'rsi_recovering': rsi_recovering,
+            'rsi_was_low': rsi_was_low,
+            'above_ema': above_ema,
+            'reclaiming_ema': reclaiming_ema,
+            'macd_improving': macd_improving,
+        }
+        
+        passed = sum(checks.values())
+        
+        # Need at least 4 conditions for a signal (strong move + beaten down + 2 others)
+        if passed < 4:
+            return None
+        
+        # --- RISK/REWARD ---
+        atr = latest['ATR']
+        
+        # Stop below today's low or recent swing low
+        recent_low = df['low'].tail(5).min()
+        sl = min(latest['low'] - atr * 0.5, recent_low - atr * 0.25)
+        
+        # Target: retest of 20-day high or 2x risk
+        risk = latest['close'] - sl
+        tp = latest['close'] + risk * 2.0  # 2:1 R:R minimum
+        
+        # Alternative: target the 20-day high
+        tp_to_high = high_20
+        if tp_to_high > tp:
+            tp = tp_to_high
+        
+        rr = (tp - latest['close']) / risk if risk > 0 else 0
+        
+        if rr < 1.5:
+            return None
+        
+        # --- QUALITY ---
+        if passed >= 7:
+            quality = 'PREMIUM'
+        elif passed >= 6:
+            quality = 'HIGH'
+        else:
+            quality = 'STANDARD'
+        
+        signal = {
+            'Symbol': symbol,
+            'Price': round(latest['close'], 2),
+            'Vol': round(vol_ratio, 2),
+            'Dist': round(drawdown * 100, 1),  # Show as % drawdown
+            'Stop': round(sl, 2),
+            'Target': round(tp, 2),
+            'R:R': round(rr, 2),
+            'Gap%': round(daily_gain * 100, 1),
+            'Mode': mode_name,
+            'Quality': quality,
+            'Type': 'BOUNCE',
+            'RSI': round(rsi, 1),
+        }
+        
+        logger.info(
+            f"🔄 BOUNCE {symbol} @ ${latest['close']:.2f} (+{daily_gain:.1%}) | "
+            f"Down {drawdown:.0%} from high | Vol: {vol_ratio:.1f}x | RSI: {rsi:.0f} | {quality}"
+        )
+        
         return signal

@@ -6,7 +6,10 @@ import logging
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from typing import List, Dict, Optional
+from pathlib import Path
 import requests
 import platform
 import subprocess
@@ -40,8 +43,16 @@ class Notifier:
             return f"{subject}:{','.join(symbols)}"
         return subject
     
-    def send_all(self, subject: str, message: str, signals: Optional[List[Dict]] = None):
-        """Send notification via all enabled channels (prevents duplicates)"""
+    def send_all(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
+                 csv_path: Optional[str] = None):
+        """Send notification via all enabled channels (prevents duplicates)
+        
+        Args:
+            subject: Email subject / notification title
+            message: Body message
+            signals: List of signal dictionaries
+            csv_path: Optional path to CSV file to attach to email
+        """
         # Check if already sent
         cache_key = self._generate_cache_key(subject, signals)
         if cache_key in self._sent_cache:
@@ -58,7 +69,7 @@ class Notifier:
         results = []
         
         if self.email_enabled:
-            results.append(('Email', self.send_email(subject, message, signals)))
+            results.append(('Email', self.send_email(subject, message, signals, csv_path=csv_path)))
         
         if self.telegram_enabled:
             results.append(('Telegram', self.send_telegram(message, signals)))
@@ -79,12 +90,13 @@ class Notifier:
             else:
                 logger.warning(f"✗ {channel} notification failed")
     
-    def send_email(self, subject: str, message: str, signals: Optional[List[Dict]] = None) -> bool:
-        """Send email notification"""
+    def send_email(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
+                   csv_path: Optional[str] = None) -> bool:
+        """Send email notification with optional CSV attachment"""
         try:
             config = NOTIFICATIONS['email']
             
-            msg = MIMEMultipart('alternative')
+            msg = MIMEMultipart('mixed')
             msg['Subject'] = subject
             msg['From'] = config['sender_email']
             msg['To'] = config['recipient_email']
@@ -101,9 +113,24 @@ class Notifier:
                     )
                 
                 if len(signals) > 10:
-                    body += f"... and {len(signals) - 10} more signals. See CSV file.\n"
+                    body += f"... and {len(signals) - 10} more signals. See attached CSV.\n"
             
             msg.attach(MIMEText(body, 'plain'))
+            
+            # Attach CSV if provided
+            if csv_path:
+                csv_file = Path(csv_path)
+                if csv_file.exists():
+                    with open(csv_file, 'rb') as f:
+                        part = MIMEBase('application', 'octet-stream')
+                        part.set_payload(f.read())
+                    encoders.encode_base64(part)
+                    part.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename="{csv_file.name}"'
+                    )
+                    msg.attach(part)
+                    logger.debug(f"Attached CSV: {csv_file.name}")
             
             # Send email
             with smtplib.SMTP(config['smtp_server'], config['smtp_port']) as server:

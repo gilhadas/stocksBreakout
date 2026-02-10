@@ -42,17 +42,24 @@ class ScannerOrchestrator:
     
     async def scan_watchlist(self, watchlist: List[str], mode: str, 
                             timeframe: str, vol_thresh: Optional[float] = None,
-                            atr_mult: Optional[float] = None) -> List[Dict]:
+                            atr_mult: Optional[float] = None,
+                            lookback: Optional[int] = None,
+                            detect_bounces: bool = False) -> List[Dict]:
         """
-        Scan entire watchlist for breakout signals
+        Scan entire watchlist for breakout and optionally bounce signals
+        
+        Args:
+            detect_bounces: If True, also detect bounce/recovery signals
         
         Returns:
             List of signal dictionaries
         """
         # Get market context
         if mode != 'scalping':
+            # Use provided lookback or default from config
+            lb = lookback if lookback else MODES[mode]['lookback']
             spy_perf, spy_vol = await self.market_data.get_spy_performance(
-                timeframe, MODES[mode]['lookback']
+                timeframe, lb
             )
             regime = classify_market_regime(spy_perf, spy_vol)
             
@@ -75,7 +82,7 @@ class ScannerOrchestrator:
                 
                 result = await self._scan_symbol(
                     symbol, mode, timeframe, spy_perf, regime,
-                    vol_thresh, atr_mult
+                    vol_thresh, atr_mult, lookback, detect_bounces
                 )
                 
                 await asyncio.sleep(SCAN_DELAY)
@@ -92,7 +99,9 @@ class ScannerOrchestrator:
     async def _scan_symbol(self, symbol: str, mode: str, timeframe: str,
                           spy_perf: float, regime: str,
                           vol_thresh: Optional[float], 
-                          atr_mult: Optional[float]) -> Optional[Dict]:
+                          atr_mult: Optional[float],
+                          lookback: Optional[int] = None,
+                          detect_bounces: bool = False) -> Optional[Dict]:
         """Scan a single symbol with retry logic and optional Level 2 analysis"""
         max_retries = 3
         
@@ -116,6 +125,7 @@ class ScannerOrchestrator:
                     df, symbol, mode, timeframe, spy_perf,
                     vol_thresh=vol_thresh,
                     atr_mult=atr_mult,
+                    lookback=lookback,
                     spread_pct=spread_pct,
                     regime=regime,
                     use_scoring=True,
@@ -152,6 +162,12 @@ class ScannerOrchestrator:
                         if quality == 'EXCELLENT' and signal['Quality'] == 'HIGH':
                             signal['Quality'] = 'PREMIUM'
                             logger.info(f"   ⭐ {symbol} upgraded to PREMIUM (Level 2)")
+                
+                # If no breakout signal but bounce detection enabled, try bounce
+                if signal is None and detect_bounces:
+                    signal = self.detector.detect_bounce(
+                        df, symbol, mode, timeframe
+                    )
                 
                 return signal
             

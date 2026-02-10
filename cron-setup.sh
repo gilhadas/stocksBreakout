@@ -31,10 +31,10 @@ cat > "$CRON_FILE" << 'EOF'
 # ============================================
 
 # Every Monday at 9:00 AM - Long-term breakout scan
-0 9 * * 1 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode longterm --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1
+0 9 * * 1 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode longterm --mock --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1
 
 # Every Monday at 9:15 AM - Long-term exit evaluation
-15 9 * * 1 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode longterm --exit-file positions_longterm.csv --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
+15 9 * * 1 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode longterm --mock --exit-file input/positions_longterm.csv --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
 
 
 # ============================================
@@ -42,13 +42,13 @@ cat > "$CRON_FILE" << 'EOF'
 # ============================================
 
 # Every weekday at 9:35 AM (after market open) - Swing breakout scan
-35 9 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode swing --cron --notify >> scanner_output/logs/cron_swing.log 2>&1
+35 9 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode swing --mock --cron --notify >> scanner_output/logs/cron_swing.log 2>&1
 
 # Every weekday at 3:45 PM (before market close) - Swing exit evaluation
-45 15 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode swing --exit-file positions_swing.csv --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
+45 15 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode swing --mock --exit-file input/positions_swing.csv --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
 
 # Every weekday at 4:30 PM (after market close) - Combined swing scan + exit
-30 16 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py watchlist.txt --mode swing --exit-file positions_swing.csv --both --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1
+30 16 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode swing --mock --exit-file input/positions_swing.csv --both --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1
 
 
 # ============================================
@@ -56,16 +56,16 @@ cat > "$CRON_FILE" << 'EOF'
 # ============================================
 
 # Every weekday at 9:35 AM - Day trade morning scan
-35 9 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1
+35 9 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --mock --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1
 
 # Every weekday at 10:00 AM - Day trade mid-morning scan
-0 10 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
+0 10 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --mock --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
 
 # Every weekday at 2:00 PM - Day trade afternoon scan
-0 14 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1
+0 14 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --mock --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1
 
 # Every weekday at 3:30 PM - Day trade exit check
-30 15 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --exit-file positions_daytrade.csv --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
+30 15 * * 1-5 cd /path/to/scanner && /usr/bin/python3 breakout_scanner.py input/watchlist.txt --mode daytrade --mock --exit-file input/positions_daytrade.csv --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
 
 
 # ============================================
@@ -101,7 +101,7 @@ echo "5. Add them to your crontab:"
 echo "   crontab -e"
 echo ""
 echo "Example for swing trading (daily at 9:35 AM):"
-echo "35 9 * * 1-5 cd $SCRIPT_DIR && $PYTHON_PATH breakout_scanner.py watchlist.txt --mode swing --cron --notify"
+echo "35 9 * * 1-5 cd $SCRIPT_DIR && $PYTHON_PATH breakout_scanner.py input/watchlist.txt --mode swing --mock --cron --notify"
 echo ""
 
 # Create a helper script for testing
@@ -110,7 +110,7 @@ cat > "$TEST_SCRIPT" << EOF
 #!/bin/bash
 # Test script to verify cron job will work
 cd "$SCRIPT_DIR"
-"$PYTHON_PATH" breakout_scanner.py watchlist.txt --mode swing --cron
+"$PYTHON_PATH" breakout_scanner.py input/watchlist.txt --mode swing --mock --cron
 EOF
 
 chmod +x "$TEST_SCRIPT"

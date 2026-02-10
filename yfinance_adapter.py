@@ -44,12 +44,14 @@ class YFinanceAdapter:
                 
                 logger.debug(f"Fetching {symbol} data: period={period}, interval={interval}")
                 
-                ticker = yf.Ticker(symbol)
+                ticker_symbol = symbol.replace(' ', '-')
+                ticker = yf.Ticker(ticker_symbol)
                 df = ticker.history(period=period, interval=interval)
             else:
                 logger.debug(f"Fetching {symbol} data: {start_date} to {end_date}, interval={interval}")
                 
-                ticker = yf.Ticker(symbol)
+                ticker_symbol = symbol.replace(' ', '-')
+                ticker = yf.Ticker(ticker_symbol)
                 df = ticker.history(start=start_date, end=end_date, interval=interval)
             
             if df is None or len(df) == 0:

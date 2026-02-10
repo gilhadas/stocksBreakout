@@ -14,8 +14,6 @@ All V3 code is implemented and backtested across 3 market regimes (bearish 2022,
 ## Quick Start
 
 ```bash
-cd /Users/gilhadas/Documents/GitHub/stocksBreakout
-
 # Activate the virtual environment
 source venv/bin/activate
 
@@ -97,4 +95,75 @@ Results are saved to:
 ```
 scanner_output/backtests/v3_validation_multi_period.json
 scanner_output/backtests/multi_config_vs_spy_YYYY-MM-DD_YYYY-MM-DD.json
+```
+
+## Scheduling Automated Scans (Cron)
+
+### Setup
+
+Run the setup script to generate cron job templates with your local paths:
+```bash
+bash cron-setup.sh
+```
+This creates `cron_jobs.txt` with ready-to-use entries and `test_cron.sh` to verify your setup.
+
+### Recommended Schedules
+
+**Swing trading (daily)** — scan after market open, evaluate exits before close:
+```cron
+35 9 * * 1-5  cd /path/to/scanner && venv/bin/python3 breakout_scanner.py input/watchlist3.txt --mode swing --cron --notify >> scanner_output/logs/cron_swing.log 2>&1
+45 15 * * 1-5 cd /path/to/scanner && venv/bin/python3 breakout_scanner.py input/watchlist3.txt --mode swing --exit-file input/positions.csv --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
+```
+
+**Long-term (weekly)** — scan Monday morning:
+```cron
+0 9 * * 1 cd /path/to/scanner && venv/bin/python3 breakout_scanner.py input/watchlist3.txt --mode longterm --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1
+```
+
+**Day trading (multiple intraday):**
+```cron
+35 9  * * 1-5 cd /path/to/scanner && venv/bin/python3 breakout_scanner.py input/watchlist3.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade.log 2>&1
+0  10 * * 1-5 cd /path/to/scanner && venv/bin/python3 breakout_scanner.py input/watchlist3.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade.log 2>&1
+0  14 * * 1-5 cd /path/to/scanner && venv/bin/python3 breakout_scanner.py input/watchlist3.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade.log 2>&1
+```
+
+Replace `/path/to/scanner` with your repo path.
+
+### Key Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--cron` | Minimal output, no interactive prompts |
+| `--notify` | Send alerts via email/Discord/Telegram (configure in `config.py`) |
+| `--exit-file <csv>` | Evaluate exit conditions for open positions |
+| `--both` | Run breakout scan + exit evaluation in one call |
+| `--mode <mode>` | `swing`, `longterm`, `daytrade`, or `scalping` |
+
+### Installing Cron Jobs
+
+```bash
+# Edit your crontab
+crontab -e
+
+# Paste the lines from cron_jobs.txt (with paths updated)
+# Save and exit
+```
+
+### Monitoring
+
+Check recent cron executions and errors:
+```bash
+bash monitor-cron.sh
+```
+
+### Maintenance (auto-cleanup)
+
+Add to crontab to prevent log/result files from growing indefinitely:
+```cron
+# Clean logs older than 30 days (every Sunday 11 PM)
+0 23 * * 0 find /path/to/scanner/scanner_output/logs -name "*.log" -mtime +30 -delete
+
+# Clean old signal/exit CSVs older than 90 days
+5 23 * * 0 find /path/to/scanner/scanner_output/signals -name "*.csv" -mtime +90 -delete
+5 23 * * 0 find /path/to/scanner/scanner_output/exits -name "*.csv" -mtime +90 -delete
 ```
