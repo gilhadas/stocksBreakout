@@ -15,52 +15,61 @@ logger = logging.getLogger(__name__)
 
 
 class MarketDataHandler:
-    """Handles all market data requests to Interactive Brokers"""
-    
-    def __init__(self, ib_connection: IB):
+    """Handles all market data requests to Interactive Brokers with optional yfinance fallback"""
+
+    def __init__(self, ib_connection: IB, yf_fallback: bool = False):
         self.ib = ib_connection
+        self.ib_available = ib_connection is not None
+        self.yf_fallback = yf_fallback
         self.spy_cache = {}
+
+        if yf_fallback:
+            from yfinance_adapter import YFinanceAdapter
+            self.yf_adapter = YFinanceAdapter()
     
-    async def get_historical_data(self, symbol: str, timeframe: str, 
-                                  exchange: str = 'SMART', 
+    async def get_historical_data(self, symbol: str, timeframe: str,
+                                  exchange: str = 'SMART',
                                   currency: str = 'USD') -> Optional[pd.DataFrame]:
         """
-        Fetch historical data for a symbol
-        
-        Note: IB bar sizes: 1 secs, 5 secs, 10 secs, 15 secs, 30 secs,
-              1 min, 2 mins, 3 mins, 5 mins, 10 mins, 15 mins, 20 mins, 30 mins,
-              1 hour, 2 hours, 3 hours, 4 hours, 8 hours, 1 day, 1W, 1M
+        Fetch historical data for a symbol.
+        Falls back to yfinance if IB is unavailable and yf_fallback is enabled.
         """
-        try:
-            contract = Stock(symbol, exchange, currency)
-            await self.ib.qualifyContractsAsync(contract)
-            
-            # Normalize timeframe to IB format
-            ib_timeframe = self._normalize_timeframe(timeframe)
-            
-            # Determine duration based on timeframe
-            if 'W' in ib_timeframe or 'M' in ib_timeframe or 'week' in timeframe.lower():
-                duration = DATA_DURATION['weekly']
-            elif 'day' in ib_timeframe or 'day' in timeframe.lower():
-                duration = DATA_DURATION['daily']
-            elif '1 min' in ib_timeframe:
-                duration = DATA_DURATION['scalping']
-            else:
-                duration = DATA_DURATION['intraday']
-            
-            bars = await self.ib.reqHistoricalDataAsync(
-                contract, '', duration, ib_timeframe, 'TRADES', True, 1
-            )
-            
-            if not bars:
-                return None
-            
-            df = util.df(bars).set_index('date')
-            return df
-            
-        except Exception as e:
-            logger.debug(f"Failed to fetch data for {symbol}: {e}")
-            return None
+        ib_timeframe = self._normalize_timeframe(timeframe)
+        df = None
+
+        # Try IB first (if available)
+        if self.ib_available:
+            try:
+                contract = Stock(symbol, exchange, currency)
+                await self.ib.qualifyContractsAsync(contract)
+
+                # Determine duration based on timeframe
+                if 'W' in ib_timeframe or 'M' in ib_timeframe or 'week' in timeframe.lower():
+                    duration = DATA_DURATION['weekly']
+                elif 'day' in ib_timeframe or 'day' in timeframe.lower():
+                    duration = DATA_DURATION['daily']
+                elif '1 min' in ib_timeframe:
+                    duration = DATA_DURATION['scalping']
+                else:
+                    duration = DATA_DURATION['intraday']
+
+                bars = await self.ib.reqHistoricalDataAsync(
+                    contract, '', duration, ib_timeframe, 'TRADES', True, 1
+                )
+
+                if bars:
+                    df = util.df(bars).set_index('date')
+
+            except Exception as e:
+                logger.debug(f"IB fetch failed for {symbol}: {e}")
+
+        # Fallback to yfinance
+        if df is None and self.yf_fallback:
+            if self.ib_available:
+                logger.info(f"  ↪ yfinance fallback for {symbol}")
+            df = self.yf_adapter.get_historical_data(symbol, ib_timeframe)
+
+        return df
     
     def _normalize_timeframe(self, timeframe: str) -> str:
         """
@@ -124,48 +133,58 @@ class MarketDataHandler:
         except Exception:
             pass  # Ignore Error 300 and similar benign errors
     
-    async def get_spy_performance(self, timeframe: str, 
+    async def get_spy_performance(self, timeframe: str,
                                   lookback: int) -> Tuple[float, float]:
         """
-        Get SPY performance and volatility with caching
+        Get SPY performance and volatility with caching.
+        Falls back to yfinance if IB is unavailable.
         Returns: (performance, volatility)
         """
         cache_key = f"{timeframe}_{lookback}"
-        
+
         if cache_key in self.spy_cache:
             return self.spy_cache[cache_key]
-        
-        try:
-            spy = Stock('SPY', 'ARCA', 'USD')
-            duration = '300 D' if 'day' in timeframe else '10 D'
-            
-            bars = await self.ib.reqHistoricalDataAsync(
-                spy, '', duration, timeframe, 'TRADES', True, 1
-            )
-            
-            if not bars:
-                return 0.0, 0.0
-            
-            df = util.df(bars)
-            
-            # Performance
-            perf = (df['close'].iloc[-1] / df['close'].iloc[-lookback]) - 1
-            
-            # Volatility (ATR%)
-            df['hl'] = df['high'] - df['low']
-            df['hc'] = (df['high'] - df['close'].shift()).abs()
-            df['lc'] = (df['low'] - df['close'].shift()).abs()
-            tr = pd.concat([df['hl'], df['hc'], df['lc']], axis=1).max(axis=1)
-            atr = tr.rolling(14).mean()
-            atr_pct = (atr / df['close']) * 100
-            spy_vol = float(atr_pct.tail(lookback).mean())
-            
-            self.spy_cache[cache_key] = (perf, spy_vol)
-            return perf, spy_vol
-            
-        except Exception as e:
-            logger.warning(f"Failed to get SPY performance: {e}")
+
+        df = None
+
+        # Try IB first
+        if self.ib_available:
+            try:
+                spy = Stock('SPY', 'ARCA', 'USD')
+                duration = '300 D' if 'day' in timeframe else '10 D'
+
+                bars = await self.ib.reqHistoricalDataAsync(
+                    spy, '', duration, timeframe, 'TRADES', True, 1
+                )
+
+                if bars:
+                    df = util.df(bars)
+
+            except Exception as e:
+                logger.warning(f"IB SPY fetch failed: {e}")
+
+        # Fallback to yfinance
+        if df is None and self.yf_fallback:
+            ib_timeframe = self._normalize_timeframe(timeframe)
+            df = self.yf_adapter.get_historical_data('SPY', ib_timeframe)
+
+        if df is None or len(df) < lookback:
             return 0.0, 0.0
+
+        # Performance
+        perf = (df['close'].iloc[-1] / df['close'].iloc[-lookback]) - 1
+
+        # Volatility (ATR%)
+        df['hl'] = df['high'] - df['low']
+        df['hc'] = (df['high'] - df['close'].shift()).abs()
+        df['lc'] = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([df['hl'], df['hc'], df['lc']], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean()
+        atr_pct = (atr / df['close']) * 100
+        spy_vol = float(atr_pct.tail(lookback).mean())
+
+        self.spy_cache[cache_key] = (perf, spy_vol)
+        return perf, spy_vol
     
     def clear_cache(self):
         """Clear SPY performance cache"""

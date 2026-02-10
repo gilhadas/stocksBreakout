@@ -199,6 +199,22 @@ DATA_DURATION = {
 # --- Output Settings ---
 OUTPUT_DIR = 'scanner_output'  # Directory for all output files
 
+# --- Sentiment & Sector Analysis ---
+SENTIMENT = {
+    'enabled': True,
+    'tavily_api_key': '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',  # Set via TAVILY_API_KEY env var or here
+    'sector_etfs': {
+        'Technology': {'etf': 'XLK', 'leaders': ['AAPL', 'MSFT', 'NVDA']},
+        'Energy': {'etf': 'XLE', 'leaders': ['XOM', 'CVX', 'COP']},
+        'Finance': {'etf': 'XLF', 'leaders': ['JPM', 'BAC', 'WFC']},
+        'Healthcare': {'etf': 'XLV', 'leaders': ['UNH', 'JNJ', 'LLY']},
+        'Consumer': {'etf': 'XLY', 'leaders': ['AMZN', 'TSLA', 'HD']},
+        'Industrial': {'etf': 'XLI', 'leaders': ['CAT', 'BA', 'GE']},
+        'Real Estate': {'etf': 'XLRE', 'leaders': ['PLD', 'AMT', 'EQIX']},
+        'Materials': {'etf': 'XLB', 'leaders': ['LIN', 'APD', 'SHW']},
+    },
+}
+
 NOTIFICATIONS = {
     # Email notifications via SMTP
     'email': {

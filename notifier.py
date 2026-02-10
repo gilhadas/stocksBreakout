@@ -107,8 +107,9 @@ class Notifier:
             if signals:
                 body += f"Found {len(signals)} signals:\n\n"
                 for sig in signals[:10]:  # Limit to 10 in email
+                    sector = f" [{sig['Sector']}]" if sig.get('Sector') else ""
                     body += (
-                        f"• {sig['Symbol']} ({sig['Quality']}) @ ${sig['Price']}\n"
+                        f"• {sig['Symbol']}{sector} ({sig['Quality']}) @ ${sig['Price']}\n"
                         f"  Stop: ${sig['Stop']} | Target: ${sig['Target']} | R:R: {sig['R:R']}\n\n"
                     )
                 
@@ -155,8 +156,9 @@ class Notifier:
             if signals:
                 text += f"📊 Found {len(signals)} signals:\n\n"
                 for sig in signals[:5]:  # Limit to 5 in Telegram
+                    sector = f" [{sig['Sector']}]" if sig.get('Sector') else ""
                     text += (
-                        f"🚀 *{sig['Symbol']}* ({sig['Quality']})\n"
+                        f"🚀 *{sig['Symbol']}*{sector} ({sig['Quality']})\n"
                         f"   💰 ${sig['Price']} | SL: ${sig['Stop']} | TP: ${sig['Target']}\n"
                         f"   📈 R:R: {sig['R:R']} | Vol: {sig['Vol']}x\n\n"
                     )
@@ -196,8 +198,9 @@ class Notifier:
                 embed['description'] += f"\n\nFound {len(signals)} signals:"
                 
                 for sig in signals[:10]:  # Limit to 10 in Discord
+                    sector = f" [{sig['Sector']}]" if sig.get('Sector') else ""
                     embed['fields'].append({
-                        'name': f"{sig['Symbol']} ({sig['Quality']})",
+                        'name': f"{sig['Symbol']}{sector} ({sig['Quality']})",
                         'value': (
                             f"Price: ${sig['Price']} | SL: ${sig['Stop']} | TP: ${sig['Target']}\n"
                             f"R:R: {sig['R:R']} | Vol: {sig['Vol']}x"
@@ -282,6 +285,7 @@ class Notifier:
                     # Convert to trading-friendly format
                     signal_data = {
                         'symbol': sig['Symbol'],
+                        'sector': sig.get('Sector', ''),
                         'action': 'BUY',  # Breakout = long entry
                         'price': sig['Price'],
                         'stop_loss': sig['Stop'],

@@ -24,12 +24,12 @@ logger = logging.getLogger(__name__)
 class ScannerOrchestrator:
     """Coordinates all scanning operations"""
     
-    def __init__(self, ib_connection, use_level2: bool = False):
-        self.market_data = MarketDataHandler(ib_connection)
+    def __init__(self, ib_connection, use_level2: bool = False, yf_fallback: bool = False):
+        self.market_data = MarketDataHandler(ib_connection, yf_fallback=yf_fallback)
         self.detector = BreakoutDetector()
         self.exit_evaluator = ExitEvaluator()
-        self.level2_analyzer = Level2Analyzer(ib_connection) if use_level2 else None
-        self.use_level2 = use_level2
+        self.level2_analyzer = Level2Analyzer(ib_connection) if use_level2 and ib_connection else None
+        self.use_level2 = use_level2 and ib_connection is not None
         self._ensure_output_dir()
     
     def _ensure_output_dir(self):

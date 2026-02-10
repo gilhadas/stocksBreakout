@@ -84,6 +84,66 @@ def get_positions_from_file(file_path: str) -> List[Dict]:
     return positions
 
 
+def append_signals_to_positions(signals: List[Dict], positions_file: str,
+                                mode: str, min_quality: str = 'PREMIUM') -> int:
+    """
+    Auto-append qualifying signals to a positions CSV file.
+
+    - Filters by min_quality (default: PREMIUM only)
+    - Deduplicates: skips symbols already in the file
+    - Creates file with headers if it doesn't exist
+    - Returns number of new positions appended
+    """
+    import os
+    from config import MODES
+
+    quality_rank = {'PREMIUM': 3, 'HIGH': 2, 'STANDARD': 1, 'REJECT': 0}
+    min_rank = quality_rank.get(min_quality, 3)
+
+    timeframe = MODES.get(mode, {}).get('default_timeframe', '1 day')
+
+    # Load existing symbols to avoid duplicates
+    existing_symbols = set()
+    file_exists = os.path.exists(positions_file)
+    if file_exists:
+        for pos in get_positions_from_file(positions_file):
+            existing_symbols.add(pos['symbol'].upper())
+
+    # Filter and convert signals
+    new_rows = []
+    for sig in signals:
+        quality = sig.get('Quality', 'REJECT')
+        if quality_rank.get(quality, 0) < min_rank:
+            continue
+        symbol = (sig.get('Symbol') or sig.get('symbol', '')).strip()
+        if not symbol or symbol.upper() in existing_symbols:
+            continue
+        new_rows.append({
+            'symbol': symbol,
+            'mode': mode,
+            'entry': sig.get('Price', 0),
+            'stop': sig.get('Stop', 0),
+            'target': sig.get('Target', 0),
+            'timeframe': timeframe,
+        })
+        existing_symbols.add(symbol.upper())
+
+    if not new_rows:
+        logger.info(f"No new {min_quality}+ signals to append to {positions_file}")
+        return 0
+
+    write_header = not file_exists
+    with open(positions_file, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'stop', 'target', 'timeframe'])
+        if write_header:
+            writer.writeheader()
+        writer.writerows(new_rows)
+
+    symbols = [r['symbol'] for r in new_rows]
+    logger.info(f"Appended {len(new_rows)} {min_quality}+ positions to {positions_file}: {', '.join(symbols)}")
+    return len(new_rows)
+
+
 def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
     """
     Classify market regime based on SPY performance and volatility

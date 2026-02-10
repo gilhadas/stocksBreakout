@@ -34,34 +34,34 @@ logger = logging.getLogger(__name__)
 
 
 async def connect_to_ib(live: bool = False, mock: bool = False, mock_mode: str = 'realistic') -> IB:
-    """Connect to Interactive Brokers or Mock connection"""
-    
+    """Connect to Interactive Brokers or Mock connection.
+
+    Connection cascade: LIVE port → PAPER port → None (yfinance fallback)
+    """
     if mock:
-        logger.info(f"🔧 Using MOCK trading mode ({mock_mode})")
+        logger.info(f"Using MOCK trading mode ({mock_mode})")
         ib = MockIBConnection(mode=mock_mode)
         await ib.connectAsync(IB_HOST, IB_PAPER_PORT, clientId=IB_CLIENT_ID)
         return ib
-    
-    port = IB_LIVE_PORT if live else IB_PAPER_PORT
-    
-    ib = IB()
-    try:
-        await ib.connectAsync(IB_HOST, port, clientId=IB_CLIENT_ID)
-        logger.info(f"✓ Connected to IB ({'LIVE' if live else 'PAPER'})")
-        
-        # Set market data type
-        if live:
-            ib.reqMarketDataType(1)  # Real-time
-        else:
-            ib.reqMarketDataType(3)  # Delayed
-        
-        return ib
-    
-    except Exception as e:
-        logger.error(f"Failed to connect to IB: {e}")
-        logger.error("Make sure TWS or IB Gateway is running and API is enabled")
-        logger.info("💡 Tip: Use --mock flag to test without IB connection")
-        sys.exit(1)
+
+    # Build port order: if --live, try LIVE first then PAPER; otherwise PAPER first then LIVE
+    if live:
+        ports = [(IB_LIVE_PORT, 'LIVE', 1), (IB_PAPER_PORT, 'PAPER', 3)]
+    else:
+        ports = [(IB_PAPER_PORT, 'PAPER', 3), (IB_LIVE_PORT, 'LIVE', 1)]
+
+    for port, label, mkt_data_type in ports:
+        ib = IB()
+        try:
+            await ib.connectAsync(IB_HOST, port, clientId=IB_CLIENT_ID)
+            ib.reqMarketDataType(mkt_data_type)
+            logger.info(f"Connected to IB {label} (port {port})")
+            return ib
+        except Exception as e:
+            logger.warning(f"IB {label} (port {port}) failed: {e}")
+
+    logger.warning("All IB ports unavailable — falling back to yfinance (15-min delayed data)")
+    return None
 
 
 async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notifier):
@@ -85,10 +85,29 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         detect_bounces=getattr(args, 'bounce', False)
     )
     
+    # Add sector name to every signal
+    if results:
+        from sentiment import get_sector_for_ticker
+        for sig in results:
+            ticker = sig.get('Symbol') or sig.get('symbol', '')
+            if ticker:
+                sig['Sector'] = get_sector_for_ticker(ticker)
+
+    # Enrich signals with sentiment if requested
+    if results and getattr(args, 'sentiment', False):
+        from sentiment import check_sentiment
+        logger.info("Enriching signals with sentiment data...")
+        for sig in results:
+            ticker = sig.get('Symbol') or sig.get('symbol', '')
+            if ticker:
+                sent = check_sentiment(ticker)
+                sig['Sentiment'] = sent['sentiment']
+                sig['Buzz'] = sent['buzz_score']
+
     # Display and save results
     if results:
         import pandas as pd
-        
+
         logger.info(f"\n{'='*70}")
         logger.info(f" {args.mode.upper()} SIGNALS FOUND: {len(results)}")
         logger.info(f"{'='*70}\n")
@@ -97,7 +116,12 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         print(df.to_string(index=False))
         
         output_file = orchestrator.save_results(results, args.mode, 'signals')
-        
+
+        # Auto-append to positions file if requested
+        if getattr(args, 'auto_positions', None):
+            from utils import append_signals_to_positions
+            append_signals_to_positions(results, args.auto_positions, args.mode)
+
         # Send notifications with CSV attachment
         mode_desc = MODES[args.mode]['description']
         watchlist_name = Path(args.file).stem  # Get filename without extension
@@ -575,7 +599,23 @@ Examples:
         action='store_true',
         help='Also detect bounce/recovery signals (oversold stocks showing strong recovery)'
     )
-    
+    parser.add_argument(
+        '--sector-buzz',
+        action='store_true',
+        help='Run sector buzz analysis before scan (market context report)'
+    )
+    parser.add_argument(
+        '--sentiment',
+        action='store_true',
+        help='Enrich each signal with web sentiment data (requires TAVILY_API_KEY)'
+    )
+    parser.add_argument(
+        '--auto-positions',
+        type=str,
+        metavar='FILE',
+        help='Auto-append PREMIUM signals to a positions CSV (for mock/test exit evaluation)'
+    )
+
     args = parser.parse_args()
     
     # Setup logging
@@ -691,13 +731,24 @@ Examples:
             def send_exit_notification(self, *args, **kwargs): pass
         notifier = DummyNotifier()
     
-    # Connect to IB
+    # Sector buzz pre-scan report
+    if getattr(args, 'sector_buzz', False):
+        from sentiment import get_sector_buzz, format_sector_buzz
+        logger.info("Running sector buzz analysis...")
+        buzz_data = get_sector_buzz()
+        print(format_sector_buzz(buzz_data))
+        print()
+
+    # Connect to IB (returns None if IB unavailable)
     ib = await connect_to_ib(args.live, args.mock, args.mock_mode)
-    
+    yf_fallback = (ib is None)
+    if yf_fallback:
+        logger.warning("Running with yfinance only (15-min delayed data)")
+
     try:
-        # Create orchestrator
-        orchestrator = ScannerOrchestrator(ib)
-        
+        # Create orchestrator with yfinance fallback if IB unavailable
+        orchestrator = ScannerOrchestrator(ib, yf_fallback=yf_fallback)
+
         # Determine execution mode
         if args.both and args.exit_file:
             # Combined mode
@@ -708,7 +759,7 @@ Examples:
         else:
             # Breakout scan only
             await run_scan_mode(orchestrator, args, notifier)
-    
+
     except Exception as e:
         logger.error(f"Scanner error: {e}", exc_info=True)
         if args.notify or args.cron:
@@ -716,10 +767,11 @@ Examples:
                 subject="❌ Scanner Error",
                 message=f"Scanner encountered an error: {str(e)}"
             )
-    
+
     finally:
-        ib.disconnect()
-        logger.info("✓ Disconnected from IB")
+        if ib is not None:
+            ib.disconnect()
+            logger.info("Disconnected from IB")
 
 
 if __name__ == "__main__":
