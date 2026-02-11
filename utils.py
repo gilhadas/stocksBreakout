@@ -118,11 +118,12 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
         symbol = (sig.get('Symbol') or sig.get('symbol', '')).strip()
         if not symbol or symbol.upper() in existing_symbols:
             continue
+        entry_price = sig.get('Price', 0)
         new_rows.append({
             'symbol': symbol,
             'mode': mode,
-            'entry': sig.get('Price', 0),
-            'stop': sig.get('Stop', 0),
+            'entry': entry_price,
+            'stop': round(entry_price * 0.99, 2),  # 1% below breakout
             'target': sig.get('Target', 0),
             'timeframe': timeframe,
         })
@@ -142,6 +143,56 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
     symbols = [r['symbol'] for r in new_rows]
     logger.info(f"Appended {len(new_rows)} {min_quality}+ positions to {positions_file}: {', '.join(symbols)}")
     return len(new_rows)
+
+
+def update_position_stops(positions_file: str, price_map: Dict[str, float]) -> List[Dict]:
+    """
+    Trail stops upward: for each position where current price > entry,
+    set stop = max(current_stop, current_price * 0.99).
+    Rewrites the positions file with updated stops.
+
+    Args:
+        positions_file: path to positions CSV
+        price_map: {symbol: current_price} dict
+
+    Returns:
+        list of dicts for positions whose stops were updated
+    """
+    positions = get_positions_from_file(positions_file)
+    if not positions:
+        return []
+
+    updated = []
+    for pos in positions:
+        symbol = pos['symbol']
+        current_price = price_map.get(symbol)
+        if current_price is None:
+            continue
+
+        new_trailing_stop = round(current_price * 0.99, 2)
+        old_stop = pos['stop']
+
+        # Only ratchet stop UP, never down
+        if new_trailing_stop > old_stop:
+            pos['stop'] = new_trailing_stop
+            updated.append({
+                'symbol': symbol,
+                'old_stop': old_stop,
+                'new_stop': new_trailing_stop,
+                'price': current_price,
+            })
+
+    if updated:
+        # Rewrite the entire file with updated stops
+        with open(positions_file, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'stop', 'target', 'timeframe'])
+            writer.writeheader()
+            writer.writerows(positions)
+
+        symbols = [u['symbol'] for u in updated]
+        logger.info(f"Trailing stop updated for {len(updated)} positions in {positions_file}: {', '.join(symbols)}")
+
+    return updated
 
 
 def classify_market_regime(spy_perf: float, spy_vol: float) -> str:

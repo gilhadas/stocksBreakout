@@ -122,6 +122,17 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             from utils import append_signals_to_positions
             append_signals_to_positions(results, args.auto_positions, args.mode)
 
+        # Export PREMIUM tickers to watchlist file for re-evaluation scans
+        if getattr(args, 'export_premium', None):
+            premium_symbols = [
+                sig.get('Symbol') or sig.get('symbol', '')
+                for sig in results
+                if sig.get('Quality') == 'PREMIUM'
+            ]
+            with open(args.export_premium, 'w') as f:
+                f.write('\n'.join(premium_symbols))
+            logger.info(f"Exported {len(premium_symbols)} PREMIUM tickers to {args.export_premium}")
+
         # Send notifications with CSV attachment
         mode_desc = MODES[args.mode]['description']
         watchlist_name = Path(args.file).stem  # Get filename without extension
@@ -141,7 +152,12 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             logger.warning("   • Watch for news events")
     else:
         logger.info("No signals found")
-    
+        # Clear premium export file so subsequent scans don't use stale tickers
+        if getattr(args, 'export_premium', None):
+            with open(args.export_premium, 'w') as f:
+                f.write('')
+            logger.info(f"No signals — cleared {args.export_premium}")
+
     # Show and save rejections (near misses)
     rejections = orchestrator.get_rejection_reasons()
     if rejections:
@@ -240,6 +256,142 @@ async def run_combined_mode(orchestrator: ScannerOrchestrator, args, notifier: N
     actionable_exits = [r for r in exit_results if r['Action'] != 'HOLD']
     if actionable_exits:
         logger.info(f"⚠️  {len(actionable_exits)} positions need attention!")
+
+
+async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier):
+    """Monitor open positions: fetch current prices, alert on drops"""
+    import pandas as pd
+
+    # Load positions from all specified files
+    all_positions = []
+    for fpath in args.monitor.split(','):
+        fpath = fpath.strip()
+        if not fpath:
+            continue
+        positions = get_positions_from_file(fpath)
+        if positions:
+            logger.info(f"Loaded {len(positions)} positions from {fpath}")
+            all_positions.extend(positions)
+        else:
+            logger.info(f"No positions in {fpath}")
+
+    if not all_positions:
+        logger.info("No positions to monitor")
+        return
+
+    # Deduplicate by symbol (keep first occurrence)
+    seen = set()
+    unique_positions = []
+    for pos in all_positions:
+        if pos['symbol'] not in seen:
+            seen.add(pos['symbol'])
+            unique_positions.append(pos)
+    all_positions = unique_positions
+
+    logger.info(f"\n{'='*70}")
+    logger.info(f" PORTFOLIO MONITOR: {len(all_positions)} positions")
+    logger.info(f"{'='*70}\n")
+
+    # Fetch current prices
+    price_map = {}
+    for pos in all_positions:
+        symbol = pos['symbol']
+        price = await orchestrator.market_data.get_current_price(symbol)
+        if price is None:
+            logger.warning(f"Could not fetch price for {symbol}")
+        else:
+            price_map[symbol] = price
+
+    # Trail stops upward: update each position file
+    from utils import update_position_stops
+    for fpath in args.monitor.split(','):
+        fpath = fpath.strip()
+        if not fpath:
+            continue
+        updated = update_position_stops(fpath, price_map)
+        for u in updated:
+            logger.info(f"  ↑ {u['symbol']} stop: ${u['old_stop']:.2f} → ${u['new_stop']:.2f} (price ${u['price']:.2f})")
+
+    # Reload positions after stop updates
+    all_positions = []
+    for fpath in args.monitor.split(','):
+        fpath = fpath.strip()
+        if fpath:
+            all_positions.extend(get_positions_from_file(fpath))
+    # Deduplicate again
+    seen = set()
+    unique_positions = []
+    for pos in all_positions:
+        if pos['symbol'] not in seen:
+            seen.add(pos['symbol'])
+            unique_positions.append(pos)
+    all_positions = unique_positions
+
+    # Calculate status with updated stops
+    dashboard = []
+    alerts = []
+
+    for pos in all_positions:
+        symbol = pos['symbol']
+        price = price_map.get(symbol)
+        if price is None:
+            continue
+
+        entry = pos['entry']
+        stop = pos['stop']
+        target = pos['target']
+
+        pnl_pct = ((price - entry) / entry) * 100
+        dist_to_stop_pct = ((price - stop) / price) * 100 if price > 0 else 0
+        progress_pct = ((price - entry) / (target - entry)) * 100 if target != entry else 0
+
+        # Classify status (NEAR_STOP at 0.5% since stops trail at 1%)
+        if price <= stop:
+            status = 'HIT_STOP'
+        elif dist_to_stop_pct < 0.5:
+            status = 'NEAR_STOP'
+        elif pnl_pct < -2:
+            status = 'FALLING'
+        else:
+            status = 'OK'
+
+        row = {
+            'Symbol': symbol,
+            'mode': pos['mode'],
+            'current': price,
+            'entry': entry,
+            'stop': stop,
+            'target': target,
+            'pnl_pct': pnl_pct,
+            'dist_stop': dist_to_stop_pct,
+            'progress': progress_pct,
+            'status': status,
+        }
+        dashboard.append(row)
+
+        if status != 'OK':
+            alerts.append(row)
+
+    # Display dashboard
+    if dashboard:
+        df = pd.DataFrame(dashboard)
+        display_cols = ['Symbol', 'mode', 'current', 'entry', 'stop', 'target',
+                        'pnl_pct', 'dist_stop', 'status']
+        df_display = df[display_cols].copy()
+        df_display['pnl_pct'] = df_display['pnl_pct'].apply(lambda x: f"{x:+.2f}%")
+        df_display['dist_stop'] = df_display['dist_stop'].apply(lambda x: f"{x:.1f}%")
+        df_display['current'] = df_display['current'].apply(lambda x: f"${x:.2f}")
+        df_display['entry'] = df_display['entry'].apply(lambda x: f"${x:.2f}")
+        df_display['stop'] = df_display['stop'].apply(lambda x: f"${x:.2f}")
+        df_display['target'] = df_display['target'].apply(lambda x: f"${x:.2f}")
+        print(df_display.to_string(index=False))
+
+    # Send alerts if positions need attention
+    if alerts:
+        logger.warning(f"\n⚠️  {len(alerts)} position(s) need attention!")
+        notifier.send_monitor_alert(alerts, dashboard)
+    else:
+        logger.info("\nAll positions OK")
 
 
 async def run_simulation_mode(args, ib, data_source='auto'):
@@ -615,6 +767,19 @@ Examples:
         metavar='FILE',
         help='Auto-append PREMIUM signals to a positions CSV (for mock/test exit evaluation)'
     )
+    parser.add_argument(
+        '--export-premium',
+        type=str,
+        metavar='FILE',
+        help='Export PREMIUM signal tickers to a watchlist file (for subsequent re-evaluation scans)'
+    )
+    parser.add_argument(
+        '--monitor',
+        type=str,
+        metavar='FILES',
+        help='Monitor positions for price drops. Comma-separated CSV files. '
+             'Example: --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv'
+    )
 
     args = parser.parse_args()
     
@@ -729,6 +894,7 @@ Examples:
         class DummyNotifier:
             def send_all(self, *args, **kwargs): pass
             def send_exit_notification(self, *args, **kwargs): pass
+            def send_monitor_alert(self, *args, **kwargs): pass
         notifier = DummyNotifier()
     
     # Sector buzz pre-scan report
@@ -750,7 +916,10 @@ Examples:
         orchestrator = ScannerOrchestrator(ib, yf_fallback=yf_fallback)
 
         # Determine execution mode
-        if args.both and args.exit_file:
+        if args.monitor:
+            # Portfolio monitoring mode
+            await run_monitor_mode(orchestrator, args, notifier)
+        elif args.both and args.exit_file:
             # Combined mode
             await run_combined_mode(orchestrator, args, notifier)
         elif args.exit_file:

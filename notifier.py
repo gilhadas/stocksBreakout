@@ -359,30 +359,37 @@ class Notifier:
             })
         
         self.send_all(subject, message, formatted)
-        """Send notification for exit decisions"""
-        if not exit_results:
+
+    def send_monitor_alert(self, alerts: List[Dict], all_positions: List[Dict]):
+        """Send portfolio monitoring alert for positions that need attention"""
+        if not alerts:
             return
-        
-        # Filter for actionable exits
-        actionable = [r for r in exit_results if r['Action'] != 'HOLD']
-        
-        if not actionable:
-            return
-        
-        subject = f"⚠️ Exit Alerts: {len(actionable)} positions need attention"
-        message = f"Exit evaluation completed. {len(actionable)} positions require action:"
-        
-        # Format for notification
+
+        critical = [a for a in alerts if a['status'] in ('HIT_STOP', 'NEAR_STOP')]
+
+        subject = f"{'🔴' if critical else '🟡'} Portfolio Alert: {len(alerts)} position(s) dropping"
+
+        lines = [f"Portfolio monitor: {len(alerts)} of {len(all_positions)} positions need attention\n"]
+        for a in alerts:
+            icon = '🔴' if a['status'] in ('HIT_STOP', 'NEAR_STOP') else '🟡'
+            lines.append(
+                f"{icon} {a['Symbol']} ({a['mode']}): "
+                f"${a['current']:.2f} | Entry: ${a['entry']:.2f} | "
+                f"Stop: ${a['stop']:.2f} | P&L: {a['pnl_pct']:+.1f}% | "
+                f"{a['status']}"
+            )
+        message = "\n".join(lines)
+
         formatted = []
-        for r in actionable:
+        for a in alerts:
             formatted.append({
-                'Symbol': r['Symbol'],
-                'Quality': r['Action'],
-                'Price': r['Price'],
-                'Stop': 0,
-                'Target': 0,
-                'R:R': r['UnrealizedR'],
-                'Vol': 0
+                'Symbol': a['Symbol'],
+                'Quality': a['status'],
+                'Price': a['current'],
+                'Stop': a['stop'],
+                'Target': a['target'],
+                'R:R': 0,
+                'Vol': 0,
             })
-        
+
         self.send_all(subject, message, formatted)

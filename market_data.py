@@ -70,7 +70,42 @@ class MarketDataHandler:
             df = self.yf_adapter.get_historical_data(symbol, ib_timeframe)
 
         return df
-    
+
+    async def get_current_price(self, symbol: str,
+                                exchange: str = 'SMART',
+                                currency: str = 'USD') -> Optional[float]:
+        """Fetch current/latest price for a symbol (lightweight, for monitoring)"""
+        # Try IB real-time first
+        if self.ib_available:
+            contract = None
+            try:
+                contract = Stock(symbol, exchange, currency)
+                await self.ib.qualifyContractsAsync(contract)
+                ticker = self.ib.reqMktData(contract, '', False, False)
+                await asyncio.sleep(0.5)
+                price = ticker.last or ticker.close
+                self._safe_cancel_mkt_data(contract)
+                if price and price > 0:
+                    return float(price)
+            except Exception as e:
+                logger.debug(f"IB price fetch failed for {symbol}: {e}")
+                if contract:
+                    self._safe_cancel_mkt_data(contract)
+
+        # Always try yfinance as fallback for current price (even if IB connected,
+        # real-time quotes may require additional subscription)
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(symbol.replace(' ', '-'))
+            info = ticker.fast_info
+            price = info.get('lastPrice') or info.get('previousClose')
+            if price and price > 0:
+                return float(price)
+        except Exception as e:
+            logger.debug(f"yfinance price fetch failed for {symbol}: {e}")
+
+        return None
+
     def _normalize_timeframe(self, timeframe: str) -> str:
         """
         Normalize timeframe to IB format
