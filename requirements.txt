@@ -1,0 +1,7 @@
+streamlit>=1.30.0
+streamlit-lightweight-charts>=0.7.0
+lightweight-charts>=2.0
+yfinance>=0.2.0
+pandas>=2.0.0
+numpy>=1.24.0
+ib_insync>=0.9.86

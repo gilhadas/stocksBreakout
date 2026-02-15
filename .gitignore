@@ -10,3 +10,4 @@
 !cron_jobs.txt
 !CLAUDE_BUILD_SUMMARY.txt
 !COMPLETE_BUILDOUT.txt
+!requirements.txt
