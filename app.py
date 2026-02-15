@@ -1,0 +1,81 @@
+"""
+Breakout Scanner Dashboard
+Cross-platform web app for running scans, viewing TradingView charts, and backtesting.
+"""
+import streamlit as st
+import sys
+import os
+from pathlib import Path
+
+# Ensure project root is on Python path
+PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Load .env
+_env_file = PROJECT_ROOT / '.env'
+if _env_file.exists():
+    with open(_env_file) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                if line.startswith('export '):
+                    line = line[7:]
+                key, _, value = line.partition('=')
+                value = value.strip().strip('"').strip("'")
+                os.environ.setdefault(key.strip(), value)
+
+st.set_page_config(
+    page_title="Breakout Scanner",
+    page_icon="chart_with_upwards_trend",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# --- Authentication ---
+def check_auth():
+    """Simple password gate for team access."""
+    try:
+        app_password = st.secrets["APP_PASSWORD"]
+    except Exception:
+        # No secrets configured — allow access (local dev)
+        return True
+
+    if st.session_state.get('authenticated'):
+        return True
+
+    st.markdown("## Breakout Scanner Login")
+    password = st.text_input("Password", type="password", key="login_pw")
+    if st.button("Login"):
+        if password == app_password:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Wrong password")
+    return False
+
+
+if not check_auth():
+    st.stop()
+
+# --- Navigation ---
+st.sidebar.title("Breakout Scanner")
+
+page = st.sidebar.radio(
+    "Navigate",
+    ["Scan", "Chart", "Backtest"],
+    index=0,
+)
+
+st.sidebar.markdown("---")
+st.sidebar.caption("V4 Overextension Filter | SMA Distance Scoring")
+
+# --- Route to pages ---
+if page == "Scan":
+    from pages.scan_page import render_scan_page
+    render_scan_page()
+elif page == "Chart":
+    from pages.chart_page import render_chart_page
+    render_chart_page()
+elif page == "Backtest":
+    from pages.backtest_page import render_backtest_page
+    render_backtest_page()
