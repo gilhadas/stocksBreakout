@@ -1,8 +1,11 @@
 *.txt
 .DS_Store
+.env
 *.csv
 *.log
 /__pycache__
 /.vscode
 /scanner_output
 !cron_jobs.txt
+!CLAUDE_BUILD_SUMMARY.txt
+!COMPLETE_BUILDOUT.txt

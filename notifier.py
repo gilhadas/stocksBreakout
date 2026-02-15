@@ -361,35 +361,74 @@ class Notifier:
         self.send_all(subject, message, formatted)
 
     def send_monitor_alert(self, alerts: List[Dict], all_positions: List[Dict]):
-        """Send portfolio monitoring alert for positions that need attention"""
+        """Send portfolio monitoring alert for positions that need attention
+
+        Args:
+            alerts: Positions that need attention (HIT_STOP, NEAR_STOP, FALLING)
+            all_positions: All monitored positions (for CSV attachment)
+        """
         if not alerts:
             return
 
+        # Filter to only critical alerts (HIT_STOP, NEAR_STOP) for notification body
         critical = [a for a in alerts if a['status'] in ('HIT_STOP', 'NEAR_STOP')]
 
-        subject = f"{'🔴' if critical else '🟡'} Portfolio Alert: {len(alerts)} position(s) dropping"
+        subject = f"{'🔴' if critical else '🟡'} Portfolio Alert: {len(critical)} critical, {len(alerts) - len(critical)} falling"
 
-        lines = [f"Portfolio monitor: {len(alerts)} of {len(all_positions)} positions need attention\n"]
-        for a in alerts:
-            icon = '🔴' if a['status'] in ('HIT_STOP', 'NEAR_STOP') else '🟡'
+        # Notification body: show ONLY critical alerts
+        lines = [f"Portfolio monitor: {len(critical)} critical alerts (HIT_STOP/NEAR_STOP)\n"]
+        for a in critical:
+            icon = '🔴'
             lines.append(
                 f"{icon} {a['Symbol']} ({a['mode']}): "
                 f"${a['current']:.2f} | Entry: ${a['entry']:.2f} | "
                 f"Stop: ${a['stop']:.2f} | P&L: {a['pnl_pct']:+.1f}% | "
                 f"{a['status']}"
             )
+
+        if len(alerts) > len(critical):
+            lines.append(f"\n({len(alerts) - len(critical)} additional FALLING positions — see attached CSV)")
+
         message = "\n".join(lines)
 
+        # Formatted signals for notification channels: ONLY critical
         formatted = []
-        for a in alerts:
+        for a in critical:
             formatted.append({
                 'Symbol': a['Symbol'],
-                'Quality': a['status'],
+                'Quality': a['status'],  # HIT_STOP, NEAR_STOP
                 'Price': a['current'],
                 'Stop': a['stop'],
                 'Target': a['target'],
                 'R:R': 0,
                 'Vol': 0,
+                'Sector': f"{a['mode']} | P&L: {a['pnl_pct']:+.1f}%",
             })
 
-        self.send_all(subject, message, formatted)
+        # Generate CSV file with ALL positions (not just alerts)
+        import csv
+        import tempfile
+        from datetime import datetime
+        csv_path = None
+        try:
+            csv_path = tempfile.mktemp(suffix=f'_monitor_{datetime.now():%Y%m%d_%H%M%S}.csv')
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['Symbol', 'Mode', 'Entry', 'Current', 'Stop', 'Target', 'P&L%', 'Status'])
+                writer.writeheader()
+                # Write ALL positions, not just alerts
+                for pos in all_positions:
+                    writer.writerow({
+                        'Symbol': pos['Symbol'],
+                        'Mode': pos['mode'],
+                        'Entry': f"${pos['entry']:.2f}",
+                        'Current': f"${pos['current']:.2f}",
+                        'Stop': f"${pos['stop']:.2f}",
+                        'Target': f"${pos['target']:.2f}",
+                        'P&L%': f"{pos['pnl_pct']:+.1f}%",
+                        'Status': pos['status'],
+                    })
+        except Exception as e:
+            logger.warning(f"Failed to create monitor CSV: {e}")
+            csv_path = None
+
+        self.send_all(subject, message, formatted, csv_path=csv_path)

@@ -237,6 +237,40 @@ class BreakoutDetector:
 
             if quality == 'REJECT':
                 return None
+
+            # --- PREMIUM HARD GATES ---
+            # Downgrade PREMIUM → HIGH if minimum conditions not met
+            if quality == 'PREMIUM':
+                target_upside_pct = ((tp - latest['close']) / latest['close']) * 100
+
+                if mode_name in ('swing', 'longterm'):
+                    # Swing/longterm: min 5% upside + above SMA 150
+                    price_above_trend = latest['close'] > latest.get('Trend_Line', 0)
+                    if target_upside_pct < 5.0:
+                        quality = 'HIGH'
+                        logger.debug(f"{symbol}: PREMIUM→HIGH (target upside {target_upside_pct:.1f}% < 5%)")
+                    elif not price_above_trend:
+                        quality = 'HIGH'
+                        logger.debug(f"{symbol}: PREMIUM→HIGH (price below SMA 150)")
+
+                elif mode_name == 'daytrade':
+                    # Daytrade: min 2% upside + above daily SMA 20
+                    # Intraday df has 15-min bars, so fetch daily data for SMA 20
+                    price_above_sma20 = True  # default: don't penalize if fetch fails
+                    try:
+                        import yfinance as yf
+                        daily = yf.Ticker(symbol.replace(' ', '-')).history(period='30d')
+                        if len(daily) >= 20:
+                            sma_20 = daily['Close'].rolling(20).mean().iloc[-1]
+                            price_above_sma20 = latest['close'] > sma_20
+                    except Exception:
+                        pass
+                    if target_upside_pct < 2.0:
+                        quality = 'HIGH'
+                        logger.debug(f"{symbol}: PREMIUM→HIGH (target upside {target_upside_pct:.1f}% < 2%)")
+                    elif not price_above_sma20:
+                        quality = 'HIGH'
+                        logger.debug(f"{symbol}: PREMIUM→HIGH (price below daily SMA 20)")
         else:
             # Original all-or-nothing logic
             conditions = [

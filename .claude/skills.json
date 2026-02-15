@@ -1,0 +1,144 @@
+{
+  "skills": [
+    {
+      "name": "scan",
+      "description": "Run trading scans with intelligent defaults",
+      "command": "python skills/scan.py",
+      "aliases": ["scan", "breakout"],
+      "tags": ["trading", "signals", "breakout"],
+      "timeout": 60,
+      "parameters": [
+        {
+          "name": "mode",
+          "type": "string",
+          "description": "Trading mode (swing, daytrade, longterm)",
+          "default": "swing",
+          "enum": ["swing", "daytrade", "longterm", "scalping"]
+        },
+        {
+          "name": "watchlist",
+          "type": "string",
+          "description": "Watchlist file path",
+          "default": "input/S&P_500.txt"
+        },
+        {
+          "name": "premium",
+          "type": "boolean",
+          "description": "Export only PREMIUM signals",
+          "default": false
+        },
+        {
+          "name": "sentiment",
+          "type": "boolean",
+          "description": "Enrich with sentiment data",
+          "default": false
+        },
+        {
+          "name": "notify",
+          "type": "boolean",
+          "description": "Send notifications",
+          "default": false
+        }
+      ]
+    },
+    {
+      "name": "backtest",
+      "description": "Run strategy backtests with comparison support",
+      "command": "python skills/backtest.py",
+      "aliases": ["backtest", "test"],
+      "tags": ["backtesting", "analysis", "validation"],
+      "timeout": 300,
+      "parameters": [
+        {
+          "name": "period",
+          "type": "string",
+          "description": "Date range (2024, last-month, 2025-01-01:2025-12-31)",
+          "default": "2024"
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "description": "Trading mode (swing, daytrade, longterm)",
+          "default": "swing",
+          "enum": ["swing", "daytrade", "longterm"]
+        },
+        {
+          "name": "compare",
+          "type": "string",
+          "description": "Comparison type (v1-vs-v2, configs, modes)",
+          "enum": ["v1-vs-v2", "configs", "modes"]
+        },
+        {
+          "name": "optimize",
+          "type": "string",
+          "description": "Parameter to optimize",
+          "enum": ["rsi_overbought", "atr_mult", "consolidation"]
+        }
+      ]
+    },
+    {
+      "name": "monitor",
+      "description": "Monitor open positions for price drops and stop loss alerts",
+      "command": "python skills/monitor.py",
+      "aliases": ["monitor", "watch", "positions"],
+      "tags": ["monitoring", "positions", "alerts"],
+      "timeout": 30,
+      "parameters": [
+        {
+          "name": "positions",
+          "type": "string",
+          "description": "Position CSV files (comma-separated)",
+          "default": "input/positions_swing_mock.csv,input/positions_daytrade_mock.csv"
+        },
+        {
+          "name": "interval",
+          "type": "integer",
+          "description": "Check interval in minutes",
+          "default": 15
+        },
+        {
+          "name": "once",
+          "type": "boolean",
+          "description": "Run once instead of continuous",
+          "default": true
+        }
+      ]
+    },
+    {
+      "name": "analyze-market",
+      "description": "Analyze market regime and impact on strategy",
+      "command": "python skills/analyze_market.py",
+      "aliases": ["analyze-market", "market", "regime"],
+      "tags": ["market-analysis", "regime", "strategy"],
+      "timeout": 30,
+      "parameters": [
+        {
+          "name": "period",
+          "type": "string",
+          "description": "Analysis period (1week, 1month, 1quarter)",
+          "default": "1week",
+          "enum": ["1week", "1month", "1quarter"]
+        },
+        {
+          "name": "forecast",
+          "type": "boolean",
+          "description": "Include regime forecast",
+          "default": false
+        },
+        {
+          "name": "compare-regimes",
+          "type": "boolean",
+          "description": "Compare performance by regime",
+          "default": false
+        }
+      ]
+    }
+  ],
+  "environment": {
+    "PYTHONPATH": ".",
+    "PROJECT_ROOT": "/Users/gilhadas/Documents/GitHub/stocksBreakout"
+  },
+  "hooks": {
+    "post-skill-execution": "log_skill_result"
+  }
+}

@@ -2,6 +2,24 @@
 Configuration module for breakout scanner
 Contains all mode settings and regime configurations
 """
+import os
+from pathlib import Path
+
+
+def _load_email_recipients() -> str:
+    """Load recipient emails from input/email_recipients.txt if it exists,
+    falling back to NOTIFY_RECIPIENTS env var or a hardcoded default."""
+    recipients_file = Path(__file__).parent / 'input' / 'email_recipients.txt'
+    if recipients_file.exists():
+        emails = []
+        for line in recipients_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith('#'):
+                emails.append(line)
+        if emails:
+            return ', '.join(emails)
+    return os.environ.get('NOTIFY_RECIPIENTS', 'gil.hadas@gmail.com')
+
 
 # --- Portfolio Configuration ---
 PORTFOLIO = {
@@ -202,7 +220,7 @@ OUTPUT_DIR = 'scanner_output'  # Directory for all output files
 # --- Sentiment & Sector Analysis ---
 SENTIMENT = {
     'enabled': True,
-    'tavily_api_key': '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',  # Set via TAVILY_API_KEY env var or here
+    'tavily_api_key': os.environ.get('TAVILY_API_KEY', ''),
     'sector_etfs': {
         'Technology': {'etf': 'XLK', 'leaders': ['AAPL', 'MSFT', 'NVDA']},
         'Energy': {'etf': 'XLE', 'leaders': ['XOM', 'CVX', 'COP']},
@@ -222,8 +240,8 @@ NOTIFICATIONS = {
         'smtp_server': 'smtp.gmail.com',
         'smtp_port': 587,
         'sender_email': 'gil.hadas@gmail.com',
-        'sender_password': 'xjby qirq zotu jqdk',  # Use Gmail App Password
-        'recipient_email': 'gil.hadas@gmail.com',
+        'sender_password': os.environ.get('GMAIL_APP_PASSWORD', ''),
+        'recipient_email': _load_email_recipients()  # reads from input/email_recipients.txt
     },
     
     # Telegram notifications

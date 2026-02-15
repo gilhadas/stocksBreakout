@@ -104,6 +104,27 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 sig['Sentiment'] = sent['sentiment']
                 sig['Buzz'] = sent['buzz_score']
 
+    # Check market regime — warn if choppy or red
+    market_warning = None
+    try:
+        timeframe = args.timeframe or MODES[args.mode]['default_timeframe']
+        lookback = args.lookback or MODES[args.mode]['lookback']
+        spy_perf, spy_vol = await orchestrator.market_data.get_spy_performance(timeframe, lookback)
+        regime = classify_market_regime(spy_perf, spy_vol)
+        spy_pct = spy_perf * 100
+
+        if regime == 'CHOPPY':
+            market_warning = f"CHOPPY MARKET — SPY {spy_pct:+.2f}%, vol {spy_vol:.2f}%. Avoid new entries, breakouts likely to fail."
+        elif spy_perf < -0.005:  # SPY down more than 0.5%
+            market_warning = f"RED MARKET — SPY {spy_pct:+.2f}%. Caution: entering long positions against market direction is risky."
+
+        if market_warning:
+            logger.warning(f"\n{'!'*70}")
+            logger.warning(f" ⚠️  {market_warning}")
+            logger.warning(f"{'!'*70}\n")
+    except Exception as e:
+        logger.debug(f"Market regime check failed: {e}")
+
     # Display and save results
     if results:
         import pandas as pd
@@ -111,15 +132,17 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         logger.info(f"\n{'='*70}")
         logger.info(f" {args.mode.upper()} SIGNALS FOUND: {len(results)}")
         logger.info(f"{'='*70}\n")
-        
+
         df = pd.DataFrame(results).sort_values(by='Vol', ascending=False)
         print(df.to_string(index=False))
-        
+
         output_file = orchestrator.save_results(results, args.mode, 'signals')
 
         # Auto-append to positions file if requested
         if getattr(args, 'auto_positions', None):
             from utils import append_signals_to_positions
+            if market_warning:
+                logger.warning("⚠️  Auto-positions still appended despite market warning — review before trading!")
             append_signals_to_positions(results, args.auto_positions, args.mode)
 
         # Export PREMIUM tickers to watchlist file for re-evaluation scans
@@ -136,9 +159,11 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         # Send notifications with CSV attachment
         mode_desc = MODES[args.mode]['description']
         watchlist_name = Path(args.file).stem  # Get filename without extension
+        subject_prefix = "⚠️ " if market_warning else "🚨 "
+        warning_line = f"\n\n⚠️ {market_warning}" if market_warning else ""
         notifier.send_all(
-            subject=f"🚨 {args.mode.upper()} Breakout Signals [{watchlist_name}]",
-            message=f"{len(results)} {mode_desc} breakout signals detected from {watchlist_name}",
+            subject=f"{subject_prefix}{args.mode.upper()} Breakout Signals [{watchlist_name}]",
+            message=f"{len(results)} {mode_desc} breakout signals detected from {watchlist_name}{warning_line}",
             signals=results,
             csv_path=output_file
         )
@@ -387,9 +412,30 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier):
         print(df_display.to_string(index=False))
 
     # Send alerts if positions need attention
-    if alerts:
-        logger.warning(f"\n⚠️  {len(alerts)} position(s) need attention!")
-        notifier.send_monitor_alert(alerts, dashboard)
+    # Track which alerts we've already sent to avoid spam
+    from pathlib import Path
+    alert_history_file = Path('scanner_output/.monitor_alerts.txt')
+    alert_history_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load history of previously alerted symbols
+    alerted_symbols = set()
+    if alert_history_file.exists():
+        with open(alert_history_file, 'r') as f:
+            alerted_symbols = set(line.strip() for line in f if line.strip())
+
+    # Filter to only NEW alerts (not previously alerted)
+    new_alerts = [a for a in alerts if a['Symbol'] not in alerted_symbols]
+
+    if new_alerts:
+        logger.warning(f"\n⚠️  {len(new_alerts)} NEW alert(s), {len(alerts) - len(new_alerts)} already notified")
+        notifier.send_monitor_alert(new_alerts, dashboard)
+
+        # Record newly alerted symbols
+        with open(alert_history_file, 'a') as f:
+            for a in new_alerts:
+                f.write(f"{a['Symbol']}\n")
+    elif alerts:
+        logger.info(f"\n{len(alerts)} position(s) still dropping (already notified)")
     else:
         logger.info("\nAll positions OK")
 
