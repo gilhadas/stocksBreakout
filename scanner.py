@@ -105,7 +105,13 @@ class BreakoutDetector:
         
         # 2. Trend Filter
         trend_ok = self._check_trend(latest, df, cfg, mode_name)
-        
+
+        # V4: Over-extension distance from SMA
+        sma_dist_pct = 0.0
+        trend_line_val = latest.get('Trend_Line', 0)
+        if trend_line_val > 0:
+            sma_dist_pct = ((latest['close'] - trend_line_val) / trend_line_val) * 100
+
         # 3. VWAP position
         vwap_ok = self._check_vwap_position(latest, mode_name)
         
@@ -233,6 +239,20 @@ class BreakoutDetector:
                 checks['rs_ok'] = rs_ok
                 checks['consolidation'] = was_consolidating
 
+            # V4: Over-extension check (swing/longterm only)
+            use_v4 = kwargs.get('use_v4_overextension', True)
+            v4_thresholds = None
+            if use_v4 and mode_name in ('swing', 'longterm'):
+                from config import V4_OVEREXTENSION_FILTER
+                if V4_OVEREXTENSION_FILTER.get('enabled'):
+                    v4_thresholds = V4_OVEREXTENSION_FILTER.get('max_sma_dist_pct', {}).get(mode_name)
+                    if v4_thresholds:
+                        if sma_dist_pct > v4_thresholds['reject']:
+                            logger.debug(f"{symbol}: REJECTED (blow-off {sma_dist_pct:.1f}% from SMA)")
+                            return None
+                        not_overextended = sma_dist_pct <= v4_thresholds['mild']
+                        checks['not_overextended'] = not_overextended
+
             score, max_score, quality = self._calculate_signal_score(checks)
 
             if quality == 'REJECT':
@@ -252,6 +272,9 @@ class BreakoutDetector:
                     elif not price_above_trend:
                         quality = 'HIGH'
                         logger.debug(f"{symbol}: PREMIUM→HIGH (price below SMA 150)")
+                    elif use_v4 and v4_thresholds and sma_dist_pct > v4_thresholds.get('heavy', 20):
+                        quality = 'HIGH'
+                        logger.debug(f"{symbol}: PREMIUM→HIGH (over-extended {sma_dist_pct:.1f}% from SMA)")
 
                 elif mode_name == 'daytrade':
                     # Daytrade: min 2% upside + above daily SMA 20
@@ -298,6 +321,7 @@ class BreakoutDetector:
             'Price': round(latest['close'], 2),
             'Vol': round(latest['Vol_Ratio'], 2),
             'Dist': round(dist_atr, 2),
+            'SMA_Dist%': round(sma_dist_pct, 1),
             'Stop': round(sl, 2),
             'Target': round(tp, 2),
             'R:R': round(rr, 2),
@@ -474,6 +498,7 @@ class BreakoutDetector:
         'rs_ok': 8,
         'consolidation': 8,
         'has_bullish_pattern': 10,  # V3: Pattern confirmation
+        'not_overextended': 10,    # V4: Penalize over-extension from SMA
         # V1 legacy weights (used when use_legacy_momentum=True)
         'vwap_ok': 8,
         'rsi_favorable': 8,
@@ -638,6 +663,7 @@ class BreakoutDetector:
             'Price': round(latest['close'], 2),
             'Vol': round(latest['Vol_Ratio'], 2),
             'Dist': round(pullback_depth, 2),
+            'SMA_Dist%': round(((latest['close'] - latest.get('Trend_Line', latest['close'])) / max(latest.get('Trend_Line', latest['close']), 1)) * 100, 1),
             'Stop': round(sl, 2),
             'Target': round(tp, 2),
             'R:R': round(rr, 2),
@@ -801,6 +827,7 @@ class BreakoutDetector:
             'Price': round(latest['close'], 2),
             'Vol': round(vol_ratio, 2),
             'Dist': round(drawdown * 100, 1),  # Show as % drawdown
+            'SMA_Dist%': round(((latest['close'] - latest.get('Trend_Line', latest['close'])) / max(latest.get('Trend_Line', latest['close']), 1)) * 100, 1),
             'Stop': round(sl, 2),
             'Target': round(tp, 2),
             'R:R': round(rr, 2),

@@ -92,6 +92,17 @@ BB_TREND_FILTER = {
     'reject_bearish': True,    # Reject breakouts during bearish BB trend
 }
 
+# --- V4: Over-Extension Filter ---
+# Penalizes/rejects breakouts too far above the SMA trend line (mean-reversion risk)
+V4_OVEREXTENSION_FILTER = {
+    'enabled': True,
+    'max_sma_dist_pct': {       # % distance from SMA thresholds
+        'swing':    {'mild': 10, 'heavy': 20, 'reject': 25},
+        'longterm': {'mild': 15, 'heavy': 25, 'reject': 35},
+    },
+    # daytrade/scalping use different trend lines (EMA9/VWAP), not applicable
+}
+
 # --- Win Probability Estimation ---
 WIN_PROBABILITY = {
     'base_probability': 0.30,  # 30% base

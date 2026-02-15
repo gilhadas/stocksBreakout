@@ -110,7 +110,7 @@ def calculate_spy_perf_on_date(spy_df, current_date, lookback=15):
 
 
 def run_enhanced_scan(historical, start_date, end_date, modes=None,
-                      use_legacy_momentum=False):
+                      use_legacy_momentum=False, use_v4_overextension=False):
     """
     Scan all symbols across multiple modes with scoring + pullback entries.
     Returns list of signal dicts.
@@ -118,11 +118,17 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
     Args:
         use_legacy_momentum: If True, use V1 binary RSI/MACD/ADX checks.
                              If False, use V2 composite momentum + conviction.
+        use_v4_overextension: If True, apply V4 over-extension filter (SMA distance penalty).
     """
     if modes is None:
         modes = ['swing', 'longterm']
 
-    version = "V1 (legacy)" if use_legacy_momentum else "V2 (composite)"
+    if use_legacy_momentum:
+        version = "V1 (legacy)"
+    elif use_v4_overextension:
+        version = "V4 (overextension filter)"
+    else:
+        version = "V2 (composite)"
     detector = BreakoutDetector()
     spy_df = historical.get('SPY')
     all_signals = []
@@ -161,7 +167,8 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
                     sig = detector.detect(
                         df_slice, symbol, mode_name, timeframe, spy_perf,
                         use_scoring=True,
-                        use_legacy_momentum=use_legacy_momentum
+                        use_legacy_momentum=use_legacy_momentum,
+                        use_v4_overextension=use_v4_overextension
                     )
                 except Exception:
                     sig = None
@@ -368,7 +375,7 @@ async def main():
 
     # Scan for all signals — V1 (legacy) and V2 (new composite)
     print("\n" + "=" * 80)
-    print("SCANNING FOR SIGNALS — V1 (Legacy) vs V2/V3 (Optimized + BB/Patterns)")
+    print("SCANNING FOR SIGNALS — V1 (Legacy) vs V2/V3 vs V4 (Overextension Filter)")
     print("=" * 80)
 
     v1_signals = run_enhanced_scan(historical, start_date, end_date,
@@ -377,6 +384,10 @@ async def main():
     v2_signals = run_enhanced_scan(historical, start_date, end_date,
                                     modes=['swing', 'longterm'],
                                     use_legacy_momentum=False)
+    v4_signals = run_enhanced_scan(historical, start_date, end_date,
+                                    modes=['swing', 'longterm'],
+                                    use_legacy_momentum=False,
+                                    use_v4_overextension=True)
 
     # V3 signals use the same scan as V2 — the new BB filter, pattern scoring,
     # and Grade D rejection are automatically applied by the updated scanner
@@ -468,6 +479,35 @@ async def main():
             'pos_pct': 0.10, 'risk_pct': 0.02,
             'trailing': False,
             'spy_hedge': True, 'spy_alloc': 0.40,
+        },
+        # V4 configs (over-extension filter — rejects stretched breakouts)
+        {
+            'name': 'V4-A) HIGH+, overextension filter',
+            'signals': v4_signals,
+            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V4-B) PREMIUM only, overextension filter',
+            'signals': v4_signals,
+            'filter': lambda s: s.get('quality') == 'PREMIUM',
+            'pos_pct': 0.15, 'risk_pct': 0.03,
+            'trailing': False,
+        },
+        {
+            'name': 'V4-C) HIGH+, aggressive sizing',
+            'signals': v4_signals,
+            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'pos_pct': 0.15, 'risk_pct': 0.025,
+            'trailing': False,
+        },
+        {
+            'name': 'V4-D) PREMIUM, aggressive sizing',
+            'signals': v4_signals,
+            'filter': lambda s: s.get('quality') == 'PREMIUM',
+            'pos_pct': 0.15, 'risk_pct': 0.03,
+            'trailing': False,
         },
     ]
 
