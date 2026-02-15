@@ -36,14 +36,24 @@ def _load_latest_signals():
 def _run_async(coro):
     """Run an async coroutine from Streamlit's synchronous thread."""
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(coro)
     finally:
         loop.close()
 
 
+def _ensure_event_loop():
+    """Ensure an event loop exists in the current thread (needed for ib_insync import)."""
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
 def _run_scan(mode, watchlist_path):
     """Run the scanner and return results as DataFrame."""
+    _ensure_event_loop()  # ib_insync/eventkit needs a loop at import time
     from orchestrator import ScannerOrchestrator
     from utils import get_watchlist_from_file, classify_market_regime
     from config import MODES
