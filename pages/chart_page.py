@@ -85,10 +85,10 @@ def _build_chart_config(df, symbol, signal=None):
             'data': volume_data,
             'options': {
                 'priceFormat': {'type': 'volume'},
-                'title': 'Volume',
+                'priceScaleId': 'volume',
             },
             'priceScale': {
-                'scaleMargins': {'top': 0.8, 'bottom': 0},
+                'scaleMargins': {'top': 0.7, 'bottom': 0},
             },
         },
     ]
@@ -130,6 +130,11 @@ def _build_chart_config(df, symbol, signal=None):
 
 
 def render_chart_page():
+    # Back button to return to Scan
+    if st.button("Back to Scan"):
+        st.session_state['_next_page'] = 'Scan'
+        st.rerun()
+
     st.header("TradingView Chart")
 
     # Symbol input

@@ -60,11 +60,24 @@ if not check_auth():
 # --- Navigation ---
 st.sidebar.title("Breakout Scanner")
 
-page = st.sidebar.radio(
-    "Navigate",
-    ["Scan", "Chart", "Backtest"],
-    index=0,
-)
+# Handle programmatic page switches (from Chart/Back buttons)
+_pages = ["Scan", "Chart", "Backtest"]
+_next = st.session_state.pop('_next_page', None)
+_default_idx = _pages.index(_next) if _next in _pages else 0
+
+page = st.sidebar.radio("Navigate", _pages, index=_default_idx)
+
+st.sidebar.markdown("---")
+
+# Watchlist upload
+uploaded = st.sidebar.file_uploader("Upload Watchlist (.txt)", type=['txt'], key="wl_upload")
+if uploaded:
+    input_dir = PROJECT_ROOT / 'input'
+    input_dir.mkdir(exist_ok=True)
+    dest = input_dir / uploaded.name
+    dest.write_bytes(uploaded.getvalue())
+    st.sidebar.success(f"Saved: {uploaded.name}")
+    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.caption("V4 Overextension Filter | SMA Distance Scoring")
