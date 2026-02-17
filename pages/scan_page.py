@@ -78,8 +78,8 @@ def _run_scan(mode, watchlist_path):
         orchestrator.market_data.get_spy_performance(timeframe, lookback)
     )
     regime = classify_market_regime(spy_perf, spy_vol)
-    orchestrator.save_results(results, mode, 'signals')
-    return results, regime, f"SPY {spy_perf:+.2%}"
+    csv_path = orchestrator.save_results(results, mode, 'signals')
+    return results, regime, f"SPY {spy_perf:+.2%}", csv_path
 
 
 @st.cache_data(ttl=3600)
@@ -183,7 +183,18 @@ def _score_breakdown(signal):
 
     pattern = signal.get('Patterns')
     if pattern and pd.notna(pattern):
-        items.append((f"Pattern: {pattern}", 8, 8))
+        vol_conf = signal.get('PatternVolConf', False)
+        suffix = " (vol confirmed)" if vol_conf else ""
+        pts = 10 if vol_conf else 6
+        items.append((f"Pattern: {pattern}{suffix}", pts, 10))
+
+    near52 = signal.get('Near52wHigh', False)
+    if near52:
+        items.append(("Near 52-week high", 8, 8))
+
+    rsi_div = signal.get('RSI_BullDiv', False)
+    if rsi_div:
+        items.append(("RSI bullish divergence", 5, 5))
 
     return items
 
@@ -296,6 +307,7 @@ def _render_signal_card(signal, card_key):
     score = _get_score(signal)
 
     q_colors = {
+        'GOLD': ('#3d3d1a', '#ffd700'),
         'PREMIUM': ('#1a5c1a', '#4caf50'),
         'HIGH': ('#1a3d5c', '#2196F3'),
         'STANDARD': ('#3d3d1a', '#ff9800'),
@@ -352,6 +364,7 @@ def _render_signal_card(signal, card_key):
             <span style="background:#2a1111; color:#ef5350; padding:2px 10px; border-radius:4px;
                          font-size:11px;">Risk -{risk_pct:.1f}%</span>
         </div>
+        {'<div style="display:flex; flex-wrap:wrap; gap:4px; margin-top:6px;">' + ''.join(f'<span style="background:#1a2a3d; color:#64b5f6; padding:2px 8px; border-radius:3px; font-size:10px;">{p.strip()}</span>' for p in str(signal.get("Patterns", "")).split(",") if p.strip()) + '</div>' if signal.get("Patterns") else ''}
     </div>
     """, unsafe_allow_html=True)
 
@@ -459,22 +472,46 @@ def render_scan_page():
             st.warning("No watchlists in input/")
 
     with col_filter:
-        quality_filter = st.selectbox("Filter", ["PREMIUM", "HIGH+", "ALL"], index=1)
+        quality_filter = st.selectbox("Filter", ["GOLD", "PREMIUM+", "HIGH+", "ALL"], index=2)
 
     with col_run:
         st.markdown("<br>", unsafe_allow_html=True)
         run_clicked = st.button("Run Scan", type="primary", use_container_width=True)
 
+    # Sidebar notification toggle
+    with st.sidebar:
+        notify_on_scan = st.checkbox("Notify on scan complete", value=False,
+                                     help="Send email/Discord notifications after scan")
+
     # ── Run scan ──
     if run_clicked and watchlist_name:
         with st.spinner(f"Scanning {watchlist_name} ({mode})..."):
             try:
-                results, regime, spy_info = _run_scan(mode, watchlists[watchlist_name])
+                results, regime, spy_info, csv_path = _run_scan(mode, watchlists[watchlist_name])
                 if results:
                     st.session_state['scan_results'] = results
                     st.session_state['scan_regime'] = regime
                     st.session_state['scan_spy'] = spy_info
                     st.session_state['scan_mode'] = mode
+
+                    # Send notifications if enabled
+                    if notify_on_scan and results:
+                        try:
+                            from notifier import Notifier
+                            notifier = Notifier()
+                            n = len(results)
+                            qualities = [r.get('Quality', '?') for r in results]
+                            subject = f"Scan: {n} {mode} signals"
+                            message = f"{n} signals found ({', '.join(set(qualities))})"
+                            notifier.send_all(
+                                subject=subject,
+                                message=message,
+                                signals=results,
+                                csv_path=csv_path,
+                            )
+                            st.toast(f"Notifications sent ({n} signals)")
+                        except Exception as ne:
+                            st.warning(f"Notification failed: {ne}")
                 else:
                     st.session_state['scan_results'] = []
             except Exception as e:
@@ -502,10 +539,12 @@ def render_scan_page():
 
     # ── Filter by quality ──
     if 'Quality' in df.columns:
-        if quality_filter == "PREMIUM":
-            df = df[df['Quality'] == 'PREMIUM']
+        if quality_filter == "GOLD":
+            df = df[df['Quality'] == 'GOLD']
+        elif quality_filter == "PREMIUM+":
+            df = df[df['Quality'].isin(['GOLD', 'PREMIUM'])]
         elif quality_filter == "HIGH+":
-            df = df[df['Quality'].isin(['PREMIUM', 'HIGH'])]
+            df = df[df['Quality'].isin(['GOLD', 'PREMIUM', 'HIGH'])]
 
     if df.empty:
         st.warning(f"No {quality_filter} signals.")

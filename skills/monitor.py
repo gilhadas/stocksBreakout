@@ -37,28 +37,47 @@ async def run_monitor_skill(
         from orchestrator import ScannerOrchestrator
         from utils import get_positions_from_file
 
-        # Default to both swing and daytrade positions
-        if not positions_files:
-            positions_files = [
-                'input/positions_swing_mock.csv',
-                'input/positions_daytrade_mock.csv'
-            ]
+        # Default: try portfolio.json first, fall back to CSV files
+        use_portfolio = False
+        all_positions = []
 
-        # Resolve paths
-        resolved_files = []
-        for f in positions_files:
-            fpath = Path(f)
-            if not fpath.exists():
-                fpath = Path(__file__).parent.parent / f
-            if fpath.exists():
-                resolved_files.append(str(fpath))
+        if not positions_files or positions_files == ['portfolio']:
+            try:
+                from portfolio import Portfolio
+                p = Portfolio()
+                all_positions = p.get_positions_as_exit_format()
+                if all_positions:
+                    use_portfolio = True
+                    logger.info(f"Loaded {len(all_positions)} positions from portfolio.json")
+            except Exception:
+                pass
 
-        if not resolved_files:
-            return {
-                'success': False,
-                'error': 'No position files found',
-                'positions_count': 0
-            }
+            if not use_portfolio:
+                positions_files = [
+                    'input/positions_swing_mock.csv',
+                    'input/positions_daytrade_mock.csv'
+                ]
+
+        if not use_portfolio:
+            # Resolve CSV paths
+            resolved_files = []
+            for f in positions_files:
+                fpath = Path(f)
+                if not fpath.exists():
+                    fpath = Path(__file__).parent.parent / f
+                if fpath.exists():
+                    resolved_files.append(str(fpath))
+
+            if not resolved_files:
+                return {
+                    'success': False,
+                    'error': 'No position files found',
+                    'positions_count': 0
+                }
+
+            for file in resolved_files:
+                positions = get_positions_from_file(file)
+                all_positions.extend(positions)
 
         # Connect to IB
         ib = await connect_to_ib(live=False)
@@ -66,12 +85,6 @@ async def run_monitor_skill(
 
         # Create orchestrator
         orchestrator = ScannerOrchestrator(ib, yf_fallback=yf_fallback)
-
-        # Load all positions
-        all_positions = []
-        for file in resolved_files:
-            positions = get_positions_from_file(file)
-            all_positions.extend(positions)
 
         if not all_positions:
             return {

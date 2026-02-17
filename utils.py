@@ -97,7 +97,7 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
     import os
     from config import MODES
 
-    quality_rank = {'PREMIUM': 3, 'HIGH': 2, 'STANDARD': 1, 'REJECT': 0}
+    quality_rank = {'GOLD': 4, 'PREMIUM': 3, 'HIGH': 2, 'STANDARD': 1, 'REJECT': 0}
     min_rank = quality_rank.get(min_quality, 3)
 
     timeframe = MODES.get(mode, {}).get('default_timeframe', '1 day')

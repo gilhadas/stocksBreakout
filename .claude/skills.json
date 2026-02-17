@@ -87,8 +87,8 @@
         {
           "name": "positions",
           "type": "string",
-          "description": "Position CSV files (comma-separated)",
-          "default": "input/positions_swing_mock.csv,input/positions_daytrade_mock.csv"
+          "description": "Position source: 'portfolio' (default, reads portfolio.json) or comma-separated CSV file paths",
+          "default": "portfolio"
         },
         {
           "name": "interval",

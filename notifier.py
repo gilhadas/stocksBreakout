@@ -15,6 +15,7 @@ import platform
 import subprocess
 import json
 import pandas as pd
+from datetime import datetime
 
 from config import NOTIFICATIONS
 
@@ -23,23 +24,48 @@ logger = logging.getLogger(__name__)
 
 class Notifier:
     """Handles notifications via multiple channels"""
-    
+
     def __init__(self):
         self.email_enabled = NOTIFICATIONS['email']['enabled']
         self.telegram_enabled = NOTIFICATIONS['telegram']['enabled']
         self.discord_enabled = NOTIFICATIONS['discord']['enabled']
         self.webhook_enabled = NOTIFICATIONS.get('webhook', {}).get('enabled', False)
-        
+
         # Mac native notifications (auto-detect)
         self.mac_native_enabled = platform.system() == 'Darwin'
-        
-        # Track sent notifications to prevent duplicates
-        self._sent_cache = set()
-    
+
+        # Persistent notification cache — survives across process runs within a day
+        self._cache_file = Path('scanner_output') / '.notification_cache.json'
+        self._sent_cache = self._load_cache()
+
+    def _load_cache(self) -> set:
+        """Load today's sent notification keys from disk."""
+        try:
+            if self._cache_file.exists():
+                data = json.loads(self._cache_file.read_text())
+                # Only use cache from today
+                if data.get('date') == datetime.now().strftime('%Y-%m-%d'):
+                    return set(data.get('keys', []))
+        except Exception:
+            pass
+        return set()
+
+    def _save_cache(self):
+        """Persist sent notification keys to disk."""
+        try:
+            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'keys': list(self._sent_cache),
+            }
+            self._cache_file.write_text(json.dumps(data))
+        except Exception as e:
+            logger.debug(f"Cache save failed: {e}")
+
     def _generate_cache_key(self, subject: str, signals: Optional[List[Dict]]) -> str:
         """Generate unique key for notification to prevent duplicates"""
         if signals:
-            symbols = sorted([s['Symbol'] for s in signals])
+            symbols = sorted([s.get('Symbol', s.get('symbol', '')) for s in signals])
             return f"{subject}:{','.join(symbols)}"
         return subject
     
@@ -63,9 +89,10 @@ class Notifier:
                    self.mac_native_enabled, self.webhook_enabled]):
             return
         
-        # Mark as sent
+        # Mark as sent and persist to disk
         self._sent_cache.add(cache_key)
-        
+        self._save_cache()
+
         results = []
         
         if self.email_enabled:
@@ -331,20 +358,21 @@ class Notifier:
             logger.error(f"Webhook notification failed: {e}")
             return False
     
-    def send_exit_notification(self, exit_results: List[Dict]):
-        """Send notification for exit decisions"""
+    def send_exit_notification(self, exit_results: List[Dict],
+                               csv_path: Optional[str] = None):
+        """Send notification for exit decisions with optional CSV attachment"""
         if not exit_results:
             return
-        
+
         # Filter for actionable exits
         actionable = [r for r in exit_results if r['Action'] != 'HOLD']
-        
+
         if not actionable:
             return
-        
-        subject = f"⚠️ Exit Alerts: {len(actionable)} positions need attention"
+
+        subject = f"Exit Alerts: {len(actionable)} positions need attention"
         message = f"Exit evaluation completed. {len(actionable)} positions require action:"
-        
+
         # Format for notification
         formatted = []
         for r in actionable:
@@ -357,8 +385,8 @@ class Notifier:
                 'R:R': r['UnrealizedR'],
                 'Vol': 0
             })
-        
-        self.send_all(subject, message, formatted)
+
+        self.send_all(subject, message, formatted, csv_path=csv_path)
 
     def send_monitor_alert(self, alerts: List[Dict], all_positions: List[Dict]):
         """Send portfolio monitoring alert for positions that need attention

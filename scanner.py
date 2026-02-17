@@ -23,11 +23,64 @@ logger = logging.getLogger(__name__)
 
 class BreakoutDetector:
     """Detects breakout signals based on technical analysis"""
-    
+
     def __init__(self):
         self.rejection_reasons = []
+        # Instance-level copy of weights (may be adjusted by learning loop)
+        self.scoring_weights = dict(self.SCORING_WEIGHTS)
+        self._load_score_adjustments()
     
-    def detect(self, df: pd.DataFrame, symbol: str, mode_name: str, 
+    def _load_score_adjustments(self):
+        """Load weight recommendations from learning loop (read-only, conservative)."""
+        import json
+        from pathlib import Path
+        from config import OUTPUT_DIR
+
+        adj_path = Path(OUTPUT_DIR) / 'score_adjustments.json'
+        if not adj_path.exists():
+            return
+
+        try:
+            data = json.loads(adj_path.read_text())
+            recs = data.get('weight_recommendations', [])
+            applied = []
+
+            # Handle list format: [{feature, current_weight, recommended_weight, reason}]
+            if isinstance(recs, list):
+                for rec in recs:
+                    feature = rec.get('feature', '')
+                    if feature not in self.scoring_weights:
+                        continue
+                    current = rec.get('current_weight', 0)
+                    recommended = rec.get('recommended_weight', current)
+                    adj = recommended - current
+                    # Conservative: cap adjustments to +/-3 points
+                    adj = max(-3, min(3, adj))
+                    if adj != 0:
+                        old = self.scoring_weights[feature]
+                        self.scoring_weights[feature] = max(1, old + adj)
+                        applied.append(f"{feature}: {old}→{self.scoring_weights[feature]}")
+
+            # Handle dict format: {feature: {adjustment: N}}
+            elif isinstance(recs, dict):
+                for feature, rec in recs.items():
+                    if feature not in self.scoring_weights or not isinstance(rec, dict):
+                        continue
+                    adj = rec.get('adjustment', 0)
+                    adj = max(-3, min(3, adj))
+                    if adj != 0:
+                        old = self.scoring_weights[feature]
+                        self.scoring_weights[feature] = max(1, old + adj)
+                        applied.append(f"{feature}: {old}→{self.scoring_weights[feature]}")
+
+            if applied:
+                logger.info(f"Learning loop: applied {len(applied)} adjustments — {', '.join(applied)}")
+            else:
+                logger.info(f"Learning loop: loaded {adj_path}, no adjustments needed")
+        except Exception as e:
+            logger.debug(f"Learning loop: failed to load {adj_path}: {e}")
+
+    def detect(self, df: pd.DataFrame, symbol: str, mode_name: str,
               timeframe: str, spy_perf: float, **kwargs) -> Optional[Dict[str, Any]]:
         """
         Main breakout detection logic
@@ -91,7 +144,7 @@ class BreakoutDetector:
                 return None
 
         # --- PATTERN DETECTION (V3) ---
-        has_bullish_pattern, has_bearish_pattern, pattern_target, pattern_names = \
+        has_bullish_pattern, has_bearish_pattern, pattern_target, pattern_names, pattern_vol_confirmed = \
             get_pattern_score(df.tail(30), symbol)
 
         # --- FILTERS ---
@@ -199,8 +252,15 @@ class BreakoutDetector:
         momentum_strong = momentum_score_val >= 50 if not pd.isna(momentum_score_val) else False
         conviction_strong = conviction_score_val >= 40 if not pd.isna(conviction_score_val) else False
 
+        # V5: Pre-compute values used in both scoring and non-scoring paths
+        high_52w = df['high'].rolling(min(252, len(df))).max().iloc[-1]
+        dist_from_52w = ((high_52w - latest['close']) / high_52w) * 100 if high_52w > 0 else 100
+        near_52w_high = dist_from_52w <= 5.0
+        rsi_bull_div = bool(latest.get('RSI_Bull_Div', False))
+        sector_hot = kwargs.get('sector_hot', False)
+
         # --- SIGNAL SCORING SYSTEM ---
-        use_scoring = kwargs.get('use_scoring', False)
+        use_scoring = kwargs.get('use_scoring', True)
 
         if use_scoring:
             # Mandatory gate: price must break above previous high
@@ -235,6 +295,14 @@ class BreakoutDetector:
                     'has_bullish_pattern': has_bullish_pattern,
                 }
 
+            # V5: New scoring checks
+            checks['near_52w_high'] = near_52w_high
+            checks['rsi_divergence'] = rsi_bull_div
+            checks['sector_momentum'] = sector_hot
+
+            # V6: Pattern volume confirmation
+            checks['pattern_vol_confirmed'] = pattern_vol_confirmed
+
             if mode_name != 'scalping':
                 checks['rs_ok'] = rs_ok
                 checks['consolidation'] = was_consolidating
@@ -257,6 +325,20 @@ class BreakoutDetector:
 
             if quality == 'REJECT':
                 return None
+
+            # --- GOLD HARD GATES ---
+            # Downgrade GOLD → PREMIUM if 5 strict conditions not all met
+            if quality == 'GOLD':
+                gold_gates = [
+                    rr >= 3.0,                                    # R:R >= 3
+                    latest['close'] > latest.get('Trend_Line', 0),  # Above SMA trend
+                    latest['Vol_Ratio'] >= 2.0,                   # Volume >= 2x
+                    near_52w_high,                                # Within 5% of 52w high
+                    sector_hot,                                   # Sector momentum
+                ]
+                if not all(gold_gates):
+                    quality = 'PREMIUM'
+                    logger.debug(f"{symbol}: GOLD→PREMIUM (failed {5 - sum(gold_gates)}/5 hard gates)")
 
             # --- PREMIUM HARD GATES ---
             # Downgrade PREMIUM → HIGH if minimum conditions not met
@@ -332,6 +414,9 @@ class BreakoutDetector:
             'WinProb': win_prob,
             'WinGrade': win_grade,
             'Patterns': ', '.join(pattern_names) if pattern_names else '',
+            'Near52wHigh': near_52w_high if use_scoring else False,
+            'RSI_BullDiv': rsi_bull_div if use_scoring else False,
+            'PatternVolConf': pattern_vol_confirmed if use_scoring else False,
         }
         
         if mode_name == 'scalping' and spread_pct is not None:
@@ -499,6 +584,10 @@ class BreakoutDetector:
         'consolidation': 8,
         'has_bullish_pattern': 10,  # V3: Pattern confirmation
         'not_overextended': 10,    # V4: Penalize over-extension from SMA
+        'near_52w_high': 8,        # V5: Within 5% of 52-week high
+        'rsi_divergence': 5,       # V5: RSI bullish divergence
+        'sector_momentum': 6,      # V5: Sector ETF momentum
+        'pattern_vol_confirmed': 6, # V6: Pattern confirmed by volume
         # V1 legacy weights (used when use_legacy_momentum=True)
         'vwap_ok': 8,
         'rsi_favorable': 8,
@@ -511,14 +600,16 @@ class BreakoutDetector:
         score = 0
         max_score = 0
         for key, passed in checks.items():
-            weight = self.SCORING_WEIGHTS.get(key, 5)
+            weight = self.scoring_weights.get(key, 5)
             max_score += weight
             if passed:
                 score += weight
 
         pct = (score / max_score * 100) if max_score > 0 else 0
 
-        if pct >= 80:
+        if pct >= 90:
+            quality = 'GOLD'
+        elif pct >= 80:
             quality = 'PREMIUM'
         elif pct >= 65:
             quality = 'HIGH'

@@ -9,20 +9,28 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 
 
+def _avg_volume(df: pd.DataFrame, window: int = 20) -> float:
+    """Average volume over last N bars (or all if fewer)."""
+    vol = df['volume'].values
+    n = min(window, len(vol))
+    return float(np.mean(vol[-n:])) if n > 0 else 1.0
+
+
 def detect_bull_flag(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
     """
     Detect bull flag pattern (continuation pattern).
 
     Bull flag characteristics:
-    1. Pole: Sharp price increase (>5% in 1-3 days)
-    2. Flag: Consolidation with slight downward drift
-    3. Breakout: Price breaking above flag resistance
+    1. Pole: Sharp price increase (>5% in 1-3 days) on high volume
+    2. Flag: Consolidation with slight downward drift on declining volume
+    3. Breakout: Price breaking above flag resistance on rising volume
     """
     try:
         if len(df) < 10:
             return None
 
         recent = df.tail(20).copy()
+        avg_vol = _avg_volume(df)
 
         pole_window = 5
         for i in range(len(recent) - pole_window - 3):
@@ -46,12 +54,26 @@ def detect_bull_flag(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
                     if current_price >= flag_high * 0.98:
                         target_price = current_price + (pole_end - pole_start)
 
+                        # Volume confirmation
+                        pole_vol = recent.iloc[i:i + pole_window]['volume'].mean()
+                        flag_vol = flag_data['volume'].mean()
+                        breakout_vol = recent.iloc[-1]['volume']
+                        vol_confirmed = (
+                            pole_vol > avg_vol * 1.2 and   # pole on high vol
+                            flag_vol < avg_vol * 0.9 and   # flag on low vol
+                            breakout_vol > avg_vol         # breakout on rising vol
+                        )
+                        conf = min(0.95, 0.6 + (pole_gain / 100))
+                        if vol_confirmed:
+                            conf = min(0.95, conf + 0.10)
+
                         return {
                             'name': 'Bull Flag',
                             'type': 'continuation',
                             'bullish': True,
                             'bearish': False,
-                            'confidence': min(0.95, 0.6 + (pole_gain / 100)),
+                            'confidence': conf,
+                            'volume_confirmed': vol_confirmed,
                             'pole_gain': round(pole_gain, 2),
                             'breakout_target': round(target_price, 2),
                             'current_price': round(current_price, 2),
@@ -73,6 +95,7 @@ def detect_bear_flag(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
             return None
 
         recent = df.tail(20).copy()
+        avg_vol = _avg_volume(df)
 
         pole_window = 5
         for i in range(len(recent) - pole_window - 3):
@@ -96,12 +119,25 @@ def detect_bear_flag(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
                     if current_price <= flag_low * 1.02:
                         target_price = current_price - (pole_start - pole_end)
 
+                        pole_vol = recent.iloc[i:i + pole_window]['volume'].mean()
+                        flag_vol = flag_data['volume'].mean()
+                        breakout_vol = recent.iloc[-1]['volume']
+                        vol_confirmed = (
+                            pole_vol > avg_vol * 1.2 and
+                            flag_vol < avg_vol * 0.9 and
+                            breakout_vol > avg_vol
+                        )
+                        conf = min(0.95, 0.6 + (pole_loss / 100))
+                        if vol_confirmed:
+                            conf = min(0.95, conf + 0.10)
+
                         return {
                             'name': 'Bear Flag',
                             'type': 'continuation',
                             'bullish': False,
                             'bearish': True,
-                            'confidence': min(0.95, 0.6 + (pole_loss / 100)),
+                            'confidence': conf,
+                            'volume_confirmed': vol_confirmed,
                             'pole_loss': round(pole_loss, 2),
                             'breakdown_target': round(target_price, 2),
                             'current_price': round(current_price, 2),
@@ -157,12 +193,20 @@ def detect_ascending_triangle(df: pd.DataFrame, ticker: str = "") -> Optional[Di
                 triangle_height = resistance - lows[0]
                 target = resistance + triangle_height
 
+                # Volume should contract during triangle, spike on breakout
+                avg_vol = _avg_volume(df)
+                mid_vol = recent['volume'].iloc[5:-3].mean() if len(recent) > 8 else avg_vol
+                breakout_vol = recent.iloc[-1]['volume']
+                vol_confirmed = mid_vol < avg_vol * 0.9 and breakout_vol > avg_vol
+                conf = 0.80 if vol_confirmed else 0.70
+
                 return {
                     'name': 'Ascending Triangle',
                     'type': 'consolidation',
                     'bullish': True,
                     'bearish': False,
-                    'confidence': 0.75,
+                    'confidence': conf,
+                    'volume_confirmed': vol_confirmed,
                     'resistance': round(resistance, 2),
                     'breakout_target': round(target, 2),
                     'current_price': round(current_price, 2),
@@ -218,12 +262,19 @@ def detect_descending_triangle(df: pd.DataFrame, ticker: str = "") -> Optional[D
                 triangle_height = highs[0] - support
                 target = support - triangle_height
 
+                avg_vol = _avg_volume(df)
+                mid_vol = recent['volume'].iloc[5:-3].mean() if len(recent) > 8 else avg_vol
+                breakout_vol = recent.iloc[-1]['volume']
+                vol_confirmed = mid_vol < avg_vol * 0.9 and breakout_vol > avg_vol
+                conf = 0.80 if vol_confirmed else 0.70
+
                 return {
                     'name': 'Descending Triangle',
                     'type': 'consolidation',
                     'bullish': False,
                     'bearish': True,
-                    'confidence': 0.75,
+                    'confidence': conf,
+                    'volume_confirmed': vol_confirmed,
                     'support': round(support, 2),
                     'breakdown_target': round(target, 2),
                     'current_price': round(current_price, 2),
@@ -262,12 +313,18 @@ def detect_symmetrical_triangle(df: pd.DataFrame, ticker: str = "") -> Optional[
             range_pct = ((recent_high - recent_low) / recent_low) * 100
 
             if range_pct < 5:
+                avg_vol = _avg_volume(df)
+                mid_vol = recent['volume'].iloc[3:-3].mean() if len(recent) > 6 else avg_vol
+                vol_confirmed = mid_vol < avg_vol * 0.85
+                conf = 0.75 if vol_confirmed else 0.65
+
                 return {
                     'name': 'Symmetrical Triangle',
                     'type': 'consolidation',
                     'bullish': None,
                     'bearish': None,
-                    'confidence': 0.70,
+                    'confidence': conf,
+                    'volume_confirmed': vol_confirmed,
                     'current_price': round(current_price, 2),
                     'range': round(range_pct, 2),
                     'risk_level': 'medium'
@@ -277,6 +334,847 @@ def detect_symmetrical_triangle(df: pd.DataFrame, ticker: str = "") -> Optional[
 
     except Exception:
         return None
+
+
+def detect_cup_and_handle(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect cup and handle pattern (bullish continuation).
+
+    Structure (over ~30-60 bars):
+    1. Left lip: prior high
+    2. Cup: rounded bottom (U-shape, not V)
+    3. Right lip: price recovers near left lip
+    4. Handle: small pullback (flag-like) off the right lip
+    5. Breakout: price pushes above both lips
+
+    Uses a 40-bar window: first 30 for the cup, last 10 for the handle.
+    """
+    try:
+        if len(df) < 40:
+            return None
+
+        window = df.tail(50).copy()
+        closes = window['close'].values
+        highs = window['high'].values
+        lows = window['low'].values
+
+        # Find the highest point in the first third (left lip)
+        first_third = len(closes) // 3
+        left_lip_idx = np.argmax(highs[:first_third])
+        left_lip = highs[left_lip_idx]
+
+        # Find the lowest point in the middle (cup bottom)
+        mid_start = first_third
+        mid_end = 2 * first_third
+        cup_bottom_idx = mid_start + np.argmin(lows[mid_start:mid_end])
+        cup_bottom = lows[cup_bottom_idx]
+
+        # Cup depth should be 10-35% from lip
+        cup_depth_pct = (left_lip - cup_bottom) / left_lip * 100
+        if cup_depth_pct < 8 or cup_depth_pct > 40:
+            return None
+
+        # Right lip: highest point in last third (before final 5 bars for handle)
+        right_section = highs[mid_end:-5] if len(highs) > mid_end + 5 else highs[mid_end:]
+        if len(right_section) < 3:
+            return None
+        right_lip = right_section.max()
+
+        # Right lip should be within 5% of left lip (cup is symmetric-ish)
+        lip_diff_pct = abs(right_lip - left_lip) / left_lip * 100
+        if lip_diff_pct > 8:
+            return None
+
+        # U-shape check: cup bottom should be lower than both lips
+        if cup_bottom >= left_lip * 0.95 or cup_bottom >= right_lip * 0.95:
+            return None
+
+        # Handle: last 5-10 bars should pull back slightly from right lip
+        handle = closes[-8:]
+        handle_high = handle.max()
+        handle_low = handle.min()
+        handle_pullback_pct = (handle_high - handle_low) / handle_high * 100
+
+        # Handle should be a small pullback (2-12%), not a crash
+        if handle_pullback_pct < 1 or handle_pullback_pct > 15:
+            return None
+
+        current_price = closes[-1]
+        lip_level = max(left_lip, right_lip)
+
+        # Current price should be near or above the lip (breakout zone)
+        if current_price < lip_level * 0.95:
+            return None
+
+        target = lip_level + (lip_level - cup_bottom)
+
+        # Volume: should be low at cup bottom, rising on right lip + handle breakout
+        volumes = window['volume'].values
+        avg_vol = _avg_volume(df)
+        cup_bottom_vol = volumes[cup_bottom_idx] if cup_bottom_idx < len(volumes) else avg_vol
+        breakout_vol = volumes[-1]
+        vol_confirmed = cup_bottom_vol < avg_vol and breakout_vol > avg_vol * 1.1
+        conf = 0.85 if vol_confirmed else 0.75
+
+        return {
+            'name': 'Cup and Handle',
+            'type': 'continuation',
+            'bullish': True,
+            'bearish': False,
+            'confidence': conf,
+            'volume_confirmed': vol_confirmed,
+            'cup_depth_pct': round(cup_depth_pct, 2),
+            'handle_pullback_pct': round(handle_pullback_pct, 2),
+            'resistance': round(lip_level, 2),
+            'breakout_target': round(target, 2),
+            'current_price': round(current_price, 2),
+            'risk_level': 'low',
+        }
+
+    except Exception:
+        return None
+
+
+def detect_inverse_head_and_shoulders(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect inverse head and shoulders (bullish reversal).
+
+    Structure:
+    1. Left shoulder: a low, then bounce up to neckline
+    2. Head: a lower low, then bounce back up to neckline
+    3. Right shoulder: a higher low (similar depth to left shoulder)
+    4. Neckline: resistance connecting the two bounce highs
+    5. Breakout above neckline
+
+    Scans last 40 bars, finds 3 swing lows.
+    """
+    try:
+        if len(df) < 30:
+            return None
+
+        window = df.tail(45).copy()
+        closes = window['close'].values
+        lows = window['low'].values
+        highs = window['high'].values
+        n = len(closes)
+
+        # Find swing lows (local minima with >= 3-bar lookback/forward)
+        swing_lows = []
+        for i in range(4, n - 4):
+            if lows[i] == min(lows[i-4:i+5]):
+                swing_lows.append((i, lows[i]))
+
+        if len(swing_lows) < 3:
+            return None
+
+        # Try combinations of 3 swing lows
+        for li in range(len(swing_lows) - 2):
+            ls_idx, ls_low = swing_lows[li]         # left shoulder
+            for hi in range(li + 1, len(swing_lows) - 1):
+                h_idx, h_low = swing_lows[hi]       # head
+                for ri in range(hi + 1, len(swing_lows)):
+                    rs_idx, rs_low = swing_lows[ri]  # right shoulder
+
+                    # Head must be the lowest
+                    if h_low >= ls_low or h_low >= rs_low:
+                        continue
+
+                    # Shoulders should be roughly similar depth (within 30%)
+                    shoulder_avg = (ls_low + rs_low) / 2
+                    if abs(ls_low - rs_low) / shoulder_avg > 0.15:
+                        continue
+
+                    # Spacing: head should be roughly centered
+                    left_gap = h_idx - ls_idx
+                    right_gap = rs_idx - h_idx
+                    if left_gap < 3 or right_gap < 3:
+                        continue
+                    if max(left_gap, right_gap) > 3 * min(left_gap, right_gap):
+                        continue
+
+                    # Neckline: connect the bounce highs between shoulders and head
+                    neck_left = max(highs[ls_idx:h_idx])
+                    neck_right = max(highs[h_idx:rs_idx])
+                    neckline = (neck_left + neck_right) / 2
+
+                    # Head depth below neckline should be meaningful (>5%)
+                    head_depth = (neckline - h_low) / neckline * 100
+                    if head_depth < 5:
+                        continue
+
+                    current_price = closes[-1]
+
+                    # Price should be near or above neckline
+                    if current_price < neckline * 0.97:
+                        continue
+
+                    # Right shoulder should be recent (within last 15 bars)
+                    if n - rs_idx > 15:
+                        continue
+
+                    target = neckline + (neckline - h_low)
+
+                    # Volume: should increase from left shoulder → right shoulder → breakout
+                    volumes = window['volume'].values
+                    avg_vol = _avg_volume(df)
+                    ls_vol = volumes[ls_idx] if ls_idx < len(volumes) else avg_vol
+                    rs_vol = volumes[rs_idx] if rs_idx < len(volumes) else avg_vol
+                    breakout_vol = volumes[-1]
+                    vol_confirmed = rs_vol > ls_vol * 0.8 and breakout_vol > avg_vol
+                    conf = 0.90 if vol_confirmed else 0.80
+
+                    return {
+                        'name': 'Inverse Head & Shoulders',
+                        'type': 'reversal',
+                        'bullish': True,
+                        'bearish': False,
+                        'confidence': conf,
+                        'volume_confirmed': vol_confirmed,
+                        'neckline': round(neckline, 2),
+                        'head_low': round(h_low, 2),
+                        'head_depth_pct': round(head_depth, 2),
+                        'breakout_target': round(target, 2),
+                        'current_price': round(current_price, 2),
+                        'risk_level': 'low',
+                    }
+
+        return None
+
+    except Exception:
+        return None
+
+
+def detect_head_and_shoulders(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect head and shoulders (bearish reversal).
+
+    Structure: two swing highs (shoulders) with a higher high (head) between them.
+    Neckline connects the two trough lows. Breakdown below neckline.
+    """
+    try:
+        if len(df) < 30:
+            return None
+
+        window = df.tail(45).copy()
+        closes = window['close'].values
+        highs = window['high'].values
+        lows = window['low'].values
+        n = len(closes)
+
+        # Find swing highs
+        swing_highs = []
+        for i in range(4, n - 4):
+            if highs[i] == max(highs[i-4:i+5]):
+                swing_highs.append((i, highs[i]))
+
+        if len(swing_highs) < 3:
+            return None
+
+        for li in range(len(swing_highs) - 2):
+            ls_idx, ls_high = swing_highs[li]
+            for hi in range(li + 1, len(swing_highs) - 1):
+                h_idx, h_high = swing_highs[hi]
+                for ri in range(hi + 1, len(swing_highs)):
+                    rs_idx, rs_high = swing_highs[ri]
+
+                    # Head must be the highest
+                    if h_high <= ls_high or h_high <= rs_high:
+                        continue
+
+                    # Shoulders roughly similar (within 15%)
+                    shoulder_avg = (ls_high + rs_high) / 2
+                    if abs(ls_high - rs_high) / shoulder_avg > 0.15:
+                        continue
+
+                    left_gap = h_idx - ls_idx
+                    right_gap = rs_idx - h_idx
+                    if left_gap < 3 or right_gap < 3:
+                        continue
+                    if max(left_gap, right_gap) > 3 * min(left_gap, right_gap):
+                        continue
+
+                    # Neckline from trough lows
+                    neck_left = min(lows[ls_idx:h_idx])
+                    neck_right = min(lows[h_idx:rs_idx])
+                    neckline = (neck_left + neck_right) / 2
+
+                    head_height = (h_high - neckline) / neckline * 100
+                    if head_height < 5:
+                        continue
+
+                    current_price = closes[-1]
+
+                    # Price near or below neckline
+                    if current_price > neckline * 1.03:
+                        continue
+
+                    if n - rs_idx > 15:
+                        continue
+
+                    target = neckline - (h_high - neckline)
+
+                    volumes = window['volume'].values
+                    avg_vol = _avg_volume(df)
+                    breakout_vol = volumes[-1]
+                    vol_confirmed = breakout_vol > avg_vol
+                    conf = 0.90 if vol_confirmed else 0.80
+
+                    return {
+                        'name': 'Head & Shoulders',
+                        'type': 'reversal',
+                        'bullish': False,
+                        'bearish': True,
+                        'confidence': conf,
+                        'volume_confirmed': vol_confirmed,
+                        'neckline': round(neckline, 2),
+                        'head_high': round(h_high, 2),
+                        'head_height_pct': round(head_height, 2),
+                        'breakdown_target': round(target, 2),
+                        'current_price': round(current_price, 2),
+                        'risk_level': 'high',
+                    }
+
+        return None
+
+    except Exception:
+        return None
+
+
+def detect_double_bottom(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect double bottom pattern (bullish reversal — W shape).
+
+    Structure:
+    1. First trough: price drops to support
+    2. Bounce: price recovers to a resistance level (neckline)
+    3. Second trough: price drops again to ~same support level
+    4. Breakout above the neckline
+    """
+    try:
+        if len(df) < 20:
+            return None
+
+        window = df.tail(40).copy()
+        lows = window['low'].values
+        highs = window['high'].values
+        closes = window['close'].values
+        n = len(closes)
+
+        # Find swing lows
+        swing_lows = []
+        for i in range(3, n - 3):
+            if lows[i] == min(lows[i-3:i+4]):
+                swing_lows.append((i, lows[i]))
+
+        if len(swing_lows) < 2:
+            return None
+
+        # Check pairs
+        for i in range(len(swing_lows) - 1):
+            idx1, low1 = swing_lows[i]
+            for j in range(i + 1, len(swing_lows)):
+                idx2, low2 = swing_lows[j]
+
+                gap = idx2 - idx1
+                if gap < 5 or gap > 30:
+                    continue
+
+                # Both bottoms within 3% of each other
+                avg_low = (low1 + low2) / 2
+                if abs(low1 - low2) / avg_low > 0.03:
+                    continue
+
+                # Neckline: highest point between the two bottoms
+                neckline = max(highs[idx1:idx2])
+
+                # Pattern height should be meaningful (>5%)
+                height_pct = (neckline - avg_low) / avg_low * 100
+                if height_pct < 4:
+                    continue
+
+                current_price = closes[-1]
+
+                # Second bottom should be recent
+                if n - idx2 > 12:
+                    continue
+
+                # Price should be recovering toward neckline
+                if current_price < avg_low:
+                    continue
+
+                # Near or above neckline for breakout
+                if current_price >= neckline * 0.97:
+                    target = neckline + (neckline - avg_low)
+
+                    # Volume: 2nd bottom should have lower vol (less selling),
+                    # breakout bar should have high volume
+                    volumes = window['volume'].values
+                    avg_vol = _avg_volume(df)
+                    vol1 = volumes[idx1] if idx1 < len(volumes) else avg_vol
+                    vol2 = volumes[idx2] if idx2 < len(volumes) else avg_vol
+                    breakout_vol = volumes[-1]
+                    vol_confirmed = vol2 < vol1 * 1.1 and breakout_vol > avg_vol
+                    conf = 0.85 if vol_confirmed else 0.75
+
+                    return {
+                        'name': 'Double Bottom',
+                        'type': 'reversal',
+                        'bullish': True,
+                        'bearish': False,
+                        'confidence': conf,
+                        'volume_confirmed': vol_confirmed,
+                        'support': round(avg_low, 2),
+                        'neckline': round(neckline, 2),
+                        'height_pct': round(height_pct, 2),
+                        'breakout_target': round(target, 2),
+                        'current_price': round(current_price, 2),
+                        'risk_level': 'low',
+                    }
+
+        return None
+
+    except Exception:
+        return None
+
+
+def detect_double_top(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect double top pattern (bearish reversal — M shape).
+
+    Structure:
+    1. First peak: price rallies to resistance
+    2. Pullback: price drops to support (neckline)
+    3. Second peak: price rallies again to ~same resistance
+    4. Breakdown below neckline
+    """
+    try:
+        if len(df) < 20:
+            return None
+
+        window = df.tail(40).copy()
+        highs = window['high'].values
+        lows = window['low'].values
+        closes = window['close'].values
+        n = len(closes)
+
+        # Find swing highs
+        swing_highs = []
+        for i in range(3, n - 3):
+            if highs[i] == max(highs[i-3:i+4]):
+                swing_highs.append((i, highs[i]))
+
+        if len(swing_highs) < 2:
+            return None
+
+        for i in range(len(swing_highs) - 1):
+            idx1, high1 = swing_highs[i]
+            for j in range(i + 1, len(swing_highs)):
+                idx2, high2 = swing_highs[j]
+
+                gap = idx2 - idx1
+                if gap < 5 or gap > 30:
+                    continue
+
+                # Both tops within 3%
+                avg_high = (high1 + high2) / 2
+                if abs(high1 - high2) / avg_high > 0.03:
+                    continue
+
+                # Neckline: lowest between the peaks
+                neckline = min(lows[idx1:idx2])
+
+                height_pct = (avg_high - neckline) / neckline * 100
+                if height_pct < 4:
+                    continue
+
+                current_price = closes[-1]
+
+                if n - idx2 > 12:
+                    continue
+
+                if current_price > avg_high:
+                    continue
+
+                # Near or below neckline for breakdown
+                if current_price <= neckline * 1.03:
+                    target = neckline - (avg_high - neckline)
+
+                    volumes = window['volume'].values
+                    avg_vol = _avg_volume(df)
+                    breakout_vol = volumes[-1]
+                    vol_confirmed = breakout_vol > avg_vol
+                    conf = 0.85 if vol_confirmed else 0.75
+
+                    return {
+                        'name': 'Double Top',
+                        'type': 'reversal',
+                        'bullish': False,
+                        'bearish': True,
+                        'confidence': conf,
+                        'volume_confirmed': vol_confirmed,
+                        'resistance': round(avg_high, 2),
+                        'neckline': round(neckline, 2),
+                        'height_pct': round(height_pct, 2),
+                        'breakdown_target': round(target, 2),
+                        'current_price': round(current_price, 2),
+                        'risk_level': 'high',
+                    }
+
+        return None
+
+    except Exception:
+        return None
+
+
+def detect_rectangle(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect rectangle / range-bound pattern.
+
+    Price oscillates between flat support and flat resistance with at
+    least 2 touches on each side.  Bullish breakout if price pushes above
+    resistance; bearish breakdown if price drops below support.
+    """
+    try:
+        if len(df) < 15:
+            return None
+
+        recent = df.tail(30).copy()
+        highs = recent['high'].values
+        lows = recent['low'].values
+        closes = recent['close'].values
+
+        # Flat resistance: multiple highs within 2% band
+        sorted_highs = np.sort(highs)[::-1]
+        resistance = np.median(sorted_highs[:5])
+        touches_r = sum(1 for h in highs if abs(h - resistance) / resistance < 0.02)
+
+        # Flat support: multiple lows within 2% band
+        sorted_lows = np.sort(lows)
+        support = np.median(sorted_lows[:5])
+        touches_s = sum(1 for l in lows if abs(l - support) / support < 0.02)
+
+        if touches_r < 2 or touches_s < 2:
+            return None
+
+        # Range should be meaningful but not too wide (3-12%)
+        range_pct = (resistance - support) / support * 100
+        if range_pct < 3 or range_pct > 15:
+            return None
+
+        # Highs and lows should both be roughly flat (no strong trend)
+        x = np.arange(len(highs))
+        high_slope = np.polyfit(x, highs, 1)[0] / resistance * 100
+        low_slope = np.polyfit(x, lows, 1)[0] / support * 100
+        if abs(high_slope) > 0.3 or abs(low_slope) > 0.3:
+            return None
+
+        current_price = closes[-1]
+        rect_height = resistance - support
+
+        # Volume: should be low during range, spike on breakout/breakdown
+        avg_vol = _avg_volume(df)
+        range_vol = recent['volume'].iloc[3:-1].mean() if len(recent) > 4 else avg_vol
+        breakout_vol = recent.iloc[-1]['volume']
+        vol_confirmed = range_vol < avg_vol * 0.9 and breakout_vol > avg_vol
+
+        # Bullish breakout
+        if current_price >= resistance * 0.98:
+            target = resistance + rect_height
+            conf = 0.80 if vol_confirmed else 0.65
+            return {
+                'name': 'Rectangle Breakout',
+                'type': 'consolidation',
+                'bullish': True,
+                'bearish': False,
+                'confidence': conf,
+                'volume_confirmed': vol_confirmed,
+                'support': round(support, 2),
+                'resistance': round(resistance, 2),
+                'touches_support': touches_s,
+                'touches_resistance': touches_r,
+                'range_pct': round(range_pct, 2),
+                'breakout_target': round(target, 2),
+                'current_price': round(current_price, 2),
+                'risk_level': 'medium',
+            }
+
+        # Bearish breakdown
+        if current_price <= support * 1.02:
+            target = support - rect_height
+            conf = 0.80 if vol_confirmed else 0.65
+            return {
+                'name': 'Rectangle Breakdown',
+                'type': 'consolidation',
+                'bullish': False,
+                'bearish': True,
+                'confidence': conf,
+                'volume_confirmed': vol_confirmed,
+                'support': round(support, 2),
+                'resistance': round(resistance, 2),
+                'touches_support': touches_s,
+                'touches_resistance': touches_r,
+                'range_pct': round(range_pct, 2),
+                'breakdown_target': round(target, 2),
+                'current_price': round(current_price, 2),
+                'risk_level': 'high',
+            }
+
+        return None
+
+    except Exception:
+        return None
+
+
+# ------------------------------------------------------------------
+# Candlestick Pattern Detection
+# ------------------------------------------------------------------
+
+def _body(row):
+    """Absolute candle body size."""
+    return abs(row['close'] - row['open'])
+
+def _upper_shadow(row):
+    return row['high'] - max(row['close'], row['open'])
+
+def _lower_shadow(row):
+    return min(row['close'], row['open']) - row['low']
+
+def _is_bullish(row):
+    return row['close'] > row['open']
+
+def _is_bearish(row):
+    return row['close'] < row['open']
+
+def _candle_range(row):
+    return row['high'] - row['low']
+
+
+def detect_candle_patterns(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
+    """
+    Detect single and multi-candle reversal/continuation patterns
+    on the last few bars.
+
+    Returns list of pattern dicts (same schema as chart patterns).
+    """
+    if len(df) < 5:
+        return []
+
+    results = []
+    recent = df.tail(5)
+    c = recent.iloc[-1]   # current candle
+    p = recent.iloc[-2]   # previous candle
+    pp = recent.iloc[-3]  # two candles ago
+
+    rng = _candle_range(c)
+    if rng == 0:
+        return results
+
+    body_c = _body(c)
+    lower_c = _lower_shadow(c)
+    upper_c = _upper_shadow(c)
+
+    # Volume context for candle confirmation
+    avg_vol = _avg_volume(df)
+    c_vol = c.get('volume', 0) if hasattr(c, 'get') else c['volume']
+    candle_vol_high = c_vol > avg_vol * 1.1  # above-average volume confirms candle
+
+    # ---- Hammer (bullish reversal) ----
+    # Small body at the top, long lower shadow >= 2x body, tiny upper shadow
+    if (body_c > 0
+            and lower_c >= 2 * body_c
+            and upper_c <= body_c * 0.3
+            and _is_bearish(p)):
+        results.append({
+            'name': 'Hammer',
+            'type': 'candle',
+            'bullish': True,
+            'bearish': False,
+            'confidence': 0.70 if candle_vol_high else 0.60,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'low',
+        })
+
+    # ---- Inverted Hammer (bullish reversal after downtrend) ----
+    # Small body at the bottom, long upper shadow >= 2x body, tiny lower shadow
+    if (body_c > 0
+            and upper_c >= 2 * body_c
+            and lower_c <= body_c * 0.3
+            and _is_bearish(p)):
+        results.append({
+            'name': 'Inverted Hammer',
+            'type': 'candle',
+            'bullish': True,
+            'bearish': False,
+            'confidence': 0.65 if candle_vol_high else 0.55,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'low',
+        })
+
+    # ---- Hanging Man (bearish reversal after uptrend) ----
+    # Same shape as hammer but after an uptrend
+    if (body_c > 0
+            and lower_c >= 2 * body_c
+            and upper_c <= body_c * 0.3
+            and _is_bullish(p)
+            and _is_bullish(pp)):
+        results.append({
+            'name': 'Hanging Man',
+            'type': 'candle',
+            'bullish': False,
+            'bearish': True,
+            'confidence': 0.65 if candle_vol_high else 0.55,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'medium',
+        })
+
+    # ---- Bullish Engulfing ----
+    # Previous candle red, current candle green and body fully engulfs previous body
+    body_p = _body(p)
+    if (body_c > 0 and body_p > 0
+            and _is_bearish(p)
+            and _is_bullish(c)
+            and c['open'] <= p['close']
+            and c['close'] >= p['open']
+            and body_c > body_p):
+        results.append({
+            'name': 'Bullish Engulfing',
+            'type': 'candle',
+            'bullish': True,
+            'bearish': False,
+            'confidence': 0.80 if candle_vol_high else 0.70,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'low',
+        })
+
+    # ---- Bearish Engulfing ----
+    # Previous candle green, current candle red and body fully engulfs previous body
+    if (body_c > 0 and body_p > 0
+            and _is_bullish(p)
+            and _is_bearish(c)
+            and c['open'] >= p['close']
+            and c['close'] <= p['open']
+            and body_c > body_p):
+        results.append({
+            'name': 'Bearish Engulfing',
+            'type': 'candle',
+            'bullish': False,
+            'bearish': True,
+            'confidence': 0.80 if candle_vol_high else 0.70,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'medium',
+        })
+
+    # ---- Bullish Harami ----
+    # Previous large red candle, current small green candle contained inside it
+    if (body_c > 0 and body_p > 0
+            and _is_bearish(p)
+            and _is_bullish(c)
+            and c['open'] >= p['close']
+            and c['close'] <= p['open']
+            and body_c < body_p * 0.6):
+        results.append({
+            'name': 'Bullish Harami',
+            'type': 'candle',
+            'bullish': True,
+            'bearish': False,
+            'confidence': 0.65 if candle_vol_high else 0.55,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'low',
+        })
+
+    # ---- Bearish Harami ----
+    # Previous large green candle, current small red candle contained inside it
+    if (body_c > 0 and body_p > 0
+            and _is_bullish(p)
+            and _is_bearish(c)
+            and c['open'] <= p['close']
+            and c['close'] >= p['open']
+            and body_c < body_p * 0.6):
+        results.append({
+            'name': 'Bearish Harami',
+            'type': 'candle',
+            'bullish': False,
+            'bearish': True,
+            'confidence': 0.65 if candle_vol_high else 0.55,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'medium',
+        })
+
+    # ---- Morning Star (3-candle bullish reversal) ----
+    # 1st: large red, 2nd: small body (gap down), 3rd: large green closing into 1st body
+    body_pp = _body(pp)
+    if (body_pp > 0 and body_c > 0
+            and _is_bearish(pp)
+            and _body(p) < body_pp * 0.4
+            and _is_bullish(c)
+            and c['close'] > (pp['open'] + pp['close']) / 2
+            and body_c > body_pp * 0.5):
+        results.append({
+            'name': 'Morning Star',
+            'type': 'candle',
+            'bullish': True,
+            'bearish': False,
+            'confidence': 0.85 if candle_vol_high else 0.75,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'low',
+        })
+
+    # ---- Evening Star (3-candle bearish reversal) ----
+    # 1st: large green, 2nd: small body (gap up), 3rd: large red closing into 1st body
+    if (body_pp > 0 and body_c > 0
+            and _is_bullish(pp)
+            and _body(p) < body_pp * 0.4
+            and _is_bearish(c)
+            and c['close'] < (pp['open'] + pp['close']) / 2
+            and body_c > body_pp * 0.5):
+        results.append({
+            'name': 'Evening Star',
+            'type': 'candle',
+            'bullish': False,
+            'bearish': True,
+            'confidence': 0.85 if candle_vol_high else 0.75,
+            'volume_confirmed': candle_vol_high,
+            'current_price': round(c['close'], 2),
+            'risk_level': 'high',
+        })
+
+    # ---- Doji (indecision — bullish if after downtrend) ----
+    if body_c <= rng * 0.1 and rng > 0:
+        # Check context: after 3 red candles → bullish doji
+        prior_bearish = sum(1 for i in range(-4, -1) if _is_bearish(recent.iloc[i]))
+        prior_bullish = sum(1 for i in range(-4, -1) if _is_bullish(recent.iloc[i]))
+        if prior_bearish >= 2:
+            results.append({
+                'name': 'Bullish Doji',
+                'type': 'candle',
+                'bullish': True,
+                'bearish': False,
+                'confidence': 0.60 if candle_vol_high else 0.50,
+                'volume_confirmed': candle_vol_high,
+                'current_price': round(c['close'], 2),
+                'risk_level': 'low',
+            })
+        elif prior_bullish >= 2:
+            results.append({
+                'name': 'Bearish Doji',
+                'type': 'candle',
+                'bullish': False,
+                'bearish': True,
+                'confidence': 0.60 if candle_vol_high else 0.50,
+                'volume_confirmed': candle_vol_high,
+                'current_price': round(c['close'], 2),
+                'risk_level': 'medium',
+            })
+
+    return results
 
 
 def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
@@ -298,6 +1196,12 @@ def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
         detect_ascending_triangle,
         detect_descending_triangle,
         detect_symmetrical_triangle,
+        detect_cup_and_handle,
+        detect_inverse_head_and_shoulders,
+        detect_head_and_shoulders,
+        detect_double_bottom,
+        detect_double_top,
+        detect_rectangle,
     ]
 
     for detector in detectors:
@@ -305,10 +1209,14 @@ def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
         if result:
             patterns.append(result)
 
+    # Candlestick patterns (single & multi-candle)
+    candle_patterns = detect_candle_patterns(df, ticker)
+    patterns.extend(candle_patterns)
+
     return patterns
 
 
-def get_pattern_score(df: pd.DataFrame, ticker: str = "") -> Tuple[bool, bool, float, List[str]]:
+def get_pattern_score(df: pd.DataFrame, ticker: str = "") -> Tuple[bool, bool, float, List[str], bool]:
     """
     Get pattern scoring summary for integration with breakout scanner.
 
@@ -317,11 +1225,12 @@ def get_pattern_score(df: pd.DataFrame, ticker: str = "") -> Tuple[bool, bool, f
         ticker: Stock ticker
 
     Returns:
-        Tuple of (has_bullish, has_bearish, best_target, pattern_names)
+        Tuple of (has_bullish, has_bearish, best_target, pattern_names, volume_confirmed)
         - has_bullish: True if any bullish pattern detected
         - has_bearish: True if any bearish pattern detected
         - best_target: Highest breakout target price from patterns (0.0 if none)
         - pattern_names: List of detected pattern names
+        - volume_confirmed: True if any pattern has volume confirmation
     """
     patterns = detect_patterns_from_df(df, ticker)
 
@@ -329,6 +1238,7 @@ def get_pattern_score(df: pd.DataFrame, ticker: str = "") -> Tuple[bool, bool, f
     has_bearish = False
     best_target = 0.0
     pattern_names = []
+    any_vol_confirmed = False
 
     for p in patterns:
         pattern_names.append(p['name'])
@@ -337,9 +1247,11 @@ def get_pattern_score(df: pd.DataFrame, ticker: str = "") -> Tuple[bool, bool, f
             has_bullish = True
         if p.get('bearish'):
             has_bearish = True
+        if p.get('volume_confirmed'):
+            any_vol_confirmed = True
 
         target = p.get('breakout_target', 0.0)
         if target and target > best_target:
             best_target = target
 
-    return has_bullish, has_bearish, best_target, pattern_names
+    return has_bullish, has_bearish, best_target, pattern_names, any_vol_confirmed

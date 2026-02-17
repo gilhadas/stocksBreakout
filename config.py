@@ -48,15 +48,21 @@ SCORING_WEIGHTS = {
     'rs_ok': 8,
     'consolidation': 8,
     'has_bullish_pattern': 10,  # V3: Pattern confirmation bonus
+    'near_52w_high': 8,         # V5: Within 5% of 52-week high
+    'rsi_divergence': 5,        # V5: RSI bullish divergence
+    'sector_momentum': 6,       # V5: Sector ETF momentum
+    'pattern_vol_confirmed': 6, # V6: Pattern confirmed by volume
 }
 
 SCORE_THRESHOLDS = {
+    'GOLD': 90,
     'PREMIUM': 80,
     'HIGH': 65,
     'STANDARD': 60,
 }
 
 QUALITY_SIZING = {
+    'GOLD': 4.0,      # Up to 20% of capital (max conviction)
     'PREMIUM': 3.0,   # Up to 15% of capital
     'HIGH': 2.0,      # Up to 10% of capital
     'STANDARD': 1.0,  # 5% of capital (base)

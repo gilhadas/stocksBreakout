@@ -109,38 +109,56 @@ def calculate_spy_perf_on_date(spy_df, current_date, lookback=15):
     return (df_up['close'].iloc[-1] / df_up['close'].iloc[-lookback]) - 1
 
 
-def run_enhanced_scan(historical, start_date, end_date, modes=None,
-                      use_legacy_momentum=False, use_v4_overextension=False):
+def run_all_scans(historical, start_date, end_date, modes=None):
     """
-    Scan all symbols across multiple modes with scoring + pullback entries.
-    Returns list of signal dicts.
+    Single-pass scan that produces all 3 signal variants simultaneously.
 
-    Args:
-        use_legacy_momentum: If True, use V1 binary RSI/MACD/ADX checks.
-                             If False, use V2 composite momentum + conviction.
-        use_v4_overextension: If True, apply V4 over-extension filter (SMA distance penalty).
+    Instead of iterating (date x symbol) 3-4 separate times, this iterates once
+    and runs all 3 detector variants per (date, symbol) pair:
+        v1  — legacy momentum (binary RSI/MACD/ADX)
+        v2  — composite momentum, no overextension filter
+        v5x — composite momentum + overextension filter (best of V4 + V5)
+
+    Returns dict: {'v1': [...], 'v2': [...], 'v5x': [...]}
     """
     if modes is None:
         modes = ['swing', 'longterm']
 
-    if use_legacy_momentum:
-        version = "V1 (legacy)"
-    elif use_v4_overextension:
-        version = "V4 (overextension filter)"
-    else:
-        version = "V2 (composite)"
     detector = BreakoutDetector()
     spy_df = historical.get('SPY')
-    all_signals = []
-    cooldowns = {}  # symbol -> last_signal_date
+
+    # 3 independent signal lists + 3 independent cooldown dicts
+    variants = ['v1', 'v2', 'v5x']
+    variant_flags = {
+        'v1':  {'use_legacy_momentum': True,  'use_v4_overextension': False},
+        'v2':  {'use_legacy_momentum': False, 'use_v4_overextension': False},
+        'v5x': {'use_legacy_momentum': False, 'use_v4_overextension': True},
+    }
+    results   = {v: [] for v in variants}
+    cooldowns = {v: {} for v in variants}
 
     sim_dates = pd.date_range(start=start_date, end=end_date, freq='B')
-    symbols = [s for s in historical if s != 'SPY']
+    symbols   = [s for s in historical if s != 'SPY']
 
-    print(f"\n  [{version}] Scanning {len(symbols)} symbols x {len(modes)} modes over {len(sim_dates)} days...")
+    print(f"\n  [Single-pass] Scanning {len(symbols)} symbols x {len(modes)} modes "
+          f"x {len(variants)} variants over {len(sim_dates)} days...")
+
+    def _make_signal(sym, mode_name, sim_date, sig, sig_type):
+        base = {
+            'date': sim_date, 'symbol': sym, 'action': 'BUY',
+            'price': sig['Price'], 'entry_price': sig['Price'],
+            'stop_loss': sig['Stop'], 'take_profit': sig['Target'],
+            'quality': sig['Quality'], 'mode': mode_name, 'type': sig_type,
+        }
+        if sig_type == 'BREAKOUT':
+            base.update({
+                'win_probability': sig.get('WinProb', 0.50),
+                'rr_grade': sig.get('RR_Grade', ''),
+                'patterns': sig.get('Patterns', ''),
+            })
+        return base
 
     for day_idx, sim_date in enumerate(sim_dates):
-        # Calculate actual SPY perf for this date
         spy_perf = 0.0
         if spy_df is not None:
             spy_perf = calculate_spy_perf_on_date(spy_df, sim_date, lookback=15)
@@ -154,18 +172,103 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
             if df_slice.index[-1].date() != sim_date.date():
                 continue
 
-            # 10-day cooldown per symbol
+            for variant in variants:
+                flags = variant_flags[variant]
+
+                # 10-day cooldown per symbol per variant
+                last_sig = cooldowns[variant].get(symbol)
+                if last_sig and (sim_date - last_sig).days < 10:
+                    continue
+
+                found = False
+                for mode_name in modes:
+                    # Breakout
+                    try:
+                        sig = detector.detect(
+                            df_slice, symbol, mode_name, '1 day', spy_perf,
+                            use_scoring=True, **flags
+                        )
+                    except Exception:
+                        sig = None
+
+                    if sig:
+                        results[variant].append(_make_signal(symbol, mode_name, sim_date, sig, 'BREAKOUT'))
+                        cooldowns[variant][symbol] = sim_date
+                        found = True
+                        break
+
+                    # Pullback (only v2/v5x — pullback uses composite logic)
+                    if not flags['use_legacy_momentum']:
+                        try:
+                            pb_sig = detector.detect_pullback(df_slice, symbol, mode_name, '1 day', spy_perf)
+                        except Exception:
+                            pb_sig = None
+
+                        if pb_sig:
+                            results[variant].append(_make_signal(symbol, mode_name, sim_date, pb_sig, 'PULLBACK'))
+                            cooldowns[variant][symbol] = sim_date
+                            found = True
+                            break
+
+        if (day_idx + 1) % 50 == 0:
+            counts = ' | '.join(f"{v.upper()}={len(results[v])}" for v in variants)
+            print(f"    Day {day_idx+1}/{len(sim_dates)}: {counts}")
+
+    # Summary
+    for variant in variants:
+        sigs = results[variant]
+        print(f"\n  [{variant.upper()}] Total signals: {len(sigs)}"
+              f"  PREMIUM={sum(1 for s in sigs if s.get('quality')=='PREMIUM')}"
+              f"  HIGH={sum(1 for s in sigs if s.get('quality')=='HIGH')}"
+              f"  STANDARD={sum(1 for s in sigs if s.get('quality')=='STANDARD')}")
+
+    return results
+
+
+def run_enhanced_scan(historical, start_date, end_date, modes=None,
+                      use_legacy_momentum=False, use_v4_overextension=False):
+    """Legacy single-variant scan. Kept for compatibility; main() now uses run_all_scans."""
+    if modes is None:
+        modes = ['swing', 'longterm']
+
+    if use_legacy_momentum:
+        version = "V1 (legacy)"
+    elif use_v4_overextension:
+        version = "V5X (composite+overextension)"
+    else:
+        version = "V2/V5 (composite)"
+    detector = BreakoutDetector()
+    spy_df = historical.get('SPY')
+    all_signals = []
+    cooldowns = {}
+
+    sim_dates = pd.date_range(start=start_date, end=end_date, freq='B')
+    symbols = [s for s in historical if s != 'SPY']
+
+    print(f"\n  [{version}] Scanning {len(symbols)} symbols x {len(modes)} modes over {len(sim_dates)} days...")
+
+    for day_idx, sim_date in enumerate(sim_dates):
+        spy_perf = 0.0
+        if spy_df is not None:
+            spy_perf = calculate_spy_perf_on_date(spy_df, sim_date, lookback=15)
+
+        for symbol in symbols:
+            df = historical[symbol]
+            df_slice = df[df.index <= sim_date]
+
+            if len(df_slice) < 150:
+                continue
+            if df_slice.index[-1].date() != sim_date.date():
+                continue
+
             last_sig = cooldowns.get(symbol)
             if last_sig and (sim_date - last_sig).days < 10:
                 continue
 
             for mode_name in modes:
-                timeframe = '1 day'
-
-                # --- Breakout with scoring ---
                 try:
                     sig = detector.detect(
-                        df_slice, symbol, mode_name, timeframe, spy_perf,
+                        df_slice, symbol, mode_name, '1 day', spy_perf,
                         use_scoring=True,
                         use_legacy_momentum=use_legacy_momentum,
                         use_v4_overextension=use_v4_overextension
@@ -175,43 +278,28 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
 
                 if sig:
                     all_signals.append({
-                        'date': sim_date,
-                        'symbol': symbol,
-                        'action': 'BUY',
-                        'price': sig['Price'],
-                        'entry_price': sig['Price'],
-                        'stop_loss': sig['Stop'],
-                        'take_profit': sig['Target'],
-                        'quality': sig['Quality'],
-                        'mode': mode_name,
-                        'type': 'BREAKOUT',
+                        'date': sim_date, 'symbol': symbol, 'action': 'BUY',
+                        'price': sig['Price'], 'entry_price': sig['Price'],
+                        'stop_loss': sig['Stop'], 'take_profit': sig['Target'],
+                        'quality': sig['Quality'], 'mode': mode_name, 'type': 'BREAKOUT',
                         'win_probability': sig.get('WinProb', 0.50),
                         'rr_grade': sig.get('RR_Grade', ''),
                         'patterns': sig.get('Patterns', ''),
                     })
                     cooldowns[symbol] = sim_date
-                    break  # One signal per symbol per day
+                    break
 
-                # --- Pullback re-entry ---
                 try:
-                    pb_sig = detector.detect_pullback(
-                        df_slice, symbol, mode_name, timeframe, spy_perf
-                    )
+                    pb_sig = detector.detect_pullback(df_slice, symbol, mode_name, '1 day', spy_perf)
                 except Exception:
                     pb_sig = None
 
                 if pb_sig:
                     all_signals.append({
-                        'date': sim_date,
-                        'symbol': symbol,
-                        'action': 'BUY',
-                        'price': pb_sig['Price'],
-                        'entry_price': pb_sig['Price'],
-                        'stop_loss': pb_sig['Stop'],
-                        'take_profit': pb_sig['Target'],
-                        'quality': pb_sig['Quality'],
-                        'mode': mode_name,
-                        'type': 'PULLBACK',
+                        'date': sim_date, 'symbol': symbol, 'action': 'BUY',
+                        'price': pb_sig['Price'], 'entry_price': pb_sig['Price'],
+                        'stop_loss': pb_sig['Stop'], 'take_profit': pb_sig['Target'],
+                        'quality': pb_sig['Quality'], 'mode': mode_name, 'type': 'PULLBACK',
                     })
                     cooldowns[symbol] = sim_date
                     break
@@ -219,18 +307,16 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
         if (day_idx + 1) % 50 == 0:
             print(f"    Day {day_idx+1}/{len(sim_dates)}: {len(all_signals)} signals so far")
 
-    # Breakdown
     breakouts = sum(1 for s in all_signals if s.get('type') == 'BREAKOUT')
     pullbacks = sum(1 for s in all_signals if s.get('type') == 'PULLBACK')
-    premiums = sum(1 for s in all_signals if s.get('quality') == 'PREMIUM')
-    highs = sum(1 for s in all_signals if s.get('quality') == 'HIGH')
+    premiums  = sum(1 for s in all_signals if s.get('quality') == 'PREMIUM')
+    highs     = sum(1 for s in all_signals if s.get('quality') == 'HIGH')
     standards = sum(1 for s in all_signals if s.get('quality') == 'STANDARD')
-
     print(f"\n  [{version}] Total signals: {len(all_signals)}")
     print(f"    Breakouts: {breakouts} | Pullbacks: {pullbacks}")
     print(f"    PREMIUM: {premiums} | HIGH: {highs} | STANDARD: {standards}")
 
-    return all_signals  # Return all, let each config filter
+    return all_signals
 
 
 def run_simulation(signals, start_date, end_date, end_prices, historical,
@@ -373,25 +459,22 @@ async def main():
         print("Not enough data. Exiting.")
         return
 
-    # Scan for all signals — V1 (legacy) and V2 (new composite)
+    # Single-pass scan — all 3 variants in one loop over (date x symbol)
     print("\n" + "=" * 80)
-    print("SCANNING FOR SIGNALS — V1 (Legacy) vs V2/V3 vs V4 (Overextension Filter)")
+    print("SCANNING FOR SIGNALS — Single pass: V1 / V2-V6 / V5X-V6X all at once")
     print("=" * 80)
 
-    v1_signals = run_enhanced_scan(historical, start_date, end_date,
-                                    modes=['swing', 'longterm'],
-                                    use_legacy_momentum=True)
-    v2_signals = run_enhanced_scan(historical, start_date, end_date,
-                                    modes=['swing', 'longterm'],
-                                    use_legacy_momentum=False)
-    v4_signals = run_enhanced_scan(historical, start_date, end_date,
-                                    modes=['swing', 'longterm'],
-                                    use_legacy_momentum=False,
-                                    use_v4_overextension=True)
+    all_scan_results = run_all_scans(historical, start_date, end_date,
+                                      modes=['swing', 'longterm'])
 
-    # V3 signals use the same scan as V2 — the new BB filter, pattern scoring,
-    # and Grade D rejection are automatically applied by the updated scanner
-    v3_signals = v2_signals  # V3 features are baked into the scanner
+    v1_signals  = all_scan_results['v1']
+    v2_signals  = all_scan_results['v2']
+    v5x_signals = all_scan_results['v5x']
+
+    # Aliases — V3/V4/V5 reuse existing signal lists (no extra scan needed)
+    v3_signals = v2_signals   # V3 = V2 with different filters
+    v4_signals = v5x_signals  # V4 = V5X (overextension filter)
+    v5_signals = v2_signals   # V5 baseline = V2
 
     if not v1_signals and not v2_signals:
         print("\nNo signals generated. Exiting.")
@@ -509,6 +592,111 @@ async def main():
             'pos_pct': 0.15, 'risk_pct': 0.03,
             'trailing': False,
         },
+        # V5 configs (learning loop + 52w high + RSI divergence + 10% hard cap)
+        {
+            'name': 'V5-A) HIGH+, 10% cap',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V5-B) PREMIUM+, 10% cap',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V5-C) ALL quality, 10% cap',
+            'signals': v5_signals,
+            'filter': lambda s: True,
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V5-D) PREMIUM+, 30% SPY hedge',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'spy_hedge': True, 'spy_alloc': 0.30,
+        },
+        # V5X configs: V5 + V4 overextension filter (rejects stocks stretched too far from SMA)
+        {
+            'name': 'V5X-A) HIGH+, overextension+10% cap',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V5X-B) PREMIUM+, overextension+10% cap',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V5X-C) HIGH+, aggressive sizing',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.15, 'risk_pct': 0.025,
+            'trailing': False,
+        },
+        {
+            'name': 'V5X-D) PREMIUM+, 30% SPY hedge',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'spy_hedge': True, 'spy_alloc': 0.30,
+        },
+        # V6 configs (V5 + 23 patterns with volume confirmation scoring)
+        {
+            'name': 'V6-A) HIGH+, 10% cap',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V6-B) PREMIUM+, 10% cap',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V6-C) HIGH+, aggressive sizing',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.15, 'risk_pct': 0.025,
+            'trailing': False,
+        },
+        {
+            'name': 'V6-D) PREMIUM+, 30% SPY hedge',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'spy_hedge': True, 'spy_alloc': 0.30,
+        },
+        # V6X configs: V6 + overextension filter
+        {
+            'name': 'V6X-A) HIGH+, overextension+10% cap',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V6X-B) PREMIUM+, overextension+10% cap',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
     ]
 
     results_list = []
@@ -544,7 +732,7 @@ async def main():
 
     # Print comparison table
     print("\n\n" + "=" * 120)
-    print("V1 vs V2 vs V3 COMPARISON vs SPY")
+    print("V1 vs V2 vs V3 vs V4 vs V5 COMPARISON vs SPY")
     print("=" * 120)
 
     spy_ret = spy_report['total_return'] if spy_report else 0

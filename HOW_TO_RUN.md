@@ -2,14 +2,16 @@
 
 ## Context
 
-All V3 code is implemented and backtested across 3 market regimes (bearish 2022, bullish 2023-24, mixed 2024-25). This guide explains which scripts to run and which config to pick based on your goals.
+V6 strategy is implemented and backtested: 23 pattern detectors with volume confirmation, overextension filter, 52-week high proximity, RSI divergence, sector momentum, GOLD/PREMIUM/HIGH/STANDARD tiers, and parquet disk cache. This guide explains which scripts to run and which config to pick.
 
 ## Available Scripts
 
 | Script | Purpose | Runtime |
 |--------|---------|---------|
-| `enhanced_backtest.py` | V1 vs V2 vs V3 comparison on 2024-2025 | ~15 min |
-| `backtest_validation.py` | Multi-period validation (bearish + bullish + mixed) | ~40 min |
+| `enhanced_backtest.py` | V1 vs V2 vs V5 vs V6 vs V6X comparison on 2024-2025 | ~15 min (first run), ~2 min (cached) |
+| `backtest_validation.py` | Multi-period validation (bearish + bullish + mixed) | ~40 min (first run), ~5 min (cached) |
+
+Both scripts use the parquet disk cache (`scanner_output/cache/`). First run fetches from Yahoo Finance; subsequent runs hit cache automatically.
 
 ## Quick Start
 
@@ -18,49 +20,67 @@ All V3 code is implemented and backtested across 3 market regimes (bearish 2022,
 source venv/bin/activate
 
 # Option 1: Full multi-period validation (recommended first run)
-python3 backtest_validation.py
+PYTHONUNBUFFERED=1 python3 backtest_validation.py
 
 # Option 2: Single-period comparison (faster)
-python3 enhanced_backtest.py
+PYTHONUNBUFFERED=1 python3 enhanced_backtest.py
+
+# Clear cache if data seems stale
+python3 -c "from yfinance_adapter import YFinanceAdapter; YFinanceAdapter().clear_disk_cache()"
 ```
 
 ## Which Config to Use (Based on Backtest Results)
 
+### Goal: Best Risk-Adjusted Returns (recommended)
+**Use: V6X-A) HIGH+, overextension + 10% cap**
+- **+129.13%** return, **Sharpe 2.62**, only **-13.56% max DD**
+- 60.3% win rate with 1.97:1 W/L ratio
+- Beats SPY by +41.45% with 28% less drawdown
+- Overextension filter prevents buying stretched stocks
+
 ### Goal: Maximum Returns (growth-oriented)
-**Use: V3-C) PREMIUM only, 50% SPY hedge**
-- Best average return: **+20.07%** across all periods
-- 50% of capital in SPY captures bull market upside
-- Only takes PREMIUM signals (highest conviction breakouts)
-- Tradeoff: higher drawdowns due to SPY exposure (-18.60% in mixed period)
+**Use: V1-A) HIGH+, legacy momentum**
+- **+141.77%** return, Sharpe 2.45
+- Highest raw returns but deeper drawdowns (-22.14%)
+- No overextension filter = catches more momentum plays
 
 ### Goal: Minimum Risk (capital preservation)
-**Use: V3-A) HIGH+, BB filter, patterns (no hedge)**
-- Best max drawdown: **-7.77%** in mixed period (vs SPY -18.76%)
-- Consistently 2-2.5x lower drawdowns than SPY
-- Beats SPY in bear markets (+10.60% outperformance in 2022)
-- Tradeoff: trails SPY in strong bull markets
+**Use: V6X-A) HIGH+, overextension + 10% cap**
+- Same config as risk-adjusted — it's the best on both axes
+- -13.56% max DD vs SPY's -18.76%
+- Position cap at 10% prevents single-stock concentration
 
-### Goal: Balanced (good returns + controlled risk)
-**Use: V3-D) ALL quality, 40% SPY hedge**
-- Average return: **+19.27%** (close to V3-C)
-- More diversified signal pool (takes all quality levels)
-- Moderate drawdowns (-14.74% in mixed period)
-- Good middle ground between pure breakout and pure SPY
+### Goal: Highest Conviction Only
+**Use: V6X-B) PREMIUM+, overextension + 10% cap**
+- Only trades GOLD and PREMIUM signals (score >= 80)
+- Fewer trades but higher quality
+- Lower overall return but very high selectivity
 
-## Backtest Results Summary
+## Backtest Results (Jan 2024 - Dec 2025, 40 symbols)
 
-```
-                                          Bearish 2022   Bullish 2023-24   Mixed 2024-25   Average
-SPY Buy & Hold                              -18.65%         +46.00%          +48.95%       +25.43%
-V3-A) HIGH+, no hedge (risk-first)           -8.05%         +18.57%          +31.39%       +13.97%
-V3-C) PREMIUM, 50% SPY (growth)             -14.43%         +36.91%          +37.74%       +20.07%
-V3-D) ALL, 40% SPY (balanced)               -12.80%         +33.55%          +37.07%       +19.27%
-```
+| Config | Return | Sharpe | MaxDD | WinRate | vs SPY |
+|--------|--------|--------|-------|---------|--------|
+| V1-A HIGH+ baseline | +141.77% | 2.45 | -22.14% | 56.1% | +54.10% |
+| V6X-A HIGH+, overextension | +129.13% | 2.62 | -13.56% | 60.3% | +41.45% |
+| V6-A HIGH+, 10% cap | +107.59% | 2.15 | -26.85% | 55.5% | +19.91% |
+| V6-B PREMIUM+, 10% cap | +60.57% | 1.27 | -19.27% | 55.4% | -27.10% |
+| SPY Buy & Hold | +87.67% | 1.45 | -18.76% | N/A | baseline |
+
+**Recommended: V6X-A** — best Sharpe ratio (2.62) and lowest drawdown (-13.56%).
+
+## Quality Tiers
+
+| Tier | Score | Description |
+|------|-------|-------------|
+| GOLD | 90+ | Elite signals — passes 5 extra hard gates |
+| PREMIUM | 80+ | Strong signals — high conviction, volume + trend |
+| HIGH | 65+ | Good signals — moderate conviction |
+| STANDARD | 60+ | Marginal signals — weakest accepted |
 
 ## Customizing the Backtest
 
 ### Change the test period
-In `backtest_validation.py`, edit the `periods` list (~line 578):
+In `backtest_validation.py`, edit the `periods` list (~line 579):
 ```python
 periods = [
     ("BEARISH 2022", "2022-01-01", "2022-12-31"),
@@ -84,17 +104,18 @@ Set `initial_capital` in the script (default: $100,000).
 ## Key Metrics to Watch in Output
 
 1. **Return vs SPY**: The `vs SPY` column shows outperformance. Positive = you're winning.
-2. **MaxDD**: Max drawdown. Lower (closer to 0) = less pain. Strategy typically achieves -7% to -9% vs SPY's -18% to -24%.
-3. **Win Rate**: Above 45% with the W/L ratio above 1.5 is healthy.
+2. **MaxDD**: Max drawdown. Lower (closer to 0) = less pain. Strategy typically achieves -13% to -22% vs SPY's -18% to -24%.
+3. **Win Rate**: Above 55% with the W/L ratio above 1.5 is healthy.
 4. **W/L ratio**: Average win / average loss. Above 1.5 means winners are bigger than losers.
-5. **Sharpe**: Risk-adjusted return. Above 1.0 is good.
+5. **Sharpe**: Risk-adjusted return. Above 2.0 is excellent, above 1.0 is good.
 
 ## Output Files
 
 Results are saved to:
 ```
-scanner_output/backtests/v3_validation_multi_period.json
+scanner_output/backtests/v6_validation_multi_period.json
 scanner_output/backtests/multi_config_vs_spy_YYYY-MM-DD_YYYY-MM-DD.json
+scanner_output/cache/*.parquet  (disk cache for yfinance data)
 ```
 
 ## Scheduling Automated Scans (Cron)
@@ -127,6 +148,11 @@ This creates `cron_jobs.txt` with ready-to-use entries and `test_cron.sh` to ver
 0  14 * * 1-5 cd /path/to/scanner && venv/bin/python3 breakout_scanner.py input/watchlist3.txt --mode daytrade --cron --notify >> scanner_output/logs/cron_daytrade.log 2>&1
 ```
 
+**Portfolio daily report:**
+```cron
+0 16 * * 1-5 cd /path/to/scanner && venv/bin/python3 breakout_scanner.py dummy --portfolio-report >> scanner_output/logs/cron_portfolio.log 2>&1
+```
+
 Replace `/path/to/scanner` with your repo path.
 
 ### Key Flags
@@ -138,6 +164,10 @@ Replace `/path/to/scanner` with your repo path.
 | `--exit-file <csv>` | Evaluate exit conditions for open positions |
 | `--both` | Run breakout scan + exit evaluation in one call |
 | `--mode <mode>` | `swing`, `longterm`, `daytrade`, or `scalping` |
+| `--mock` | Use mock data (no IB connection needed) |
+| `--simulate` | Historical simulation mode (uses yfinance + cache) |
+| `--portfolio-report` | Send daily portfolio email and exit |
+| `--sector-buzz` | Run sector momentum analysis before scan |
 
 ### Installing Cron Jobs
 
@@ -166,4 +196,7 @@ Add to crontab to prevent log/result files from growing indefinitely:
 # Clean old signal/exit CSVs older than 90 days
 5 23 * * 0 find /path/to/scanner/scanner_output/signals -name "*.csv" -mtime +90 -delete
 5 23 * * 0 find /path/to/scanner/scanner_output/exits -name "*.csv" -mtime +90 -delete
+
+# Clean stale cache files older than 7 days
+10 23 * * 0 find /path/to/scanner/scanner_output/cache -name "*.parquet" -mtime +7 -delete
 ```

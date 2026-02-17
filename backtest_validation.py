@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-V3 Hybrid Breakout Validation: Bullish vs Bearish Years
----------------------------------------------------------
-Tests the V3 improvements (BB filter, patterns, Grade D rejection,
-SPY hedge, win prob sizing, max hold) across different market regimes:
+V6 Breakout Validation: Multi-Period Market Regime Testing
+------------------------------------------------------------
+Tests all strategy versions (V1 through V6X) across different market regimes:
 
   - BEARISH: 2022-01-01 to 2022-12-31  (SPY ~-19%)
   - BULLISH: 2023-01-01 to 2024-06-30  (SPY ~+40%)
-  - MIXED:   2024-01-01 to 2025-12-31  (original test period)
+  - MIXED:   2024-01-01 to 2025-12-31  (primary test period)
 
-Compares V2 baseline vs V3 configs vs SPY buy-and-hold.
+Uses single-pass scanning (V1/V2/V5X variants) consistent with enhanced_backtest.py.
+Includes V6 scoring: 23 pattern detectors with volume confirmation, overextension filter,
+52-week high proximity, RSI divergence, sector momentum, GOLD tier.
 """
 import asyncio
 import pandas as pd
@@ -110,24 +111,48 @@ def calculate_spy_perf_on_date(spy_df, current_date, lookback=15):
     return (df_up['close'].iloc[-1] / df_up['close'].iloc[-lookback]) - 1
 
 
-# ── Signal scanning ─────────────────────────────────────────────────────────
+# ── Signal scanning (single-pass, matches enhanced_backtest.py) ────────────
 
-def run_scan(historical, start_date, end_date, use_legacy_momentum=False,
-             modes=None, label=""):
+def run_all_scans(historical, start_date, end_date, modes=None):
+    """
+    Single-pass scan producing 3 signal variants simultaneously (V1/V2/V5X).
+    Matches enhanced_backtest.py approach — iterate (date x symbol) once.
+    """
     if modes is None:
         modes = ['swing', 'longterm']
 
-    version = label or ("V1" if use_legacy_momentum else "V2/V3")
     detector = BreakoutDetector()
     spy_df = historical.get('SPY')
-    all_signals = []
-    cooldowns = {}
+
+    variants = ['v1', 'v2', 'v5x']
+    variant_flags = {
+        'v1':  {'use_legacy_momentum': True,  'use_v4_overextension': False},
+        'v2':  {'use_legacy_momentum': False, 'use_v4_overextension': False},
+        'v5x': {'use_legacy_momentum': False, 'use_v4_overextension': True},
+    }
+    results   = {v: [] for v in variants}
+    cooldowns = {v: {} for v in variants}
 
     sim_dates = pd.date_range(start=start_date, end=end_date, freq='B')
-    symbols = [s for s in historical if s != 'SPY']
+    symbols   = [s for s in historical if s != 'SPY']
 
-    print(f"\n  [{version}] Scanning {len(symbols)} symbols x {len(modes)} modes "
-          f"over {len(sim_dates)} days...")
+    print(f"\n  [Single-pass] Scanning {len(symbols)} symbols x {len(modes)} modes "
+          f"x {len(variants)} variants over {len(sim_dates)} days...")
+
+    def _make_signal(sym, mode_name, sim_date, sig, sig_type):
+        base = {
+            'date': sim_date, 'symbol': sym, 'action': 'BUY',
+            'price': sig['Price'], 'entry_price': sig['Price'],
+            'stop_loss': sig['Stop'], 'take_profit': sig['Target'],
+            'quality': sig['Quality'], 'mode': mode_name, 'type': sig_type,
+        }
+        if sig_type == 'BREAKOUT':
+            base.update({
+                'win_probability': sig.get('WinProb', 0.50),
+                'rr_grade': sig.get('RR_Grade', ''),
+                'patterns': sig.get('Patterns', ''),
+            })
+        return base
 
     for day_idx, sim_date in enumerate(sim_dates):
         spy_perf = 0.0
@@ -143,49 +168,53 @@ def run_scan(historical, start_date, end_date, use_legacy_momentum=False,
             if df_slice.index[-1].date() != sim_date.date():
                 continue
 
-            last_sig = cooldowns.get(symbol)
-            if last_sig and (sim_date - last_sig).days < 10:
-                continue
+            for variant in variants:
+                flags = variant_flags[variant]
 
-            for mode_name in modes:
-                try:
-                    sig = detector.detect(
-                        df_slice, symbol, mode_name, '1 day', spy_perf,
-                        use_scoring=True,
-                        use_legacy_momentum=use_legacy_momentum
-                    )
-                except Exception:
-                    sig = None
+                last_sig = cooldowns[variant].get(symbol)
+                if last_sig and (sim_date - last_sig).days < 10:
+                    continue
 
-                if sig:
-                    all_signals.append({
-                        'date': sim_date,
-                        'symbol': symbol,
-                        'action': 'BUY',
-                        'price': sig['Price'],
-                        'entry_price': sig['Price'],
-                        'stop_loss': sig['Stop'],
-                        'take_profit': sig['Target'],
-                        'quality': sig['Quality'],
-                        'mode': mode_name,
-                        'type': 'BREAKOUT',
-                        'win_probability': sig.get('WinProb', 0.50),
-                        'rr_grade': sig.get('RR_Grade', ''),
-                        'patterns': sig.get('Patterns', ''),
-                    })
-                    cooldowns[symbol] = sim_date
-                    break
+                for mode_name in modes:
+                    # Breakout
+                    try:
+                        sig = detector.detect(
+                            df_slice, symbol, mode_name, '1 day', spy_perf,
+                            use_scoring=True, **flags
+                        )
+                    except Exception:
+                        sig = None
+
+                    if sig:
+                        results[variant].append(_make_signal(symbol, mode_name, sim_date, sig, 'BREAKOUT'))
+                        cooldowns[variant][symbol] = sim_date
+                        break
+
+                    # Pullback (only v2/v5x)
+                    if not flags['use_legacy_momentum']:
+                        try:
+                            pb_sig = detector.detect_pullback(df_slice, symbol, mode_name, '1 day', spy_perf)
+                        except Exception:
+                            pb_sig = None
+
+                        if pb_sig:
+                            results[variant].append(_make_signal(symbol, mode_name, sim_date, pb_sig, 'PULLBACK'))
+                            cooldowns[variant][symbol] = sim_date
+                            break
 
         if (day_idx + 1) % 60 == 0:
-            print(f"    Day {day_idx+1}/{len(sim_dates)}: {len(all_signals)} signals so far")
+            counts = ' | '.join(f"{v.upper()}={len(results[v])}" for v in variants)
+            print(f"    Day {day_idx+1}/{len(sim_dates)}: {counts}")
 
-    premiums = sum(1 for s in all_signals if s.get('quality') == 'PREMIUM')
-    highs = sum(1 for s in all_signals if s.get('quality') == 'HIGH')
-    standards = sum(1 for s in all_signals if s.get('quality') == 'STANDARD')
-    print(f"  [{version}] Total: {len(all_signals)} signals "
-          f"(PREMIUM:{premiums} HIGH:{highs} STANDARD:{standards})")
+    for variant in variants:
+        sigs = results[variant]
+        print(f"\n  [{variant.upper()}] Total signals: {len(sigs)}"
+              f"  GOLD={sum(1 for s in sigs if s.get('quality')=='GOLD')}"
+              f"  PREMIUM={sum(1 for s in sigs if s.get('quality')=='PREMIUM')}"
+              f"  HIGH={sum(1 for s in sigs if s.get('quality')=='HIGH')}"
+              f"  STANDARD={sum(1 for s in sigs if s.get('quality')=='STANDARD')}")
 
-    return all_signals
+    return results
 
 
 # ── SPY benchmark ───────────────────────────────────────────────────────────
@@ -328,59 +357,77 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
     spy_report = calculate_spy_benchmark(historical, start_date, end_date,
                                           initial_capital)
 
-    # Scan signals — V2 (which now includes V3 features: BB filter, patterns, grade D)
-    v2_signals = run_scan(historical, start_date, end_date,
-                          use_legacy_momentum=False, label="V2/V3")
+    # Single-pass scan — all 3 variants (V1/V2/V5X) in one loop
+    print("\n  Scanning signals (single-pass: V1 / V2-V6 / V5X-V6X)...")
+    all_scan_results = run_all_scans(historical, start_date, end_date,
+                                      modes=['swing', 'longterm'])
 
-    # Also scan V1 for comparison
-    v1_signals = run_scan(historical, start_date, end_date,
-                          use_legacy_momentum=True, label="V1 (legacy)")
+    v1_signals  = all_scan_results['v1']
+    v2_signals  = all_scan_results['v2']
+    v5x_signals = all_scan_results['v5x']
 
-    if not v2_signals and not v1_signals:
+    # Aliases — V5/V6 reuse v2 signals, V5X/V6X reuse v5x signals
+    v5_signals = v2_signals
+    v4_signals = v5x_signals
+
+    if not v1_signals and not v2_signals:
         print("\n  No signals generated. Skipping period.")
         return None
 
-    # Define configs
+    # Define configs — V1 through V6X
     configs = [
         # V1 baseline
         {
             'name': 'V1) HIGH+, legacy momentum',
             'signals': v1_signals,
-            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
         },
-        # V2 baseline (before V3 code changes this was the best)
+        # V2 composite momentum
         {
             'name': 'V2) HIGH+, composite momentum',
             'signals': v2_signals,
-            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
         },
-        # V3 configs
+        # V6 configs (V5 + 23 patterns with volume confirmation scoring)
         {
-            'name': 'V3-A) HIGH+, BB+patterns+gradeD',
-            'signals': v2_signals,
-            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'name': 'V6-A) HIGH+, 10% cap',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
         },
         {
-            'name': 'V3-B) HIGH+, 30% SPY hedge',
-            'signals': v2_signals,
-            'filter': lambda s: s.get('quality') in ('PREMIUM', 'HIGH'),
+            'name': 'V6-B) PREMIUM+, 10% cap',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+        },
+        # V6X configs: V6 + overextension filter (recommended)
+        {
+            'name': 'V6X-A) HIGH+, overext+10% cap',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+        },
+        {
+            'name': 'V6X-B) PREMIUM+, overext+10% cap',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+        },
+        # SPY hedge variants
+        {
+            'name': 'V6X-C) HIGH+, 30% SPY hedge',
+            'signals': v5x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
             'spy_hedge': True, 'spy_alloc': 0.30,
         },
         {
-            'name': 'V3-C) PREMIUM only, 50% SPY hedge',
-            'signals': v2_signals,
-            'filter': lambda s: s.get('quality') == 'PREMIUM',
-            'pos_pct': 0.15, 'risk_pct': 0.03,
-            'spy_hedge': True, 'spy_alloc': 0.50,
-        },
-        {
-            'name': 'V3-D) ALL quality, 40% SPY hedge',
-            'signals': v2_signals,
-            'filter': lambda s: True,
+            'name': 'V6-D) PREMIUM+, 40% SPY hedge',
+            'signals': v5_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
             'spy_hedge': True, 'spy_alloc': 0.40,
         },
@@ -421,17 +468,19 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
 
 def print_cross_period_summary(all_periods):
     print(f"\n\n{'=' * 130}")
-    print("CROSS-PERIOD SUMMARY: V3 Hybrid Breakout Strategy")
+    print("CROSS-PERIOD SUMMARY: V6 Breakout Strategy (23 patterns + volume confirmation)")
     print(f"{'=' * 130}")
 
     # For each config name, gather returns across periods
     config_names_ordered = [
         'V1) HIGH+, legacy momentum',
         'V2) HIGH+, composite momentum',
-        'V3-A) HIGH+, BB+patterns+gradeD',
-        'V3-B) HIGH+, 30% SPY hedge',
-        'V3-C) PREMIUM only, 50% SPY hedge',
-        'V3-D) ALL quality, 40% SPY hedge',
+        'V6-A) HIGH+, 10% cap',
+        'V6-B) PREMIUM+, 10% cap',
+        'V6X-A) HIGH+, overext+10% cap',
+        'V6X-B) PREMIUM+, overext+10% cap',
+        'V6X-C) HIGH+, 30% SPY hedge',
+        'V6-D) PREMIUM+, 40% SPY hedge',
     ]
 
     period_names = [p['period'] for p in all_periods if p]
@@ -565,7 +614,7 @@ def print_cross_period_summary(all_periods):
 
 async def main():
     print("=" * 130)
-    print("V3 HYBRID BREAKOUT VALIDATION: Bullish vs Bearish Market Regimes")
+    print("V6 BREAKOUT VALIDATION: Multi-Period Market Regime Testing")
     print("=" * 130)
 
     initial_capital = 100000
@@ -614,7 +663,7 @@ async def main():
                 'configs': [{k: safe_val(v) for k, v in r.items()} for r in p['results']],
             })
 
-    fname = output_dir / 'v3_validation_multi_period.json'
+    fname = output_dir / 'v6_validation_multi_period.json'
     with open(fname, 'w') as f:
         json.dump(save_data, f, indent=2)
     print(f"\nResults saved to {fname}")

@@ -17,6 +17,7 @@ from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
 from level2_analyzer import Level2Analyzer
 from utils import classify_market_regime
+from sentiment import get_sector_buzz, get_sector_for_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,18 @@ class ScannerOrchestrator:
             spy_perf, spy_vol, regime = 0.0, 0.0, 'INTRADAY'
             logger.info(f"Mode: SCALPING | TF: {timeframe} | VWAP-based")
         
+        # V5: Pre-compute sector buzz once for entire scan
+        sector_hot_map = {}
+        try:
+            buzz_data = get_sector_buzz()
+            for s in buzz_data.get('sectors', []):
+                sector_hot_map[s['sector']] = s['buzz'] >= 7
+            if sector_hot_map:
+                hot = [k for k, v in sector_hot_map.items() if v]
+                logger.info(f"Hot sectors: {', '.join(hot) if hot else 'none'}")
+        except Exception as e:
+            logger.debug(f"Sector buzz pre-compute failed: {e}")
+
         # Scan symbols concurrently with rate limiting
         results = []
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
@@ -79,12 +92,13 @@ class ScannerOrchestrator:
             idx, symbol = idx_sym
             async with semaphore:
                 print(f"[{idx}/{len(watchlist)}] {symbol:6}", end="\r")
-                
+
                 result = await self._scan_symbol(
                     symbol, mode, timeframe, spy_perf, regime,
-                    vol_thresh, atr_mult, lookback, detect_bounces
+                    vol_thresh, atr_mult, lookback, detect_bounces,
+                    sector_hot_map=sector_hot_map
                 )
-                
+
                 await asyncio.sleep(SCAN_DELAY)
                 return result
         
@@ -98,10 +112,11 @@ class ScannerOrchestrator:
     
     async def _scan_symbol(self, symbol: str, mode: str, timeframe: str,
                           spy_perf: float, regime: str,
-                          vol_thresh: Optional[float], 
+                          vol_thresh: Optional[float],
                           atr_mult: Optional[float],
                           lookback: Optional[int] = None,
-                          detect_bounces: bool = False) -> Optional[Dict]:
+                          detect_bounces: bool = False,
+                          sector_hot_map: Optional[Dict] = None) -> Optional[Dict]:
         """Scan a single symbol with retry logic and optional Level 2 analysis"""
         max_retries = 3
         
@@ -120,6 +135,12 @@ class ScannerOrchestrator:
                     if spread_pct is None or spread_pct > max_spread:
                         return None
                 
+                # V5: Resolve sector for this symbol
+                sector_hot = False
+                if sector_hot_map:
+                    sym_sector = get_sector_for_ticker(symbol)
+                    sector_hot = sector_hot_map.get(sym_sector, False)
+
                 # Detect breakout
                 signal = self.detector.detect(
                     df, symbol, mode, timeframe, spy_perf,
@@ -129,9 +150,24 @@ class ScannerOrchestrator:
                     spread_pct=spread_pct,
                     regime=regime,
                     use_scoring=True,
-                    use_legacy_momentum=False
+                    use_legacy_momentum=False,
+                    use_v4_overextension=True,
+                    sector_hot=sector_hot
                 )
                 
+                # V5: Multi-TF confirmation for swing mode
+                if signal and mode == 'swing' and signal.get('Quality') in ('GOLD', 'PREMIUM'):
+                    try:
+                        weekly_df = await self.market_data.get_historical_data(symbol, '1W')
+                        if weekly_df is not None and len(weekly_df) >= 10:
+                            weekly_sma10 = weekly_df['close'].rolling(10).mean().iloc[-1]
+                            if not pd.isna(weekly_sma10) and weekly_df['close'].iloc[-1] < weekly_sma10:
+                                old_q = signal['Quality']
+                                signal['Quality'] = 'PREMIUM' if old_q == 'GOLD' else 'HIGH'
+                                logger.debug(f"{symbol}: {old_q}→{signal['Quality']} (weekly SMA10 disagrees)")
+                    except Exception:
+                        pass  # Don't kill the signal if weekly fetch fails
+
                 # If signal found and Level 2 enabled, analyze depth
                 if signal and self.use_level2:
                     depth = await self.level2_analyzer.get_market_depth(symbol)

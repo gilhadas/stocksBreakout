@@ -278,6 +278,52 @@ def calculate_breakout_conviction(df: pd.DataFrame) -> pd.Series:
     return total.clip(0, 100)
 
 
+def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 20) -> tuple:
+    """
+    Detect RSI divergence (bullish and bearish).
+    - Bullish: price makes lower low but RSI makes higher low
+    - Bearish: price makes higher high but RSI makes lower high
+
+    Returns: (bullish_div: pd.Series[bool], bearish_div: pd.Series[bool])
+    """
+    rsi = calculate_rsi(df)
+    close = df['close']
+
+    bullish = pd.Series(False, index=df.index)
+    bearish = pd.Series(False, index=df.index)
+
+    for i in range(lookback, len(df)):
+        window_close = close.iloc[i - lookback:i]
+        window_rsi = rsi.iloc[i - lookback:i]
+
+        if window_close.empty or window_rsi.isna().all():
+            continue
+
+        # Find swing low in price window
+        price_low_idx = window_close.idxmin()
+        price_low = window_close[price_low_idx]
+        rsi_at_low = window_rsi.get(price_low_idx, np.nan)
+
+        # Bullish divergence: current price < prior swing low, but RSI > prior RSI at that low
+        if (not pd.isna(rsi_at_low) and not pd.isna(rsi.iloc[i])
+                and close.iloc[i] < price_low
+                and rsi.iloc[i] > rsi_at_low):
+            bullish.iloc[i] = True
+
+        # Find swing high in price window
+        price_high_idx = window_close.idxmax()
+        price_high = window_close[price_high_idx]
+        rsi_at_high = window_rsi.get(price_high_idx, np.nan)
+
+        # Bearish divergence: current price > prior swing high, but RSI < prior RSI at that high
+        if (not pd.isna(rsi_at_high) and not pd.isna(rsi.iloc[i])
+                and close.iloc[i] > price_high
+                and rsi.iloc[i] < rsi_at_high):
+            bearish.iloc[i] = True
+
+    return bullish, bearish
+
+
 def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
                              trend_period: int, timeframe: str) -> pd.DataFrame:
     """
@@ -329,5 +375,8 @@ def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
     df['ROC'] = calculate_roc(df)
     df['Momentum_Score'] = calculate_momentum_score(df)
     df['Conviction_Score'] = calculate_breakout_conviction(df)
+
+    # RSI divergence (V5)
+    df['RSI_Bull_Div'], df['RSI_Bear_Div'] = detect_rsi_divergence(df)
 
     return df

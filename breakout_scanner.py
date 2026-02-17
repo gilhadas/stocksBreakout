@@ -6,9 +6,25 @@ Supports long-term, swing, day trading, and scalping modes
 
 import asyncio
 import argparse
+import json
 import logging
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
+
+# Load .env file (cron doesn't inherit shell env vars like GMAIL_APP_PASSWORD)
+_env_file = Path(__file__).parent / '.env'
+if _env_file.exists():
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                if _line.startswith('export '):
+                    _line = _line[7:]
+                _key, _, _val = _line.partition('=')
+                _val = _val.strip().strip('"').strip("'")
+                os.environ.setdefault(_key.strip(), _val)
 
 # Python 3.14 compatibility: Create event loop before importing ib_insync
 # This prevents "RuntimeError: There is no current event loop" from eventkit
@@ -239,21 +255,58 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     # Display and save results
     if exit_results:
         import pandas as pd
-        
+
+        # Deduplicate: skip exits already notified today
+        exit_history_file = Path('scanner_output/.exit_history.json')
+        today = datetime.now().strftime('%Y-%m-%d')
+        notified_today = set()
+        try:
+            if exit_history_file.exists():
+                hist = json.loads(exit_history_file.read_text())
+                if hist.get('date') == today:
+                    notified_today = set(hist.get('symbols', []))
+        except Exception:
+            pass
+
+        # Filter out already-notified exits
+        new_exits = [
+            r for r in exit_results
+            if r['Action'] != 'HOLD' and r['Symbol'] not in notified_today
+        ]
+        hold_exits = [r for r in exit_results if r['Action'] == 'HOLD']
+
         logger.info(f"\n{'='*70}")
-        logger.info(f" EXIT EVALUATION: {len(exit_results)} positions")
+        logger.info(f" EXIT EVALUATION: {len(exit_results)} positions "
+                     f"({len(new_exits)} new actionable, {len(notified_today)} already notified)")
         logger.info(f"{'='*70}\n")
-        
+
         df = pd.DataFrame(exit_results)
         print(df.to_string(index=False))
-        
-        orchestrator.save_results(exit_results, args.mode, 'exits')
-        
-        # Send exit notifications
-        notifier.send_exit_notification(exit_results)
+
+        exit_csv_path = orchestrator.save_results(exit_results, args.mode, 'exits')
+
+        # Send exit notifications (only new actionable exits)
+        if new_exits:
+            notifier.send_exit_notification(exit_results, csv_path=exit_csv_path)
+
+            # Record newly notified symbols
+            new_symbols = [r['Symbol'] for r in new_exits]
+            notified_today.update(new_symbols)
+            try:
+                exit_history_file.parent.mkdir(parents=True, exist_ok=True)
+                exit_history_file.write_text(json.dumps({
+                    'date': today,
+                    'symbols': list(notified_today),
+                }))
+            except Exception as e:
+                logger.debug(f"Exit history save failed: {e}")
+        elif not hold_exits or len(hold_exits) == len(exit_results):
+            logger.info("All positions HOLD — no exit notifications needed")
+        else:
+            logger.info("All actionable exits already notified today")
     else:
         logger.info("No exit decisions generated")
-    
+
     return exit_results
 
 
@@ -283,22 +336,29 @@ async def run_combined_mode(orchestrator: ScannerOrchestrator, args, notifier: N
         logger.info(f"⚠️  {len(actionable_exits)} positions need attention!")
 
 
-async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier):
+async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
+                          from_portfolio: bool = False):
     """Monitor open positions: fetch current prices, alert on drops"""
     import pandas as pd
 
-    # Load positions from all specified files
+    # Load positions from portfolio.json or CSV files
     all_positions = []
-    for fpath in args.monitor.split(','):
-        fpath = fpath.strip()
-        if not fpath:
-            continue
-        positions = get_positions_from_file(fpath)
-        if positions:
-            logger.info(f"Loaded {len(positions)} positions from {fpath}")
-            all_positions.extend(positions)
-        else:
-            logger.info(f"No positions in {fpath}")
+    if from_portfolio:
+        from portfolio import Portfolio
+        _portfolio = Portfolio()
+        all_positions = _portfolio.get_positions_as_exit_format()
+        logger.info(f"Loaded {len(all_positions)} positions from portfolio.json")
+    else:
+        for fpath in args.monitor.split(','):
+            fpath = fpath.strip()
+            if not fpath:
+                continue
+            positions = get_positions_from_file(fpath)
+            if positions:
+                logger.info(f"Loaded {len(positions)} positions from {fpath}")
+                all_positions.extend(positions)
+            else:
+                logger.info(f"No positions in {fpath}")
 
     if not all_positions:
         logger.info("No positions to monitor")
@@ -327,30 +387,43 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier):
         else:
             price_map[symbol] = price
 
-    # Trail stops upward: update each position file
-    from utils import update_position_stops
-    for fpath in args.monitor.split(','):
-        fpath = fpath.strip()
-        if not fpath:
-            continue
-        updated = update_position_stops(fpath, price_map)
-        for u in updated:
-            logger.info(f"  ↑ {u['symbol']} stop: ${u['old_stop']:.2f} → ${u['new_stop']:.2f} (price ${u['price']:.2f})")
+    # Trail stops upward
+    if from_portfolio:
+        # Update stops in portfolio.json directly
+        for pos in all_positions:
+            symbol = pos['symbol']
+            current_price = price_map.get(symbol)
+            if current_price is None:
+                continue
+            new_trailing_stop = round(current_price * 0.99, 2)
+            if new_trailing_stop > pos['stop']:
+                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f})")
+                _portfolio.update_stop(symbol, new_trailing_stop)
+                pos['stop'] = new_trailing_stop
+    else:
+        from utils import update_position_stops
+        for fpath in args.monitor.split(','):
+            fpath = fpath.strip()
+            if not fpath:
+                continue
+            updated = update_position_stops(fpath, price_map)
+            for u in updated:
+                logger.info(f"  ↑ {u['symbol']} stop: ${u['old_stop']:.2f} → ${u['new_stop']:.2f} (price ${u['price']:.2f})")
 
-    # Reload positions after stop updates
-    all_positions = []
-    for fpath in args.monitor.split(','):
-        fpath = fpath.strip()
-        if fpath:
-            all_positions.extend(get_positions_from_file(fpath))
-    # Deduplicate again
-    seen = set()
-    unique_positions = []
-    for pos in all_positions:
-        if pos['symbol'] not in seen:
-            seen.add(pos['symbol'])
-            unique_positions.append(pos)
-    all_positions = unique_positions
+        # Reload positions after stop updates
+        all_positions = []
+        for fpath in args.monitor.split(','):
+            fpath = fpath.strip()
+            if fpath:
+                all_positions.extend(get_positions_from_file(fpath))
+        # Deduplicate again
+        seen = set()
+        unique_positions = []
+        for pos in all_positions:
+            if pos['symbol'] not in seen:
+                seen.add(pos['symbol'])
+                unique_positions.append(pos)
+        all_positions = unique_positions
 
     # Calculate status with updated stops
     dashboard = []
@@ -569,6 +642,7 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                         regime='NORMAL',
                         use_scoring=True,
                         use_legacy_momentum=False,
+                        use_v4_overextension=True,
                         vol_thresh=args.vol,
                         atr_mult=args.atr,
                         lookback=args.lookback
@@ -583,6 +657,7 @@ async def run_simulation_mode(args, ib, data_source='auto'):
                         regime='NORMAL',
                         use_scoring=True,
                         use_legacy_momentum=False,
+                        use_v4_overextension=True,
                         vol_thresh=args.vol,
                         atr_mult=args.atr,
                         lookback=args.lookback
@@ -826,16 +901,29 @@ Examples:
         help='Monitor positions for price drops. Comma-separated CSV files. '
              'Example: --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv'
     )
+    parser.add_argument(
+        '--portfolio-report',
+        action='store_true',
+        help='Send daily portfolio status email and exit. Use in cron: '
+             'python breakout_scanner.py dummy --portfolio-report'
+    )
+    parser.add_argument(
+        '--exit-from-portfolio',
+        action='store_true',
+        help='Evaluate exits for open positions in portfolio.json (instead of --exit-file CSV)'
+    )
+    parser.add_argument(
+        '--monitor-portfolio',
+        action='store_true',
+        help='Monitor positions from portfolio.json (instead of CSV files)'
+    )
 
     args = parser.parse_args()
     
     # Setup logging
     if args.cron:
         # Cron mode: only errors to console, everything to log file
-        import logging
-        from pathlib import Path
         from config import OUTPUT_DIR
-        from datetime import datetime
         
         log_dir = Path(OUTPUT_DIR, 'logs')
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -943,6 +1031,14 @@ Examples:
             def send_monitor_alert(self, *args, **kwargs): pass
         notifier = DummyNotifier()
     
+    # Portfolio daily report mode — send email and exit
+    if getattr(args, 'portfolio_report', False):
+        from portfolio import Portfolio
+        p = Portfolio()
+        report = p.send_daily_report()
+        logger.info("Portfolio report sent. Exiting.")
+        return
+
     # Sector buzz pre-scan report
     if getattr(args, 'sector_buzz', False):
         from sentiment import get_sector_buzz, format_sector_buzz
@@ -961,8 +1057,33 @@ Examples:
         # Create orchestrator with yfinance fallback if IB unavailable
         orchestrator = ScannerOrchestrator(ib, yf_fallback=yf_fallback)
 
+        # Load exit positions from portfolio.json when:
+        # 1. --exit-from-portfolio is explicitly set, OR
+        # 2. --both is set but no --exit-file provided (auto-fallback)
+        if not args.exit_file and (
+            getattr(args, 'exit_from_portfolio', False) or
+            getattr(args, 'both', False)
+        ):
+            from portfolio import Portfolio
+            p = Portfolio()
+            exit_positions = p.get_positions_as_exit_format()
+            if not exit_positions:
+                logger.info("Portfolio has no open positions — nothing to evaluate")
+            else:
+                import tempfile, csv
+                tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='')
+                writer = csv.DictWriter(tmp, fieldnames=['symbol', 'mode', 'entry', 'stop', 'target', 'timeframe'])
+                writer.writeheader()
+                writer.writerows(exit_positions)
+                tmp.close()
+                args.exit_file = tmp.name
+                logger.info(f"Loaded {len(exit_positions)} positions from portfolio.json for exit evaluation")
+
         # Determine execution mode
-        if args.monitor:
+        if getattr(args, 'monitor_portfolio', False):
+            # Portfolio monitoring mode (reads from portfolio.json)
+            await run_monitor_mode(orchestrator, args, notifier, from_portfolio=True)
+        elif args.monitor:
             # Portfolio monitoring mode
             await run_monitor_mode(orchestrator, args, notifier)
         elif args.both and args.exit_file:
