@@ -11,7 +11,10 @@ import logging
 import os
 import sys
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
+
+_NY_TZ = ZoneInfo('America/New_York')
 
 # Load .env file (cron doesn't inherit shell env vars like GMAIL_APP_PASSWORD)
 _env_file = Path(__file__).parent / '.env'
@@ -172,6 +175,37 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 f.write('\n'.join(premium_symbols))
             logger.info(f"Exported {len(premium_symbols)} PREMIUM tickers to {args.export_premium}")
 
+        # Export momentum-watch list: PREMIUM/GOLD + HIGH-momentum + HIGH vol≥3 + near-miss high-vol
+        # This broader set is used for subsequent Phase 2 re-evaluation scans
+        if getattr(args, 'export_momentum_watch', None):
+            watch_symbols = []
+            seen = set()
+            for sig in results:
+                sym = sig.get('Symbol') or sig.get('symbol', '')
+                q   = sig.get('Quality', '')
+                vol = sig.get('Vol', 0)
+                typ = sig.get('Type', '')
+                if sym and sym not in seen:
+                    if q in ('PREMIUM', 'GOLD'):
+                        watch_symbols.append(sym); seen.add(sym)
+                    elif q == 'HIGH' and (typ == 'Momentum' or vol >= 3.0):
+                        watch_symbols.append(sym); seen.add(sym)
+            # Also include near-miss rejections (within 0.5% of breakout) + high-vol rejections
+            rejections = orchestrator.get_rejection_reasons()
+            for rej in rejections:
+                sym = rej.get('symbol', '')
+                if sym and sym not in seen:
+                    is_near_miss = 'Near miss' in rej.get('reasons', '')
+                    is_high_vol = rej.get('vol_ratio', 0) >= 3.0
+                    if is_near_miss or is_high_vol:
+                        watch_symbols.append(sym); seen.add(sym)
+            with open(args.export_momentum_watch, 'w') as f:
+                f.write('\n'.join(watch_symbols))
+            logger.info(
+                f"Exported {len(watch_symbols)} momentum-watch tickers to {args.export_momentum_watch} "
+                f"(PREMIUM/GOLD + HIGH-momentum + near-miss high-vol)"
+            )
+
         # Send notifications with CSV attachment
         mode_desc = MODES[args.mode]['description']
         watchlist_name = Path(args.file).stem  # Get filename without extension
@@ -258,7 +292,7 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
 
         # Deduplicate: skip exits already notified today
         exit_history_file = Path('scanner_output/.exit_history.json')
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
         notified_today = set()
         try:
             if exit_history_file.exists():
@@ -895,11 +929,17 @@ Examples:
         help='Export PREMIUM signal tickers to a watchlist file (for subsequent re-evaluation scans)'
     )
     parser.add_argument(
+        '--export-momentum-watch',
+        type=str,
+        metavar='FILE',
+        help='Export PREMIUM/GOLD + HIGH-momentum + near-miss high-vol tickers for Phase 2 re-scans'
+    )
+    parser.add_argument(
         '--monitor',
         type=str,
         metavar='FILES',
         help='Monitor positions for price drops. Comma-separated CSV files. '
-             'Example: --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv'
+             'Example:  input/positions_swing_mock.csv,input/positions_daytrade_mock.csv'
     )
     parser.add_argument(
         '--portfolio-report',
@@ -927,7 +967,7 @@ Examples:
         
         log_dir = Path(OUTPUT_DIR, 'logs')
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / f'scanner_{datetime.now():%Y%m%d}.log'
+        log_file = log_dir / f'scanner_{datetime.now(_NY_TZ):%Y%m%d}.log'
         
         logging.basicConfig(
             level=logging.INFO,

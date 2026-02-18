@@ -48,20 +48,21 @@ HC_BASE=https://hc-ping.com
 # DAY TRADING (Intraday scans)
 # ============================================
 
-# Every weekday at 9:35 AM - Phase 1: S&P 500 wide scan, export PREMIUM tickers
-35 9 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py "input/ALL.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && curl -fsS -m 10 --retry 3 $HC_BASE/HC_UUID_DAYTRADE > /dev/null
+# Every weekday at 9:35 AM - Phase 1: S&P 500 wide scan, export PREMIUM + momentum-watch tickers
+# momentum_watch_daytrade.txt = PREMIUM/GOLD + HIGH-momentum + near-miss high-vol (for Phase 2 re-scans)
+35 9 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py "input/ALL.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && curl -fsS -m 10 --retry 3 $HC_BASE/HC_UUID_DAYTRADE > /dev/null
 
-# Every weekday at 10:00 AM - Phase 2: Re-evaluate PREMIUM daytrade tickers
-0 10 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py input/premium_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
+# Every weekday at 10:00 AM - Phase 2: Re-evaluate momentum-watch tickers (PREMIUM + HIGH-mom + near-miss)
+0 10 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
 
-# Every weekday at 2:00 PM - Phase 2: Re-evaluate PREMIUM daytrade tickers
-0 14 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py input/premium_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1 && curl -fsS -m 10 --retry 3 $HC_BASE/HC_UUID_DAYTRADE > /dev/null
+# Every weekday at 2:00 PM - Phase 2: Re-evaluate momentum-watch tickers
+0 14 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1 && curl -fsS -m 10 --retry 3 $HC_BASE/HC_UUID_DAYTRADE > /dev/null
 
 # Every weekday at 3:30 PM - Day trade exit check (mock positions)
 30 15 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py input/1_26_setups.txt --mode daytrade --exit-file input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
 
-# Every weekday at 8:20 PM - Phase 2: Evening PREMIUM daytrade re-evaluation
-20 20 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py input/premium_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening.log 2>&1
+# Every weekday at 8:20 PM - Phase 4: Evening re-evaluate momentum-watch tickers
+20 20 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening.log 2>&1
 
 
 # ============================================
@@ -70,6 +71,23 @@ HC_BASE=https://hc-ping.com
 # Scalping requires real-time execution and monitoring
 # Not suitable for scheduled cron jobs
 # Use manual execution or build a real-time monitoring system
+
+
+# ============================================
+# MOMENTUM-WATCH MONITOR (Every 15 minutes)
+# ============================================
+# Validates signaled stocks: HOLDING / FADING / FAILED
+# Reads input/momentum_watch_daytrade.txt (exported by Phase 1 daytrade scan)
+# Sends Discord alert on first status change to FADING or FAILED
+
+# Every weekday at 9:45 AM - First check after Phase 1 scan (watch list just populated)
+45 9 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+
+# Every 15 minutes from 10:00 AM to 3:45 PM - Continuous momentum validation
+*/15 10-15 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+
+# Every weekday at 4:00 PM - Final check at market close
+0 16 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && /users/gilhadas/documents/github/stocksbreakout/venv/bin/python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
 
 
 # ============================================
@@ -116,4 +134,5 @@ HC_BASE=https://hc-ping.com
 
 # Every Sunday at 11:10 PM - Clean old monitor alert history archives (keep last 30 days)
 10 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output -name ".monitor_alerts_*.txt" -mtime +30 -delete
+10 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output -name ".watch_monitor_*.json" -mtime +30 -delete
 

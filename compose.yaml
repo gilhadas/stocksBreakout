@@ -1,0 +1,37 @@
+# Breakout Scanner — Docker Compose
+# Usage:
+#   docker compose up --build          # run all cron jobs (default)
+#   docker compose run scanner python3 breakout_scanner.py input/ALL.txt --mode swing --mock
+#   docker compose run scanner python3 monitor_watch.py --dry-run
+
+services:
+  scanner:
+    build:
+      context: .
+    image: stocksbreakout:latest
+
+    # Load secrets from .env (never committed — see config.py for keys needed)
+    env_file:
+      - .env
+
+    # Override TZ if needed; already set in Dockerfile.
+    environment:
+      TZ: America/New_York
+
+    # Persist scanner output and input positions across container restarts.
+    volumes:
+      - scanner_output:/app/scanner_output
+      - ./input:/app/input            # live-edit watchlists / positions CSVs
+
+    # Restart automatically if the container crashes (e.g. network error).
+    restart: unless-stopped
+
+    # Only needed when running app.py (Streamlit dashboard) or webhook_server.py.
+    # Remove or comment out when running in cron-only mode.
+    # ports:
+    #   - "8000:8000"
+
+volumes:
+  scanner_output:
+    # Named volume — Docker manages persistence across rebuilds.
+    # To back up: docker run --rm -v stocksbreakout_scanner_output:/data busybox tar czf - /data > backup.tar.gz

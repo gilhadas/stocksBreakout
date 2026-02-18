@@ -131,6 +131,12 @@ class BreakoutDetector:
         vol_confirm = latest['Vol_Ratio'] >= vol_thresh
         dist_atr = (latest['close'] - prev_high) / latest['ATR']
         dist_confirm = dist_atr >= atr_mult
+
+        # Near-miss: within 0.5% below the breakout level + volume confirmed
+        near_miss_breakout = (
+            not price_break and vol_confirm and prev_high > 0
+            and latest['close'] / prev_high >= 0.995
+        )
         
         # Candle structure
         candle_ok, upper_wick, body_top_pct = check_candle_structure(
@@ -178,6 +184,20 @@ class BreakoutDetector:
         # 6. Gap
         gap_percent = calculate_gap_percent(df) if mode_name != 'scalping' else 0.0
         has_gap_up = gap_percent > 2.0
+
+        # 9. Momentum surge: explosive gap, intraday, OR daily move + high volume (no consolidation needed)
+        intraday_move_pct = (
+            (latest['close'] - latest['open']) / latest['open'] * 100
+            if latest.get('open', 0) > 0 else 0.0
+        )
+        # daily_move: prev close → current close (catches gap+run stocks like RCAT)
+        daily_move_pct = (
+            (latest['close'] - df['close'].iloc[-2]) / df['close'].iloc[-2] * 100
+            if len(df) >= 2 and df['close'].iloc[-2] > 0 else 0.0
+        )
+        momentum_surge = (
+            gap_percent >= 5.0 or intraday_move_pct >= 5.0 or daily_move_pct >= 5.0
+        ) and latest['Vol_Ratio'] >= 3.0
         
         # 7. Volume spike for scalping
         if mode_name == 'scalping':
@@ -227,6 +247,19 @@ class BreakoutDetector:
                 'mode': mode_name,
                 'reasons': ', '.join(rejection_reasons),
             })
+        # Log stocks that are within 0.5% of the breakout level (near-miss threshold)
+        elif near_miss_breakout:
+            gap_to_break = (prev_high - latest['close']) / prev_high * 100
+            self.rejection_reasons.append({
+                'symbol': symbol,
+                'price': round(latest['close'], 2),
+                'vol_ratio': round(latest['Vol_Ratio'], 2),
+                'momentum': int(momentum_score_preview) if not pd.isna(momentum_score_preview) else 0,
+                'conviction': int(conviction_score_preview) if not pd.isna(conviction_score_preview) else 0,
+                'rsi': int(latest.get('RSI', 0)),
+                'mode': mode_name,
+                'reasons': f'Near miss ({gap_to_break:.2f}% below breakout {prev_high:.2f}) — watch for re-scan',
+            })
         
         # --- MOMENTUM INDICATORS ---
         rsi_val = latest.get('RSI', 50)
@@ -263,8 +296,9 @@ class BreakoutDetector:
         use_scoring = kwargs.get('use_scoring', True)
 
         if use_scoring:
-            # Mandatory gate: price must break above previous high
-            if not price_break or not liquid_ok:
+            # Mandatory gate: price must break above previous high.
+            # Momentum surge stocks bypass the liquidity gate — high volume IS the liquidity signal.
+            if not price_break or (not liquid_ok and not momentum_surge):
                 return None
 
             if use_legacy:
@@ -303,9 +337,13 @@ class BreakoutDetector:
             # V6: Pattern volume confirmation
             checks['pattern_vol_confirmed'] = pattern_vol_confirmed
 
+            # V7: Momentum surge
+            checks['momentum_surge'] = momentum_surge
+
             if mode_name != 'scalping':
                 checks['rs_ok'] = rs_ok
-                checks['consolidation'] = was_consolidating
+                # Momentum surge plays don't require prior consolidation
+                checks['consolidation'] = was_consolidating or momentum_surge
 
             # V4: Over-extension check (swing/longterm only)
             use_v4 = kwargs.get('use_v4_overextension', True)
@@ -417,6 +455,8 @@ class BreakoutDetector:
             'Near52wHigh': near_52w_high if use_scoring else False,
             'RSI_BullDiv': rsi_bull_div if use_scoring else False,
             'PatternVolConf': pattern_vol_confirmed if use_scoring else False,
+            'Type': 'Momentum' if momentum_surge else '',
+            'RSI': round(float(rsi_val), 1) if not pd.isna(rsi_val) else '',
         }
         
         if mode_name == 'scalping' and spread_pct is not None:
@@ -588,6 +628,7 @@ class BreakoutDetector:
         'rsi_divergence': 5,       # V5: RSI bullish divergence
         'sector_momentum': 6,      # V5: Sector ETF momentum
         'pattern_vol_confirmed': 6, # V6: Pattern confirmed by volume
+        'momentum_surge': 12,      # V7: Explosive gap/intraday move + high volume (no consolidation needed)
         # V1 legacy weights (used when use_legacy_momentum=True)
         'vwap_ok': 8,
         'rsi_favorable': 8,

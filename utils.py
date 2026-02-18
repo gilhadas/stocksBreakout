@@ -4,7 +4,11 @@ Utility functions for file I/O and helpers
 
 import csv
 import logging
+from datetime import datetime
 from typing import List, Dict
+from zoneinfo import ZoneInfo
+
+_NY_TZ = ZoneInfo('America/New_York')
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +57,13 @@ def get_positions_from_file(file_path: str) -> List[Dict]:
     
     Required columns:
         symbol, mode, entry, stop, target, timeframe
-    
+    Optional columns:
+        entry_date  (YYYY-MM-DD; blank for legacy rows)
+
     Example:
-        symbol,mode,entry,stop,target,timeframe
-        AAPL,swing,185.50,180.00,195.00,1 day
-        NVDA,daytrade,520.30,515.00,530.00,15 mins
+        symbol,mode,entry,entry_date,stop,target,timeframe
+        AAPL,swing,185.50,2026-02-18,180.00,195.00,1 day
+        NVDA,daytrade,520.30,,515.00,530.00,15 mins
     """
     positions = []
     try:
@@ -69,6 +75,7 @@ def get_positions_from_file(file_path: str) -> List[Dict]:
                         'symbol': row['symbol'].strip(),
                         'mode': row['mode'].strip(),
                         'entry': float(row['entry']),
+                        'entry_date': row.get('entry_date', '').strip(),
                         'stop': float(row['stop']),
                         'target': float(row['target']),
                         'timeframe': row['timeframe'].strip(),
@@ -123,6 +130,7 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
             'symbol': symbol,
             'mode': mode,
             'entry': entry_price,
+            'entry_date': datetime.now(_NY_TZ).strftime('%Y-%m-%d'),
             'stop': round(entry_price * 0.99, 2),  # 1% below breakout
             'target': sig.get('Target', 0),
             'timeframe': timeframe,
@@ -135,7 +143,7 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
 
     write_header = not file_exists
     with open(positions_file, 'a', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'stop', 'target', 'timeframe'])
+        writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'entry_date', 'stop', 'target', 'timeframe'])
         if write_header:
             writer.writeheader()
         writer.writerows(new_rows)
@@ -185,7 +193,7 @@ def update_position_stops(positions_file: str, price_map: Dict[str, float]) -> L
     if updated:
         # Rewrite the entire file with updated stops
         with open(positions_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'stop', 'target', 'timeframe'])
+            writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'entry_date', 'stop', 'target', 'timeframe'])
             writer.writeheader()
             writer.writerows(positions)
 

@@ -1,0 +1,119 @@
+# Breakout Scanner — Docker Cron Schedule
+# Managed by supercronic (runs as appuser, inherits all Docker env vars)
+# Times are US Eastern (TZ set in Dockerfile ENV).
+#
+# Secrets are read from environment variables (pass via --env-file .env or compose.yaml):
+#   HC_UUID_LONGTERM, HC_UUID_SWING, HC_UUID_DAYTRADE, HC_UUID_MONITOR, HC_UUID_VALIDATE
+# Healthcheck pings are skipped silently when UUIDs are not set.
+#
+# Format: minute hour day month weekday command
+
+
+# ============================================================================
+# LONG-TERM POSITION TRADING (Weekly scans)
+# ============================================================================
+
+# Monday 9:00 AM — Phase 1: full scan, export PREMIUM tickers
+0 9 * * 1 cd /app && python3 breakout_scanner.py "input/ALL.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_LONGTERM}" > /dev/null 2>&1 || true
+
+# Monday 9:15 AM — Long-term exit evaluation
+15 9 * * 1 cd /app && python3 breakout_scanner.py input/1_26_setups.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
+
+
+# ============================================================================
+# SWING TRADING (Daily scans)
+# ============================================================================
+
+# Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + auto-add positions
+35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/ALL.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
+
+# Weekdays 3:45 PM — Swing exit evaluation
+45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_setups.txt --mode swing --exit-file input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
+
+# Weekdays 4:30 PM — Phase 2: Re-evaluate PREMIUM + combined exit check
+30 16 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-file input/positions_swing_mock.csv --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
+
+# Weekdays 7:30 PM — Evening PREMIUM re-evaluation
+30 19 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_evening.log 2>&1
+
+
+# ============================================================================
+# DAY TRADING (Intraday scans)
+# ============================================================================
+
+# Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + momentum-watch
+35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/ALL.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}" > /dev/null 2>&1 || true
+
+# Weekdays 10:00 AM — Phase 2: Re-evaluate momentum-watch tickers
+0 10 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
+
+# Weekdays 2:00 PM — Phase 2: Afternoon re-evaluation
+0 14 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}" > /dev/null 2>&1 || true
+
+# Weekdays 3:30 PM — Day trade exit check
+30 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_setups.txt --mode daytrade --exit-file input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
+
+# Weekdays 8:20 PM — Phase 4: Evening re-evaluate momentum-watch tickers
+20 20 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening.log 2>&1
+
+
+# ============================================================================
+# MOMENTUM-WATCH MONITOR (Every 15 minutes during market hours)
+# ============================================================================
+# Validates signaled stocks: HOLDING / FADING / FAILED
+# Sends Discord alert on first status change per day.
+
+# Weekdays 9:45 AM — First check (watch list just populated by Phase 1)
+45 9 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+
+# Weekdays 10:00 AM – 3:45 PM — Continuous validation every 15 minutes
+*/15 10-15 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+
+# Weekdays 4:00 PM — Final check at market close
+0 16 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+
+
+# ============================================================================
+# PORTFOLIO MONITORING (Every 15 minutes during market hours)
+# ============================================================================
+# Price checks on open positions — alerts on drops toward stop loss.
+
+# Weekdays 9:30 AM — Roll over daily alert log
+30 9 * * 1-5 mv /app/scanner_output/.monitor_alerts.txt /app/scanner_output/.monitor_alerts_$(date +%Y%m%d).txt 2>/dev/null || true
+
+# Weekdays 9:45 AM — First check after open
+45 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+
+# Weekdays 10:00 AM – 3:45 PM — Continuous monitoring every 15 minutes
+*/15 10-15 * * 1-5 cd /app && python3 breakout_scanner.py "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+
+# Weekdays 4:00 PM — Final check at close
+0 16 * * 1-5 cd /app && python3 breakout_scanner.py "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+
+
+# ============================================================================
+# SIGNAL VALIDATION & LEARNING
+# ============================================================================
+
+# Weekdays 8:30 PM — Validate signals from 3+ days ago
+30 20 * * 1-5 cd /app && python3 validate_signals.py validate-all --min-age-days 3 >> scanner_output/logs/cron_validate.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE}" > /dev/null 2>&1 || true
+
+# Sundays 9:00 PM — Generate learning recommendations
+0 21 * * 0 cd /app && python3 validate_signals.py learn >> scanner_output/logs/cron_learn.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE}" > /dev/null 2>&1 || true
+
+
+# ============================================================================
+# MAINTENANCE
+# ============================================================================
+
+# Sundays 11:00 PM — Clean old logs (keep 30 days)
+0 23 * * 0 find /app/scanner_output/logs -name "*.log" -mtime +30 -delete
+
+# Sundays 11:05 PM — Archive old results (keep 90 days)
+5 23 * * 0 find /app/scanner_output/signals    -name "*.csv" -mtime +90 -delete
+5 23 * * 0 find /app/scanner_output/exits      -name "*.csv" -mtime +90 -delete
+5 23 * * 0 find /app/scanner_output/rejections -name "*.csv" -mtime +90 -delete
+
+# Sundays 11:10 PM — Clean old monitor state files
+10 23 * * 0 find /app/scanner_output -name ".monitor_alerts_*.txt"  -mtime +30 -delete
+10 23 * * 0 find /app/scanner_output -name ".watch_monitor_*.json" -mtime +30 -delete

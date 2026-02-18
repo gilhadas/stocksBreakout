@@ -11,6 +11,9 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+_NY_TZ = ZoneInfo('America/New_York')
 
 import numpy as np
 
@@ -55,8 +58,8 @@ class Portfolio:
                 'cash': init_capital,
                 'positions': {},       # {symbol: position_dict}
                 'trade_history': [],    # closed trades
-                'created': datetime.now().isoformat(),
-                'last_updated': datetime.now().isoformat(),
+                'created': datetime.now(_NY_TZ).isoformat(),
+                'last_updated': datetime.now(_NY_TZ).isoformat(),
             }
             self._save()
 
@@ -67,7 +70,7 @@ class Portfolio:
     # Persistence
     # ------------------------------------------------------------------
     def _save(self):
-        self._data['last_updated'] = datetime.now().isoformat()
+        self._data['last_updated'] = datetime.now(_NY_TZ).isoformat()
         _atomic_write(PORTFOLIO_FILE, self._data)
 
     # ------------------------------------------------------------------
@@ -127,7 +130,7 @@ class Portfolio:
             'symbol': symbol,
             'shares': shares,
             'entry_price': price,
-            'entry_date': datetime.now().strftime('%Y-%m-%d'),
+            'entry_date': datetime.now(_NY_TZ).strftime('%Y-%m-%d'),
             'stop': float(signal.get('Stop', price * 0.95)),
             'target': float(signal.get('Target', price * 1.10)),
             'mode': mode,
@@ -172,13 +175,13 @@ class Portfolio:
             'entry_price': pos['entry_price'],
             'entry_date': pos['entry_date'],
             'exit_price': exit_price,
-            'exit_date': datetime.now().strftime('%Y-%m-%d'),
+            'exit_date': datetime.now(_NY_TZ).strftime('%Y-%m-%d'),
             'pnl': round(pnl, 2),
             'pnl_pct': round(pnl_pct, 2),
             'mode': pos['mode'],
             'quality': pos['quality'],
             'sector': pos.get('sector', ''),
-            'hold_days': (datetime.now() - datetime.strptime(pos['entry_date'], '%Y-%m-%d')).days,
+            'hold_days': (datetime.now(_NY_TZ).replace(tzinfo=None) - datetime.strptime(pos['entry_date'], '%Y-%m-%d')).days,
         }
         self._data['trade_history'].append(trade)
         self._save()
@@ -260,7 +263,7 @@ class Portfolio:
         """Save today's equity snapshot for WTD/YTD calculations."""
         summary = self.get_summary()
         snap = {
-            'date': datetime.now().strftime('%Y-%m-%d'),
+            'date': datetime.now(_NY_TZ).strftime('%Y-%m-%d'),
             'total_value': summary['total_value'],
             'cash': summary['cash'],
             'market_value': summary['market_value'],
@@ -305,7 +308,7 @@ class Portfolio:
 
     def _period_pnl(self, days: int) -> float:
         """Calculate P&L change over N days from snapshots."""
-        target_date = datetime.now() - timedelta(days=days)
+        target_date = datetime.now(_NY_TZ).replace(tzinfo=None) - timedelta(days=days)
         # Find nearest snapshot on or before target date
         for i in range(days + 5):
             check = target_date - timedelta(days=i)
@@ -321,7 +324,7 @@ class Portfolio:
 
     def _ytd_pnl(self) -> float:
         """Calculate year-to-date P&L."""
-        year_start = datetime(datetime.now().year, 1, 1)
+        year_start = datetime(datetime.now(_NY_TZ).year, 1, 1)
         # Find first snapshot of the year
         for i in range(10):
             check = year_start + timedelta(days=i)
@@ -561,7 +564,7 @@ class Portfolio:
 
         # Build report body
         lines = []
-        lines.append(f"Portfolio Daily Report — {datetime.now().strftime('%Y-%m-%d')}")
+        lines.append(f"Portfolio Daily Report — {datetime.now(_NY_TZ).strftime('%Y-%m-%d')}")
         lines.append("=" * 55)
         lines.append("")
 

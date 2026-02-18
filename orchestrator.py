@@ -8,6 +8,9 @@ import logging
 import os
 from typing import List, Dict, Optional
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_NY_TZ = ZoneInfo('America/New_York')
 from pathlib import Path
 import pandas as pd
 
@@ -243,6 +246,16 @@ class ScannerOrchestrator:
                 logger.warning(f"No data for {symbol}")
                 continue
             
+            # Compute days held from entry_date (if available)
+            days_held = 0
+            entry_date_str = pos.get('entry_date', '')
+            if entry_date_str:
+                try:
+                    entry_dt = datetime.strptime(entry_date_str, '%Y-%m-%d')
+                    days_held = (datetime.now(ZoneInfo('America/New_York')).replace(tzinfo=None) - entry_dt).days
+                except ValueError:
+                    pass
+
             # Evaluate exit
             decision = self.exit_evaluator.evaluate(
                 df=df,
@@ -252,7 +265,8 @@ class ScannerOrchestrator:
                 stop_price=pos['stop'],
                 target_price=pos['target'],
                 timeframe=timeframe,
-                regime=regime
+                regime=regime,
+                days_held=days_held
             )
             
             exit_results.append(decision)
@@ -279,7 +293,7 @@ class ScannerOrchestrator:
         if not results:
             return ""
         
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now(_NY_TZ).strftime('%Y%m%d_%H%M%S')
         filename = f"{result_type}_{mode}_{timestamp}.csv"
         
         # Save to appropriate subdirectory

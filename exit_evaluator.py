@@ -35,7 +35,8 @@ class ExitEvaluator:
                 'Action': 'HOLD',
                 'Reason': 'Insufficient data',
                 'Price': 0,
-                'UnrealizedR': 0
+                'UnrealizedR': 0,
+                'DaysHeld': days_held,
             }
         
         # Calculate indicators
@@ -134,9 +135,10 @@ class ExitEvaluator:
                 'Action': action,
                 'Reason': reason,
                 'Price': round(price, 2),
-                'UnrealizedR': round(unrealized_r, 2)
+                'UnrealizedR': round(unrealized_r, 2),
+                'DaysHeld': days_held,
             }
-        
+
         # Default: HOLD
         return {
             'Symbol': symbol,
@@ -144,7 +146,8 @@ class ExitEvaluator:
             'Action': 'HOLD',
             'Reason': f'Above stop & trend (R={unrealized_r:.2f})',
             'Price': round(price, 2),
-            'UnrealizedR': round(unrealized_r, 2)
+            'UnrealizedR': round(unrealized_r, 2),
+            'DaysHeld': days_held,
         }
     
     def _check_reversal_candle(self, latest, target_price: float, 
