@@ -1,6 +1,7 @@
 *.txt
 .DS_Store
 .env
+/venv
 .streamlit/secrets.toml
 *.csv
 *.log
