@@ -4,7 +4,7 @@
 .streamlit/secrets.toml
 *.csv
 *.log
-/__pycache__
+**/__pycache__
 /.vscode
 /scanner_output
 !cron_jobs.txt

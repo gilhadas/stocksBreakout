@@ -1,4 +1,6 @@
 #!/bin/bash
 # Test script to verify cron job will work
-cd "/Users/gilhadas/Documents/GitHub/stocksBreakout"
-"/Users/gilhadas/Documents/GitHub/stocksBreakout/venv/bin/python3" breakout_scanner.py input/watchlist.txt --mode swing --mock --cron
+PROJECT_ROOT=$( [ -d "$HOME/documents/github/stocksbreakout" ] && echo "$HOME/documents/github/stocksbreakout" || echo "$HOME/stocksbreakout" )
+PYTHON_BIN=$PROJECT_ROOT/venv/bin/python3
+
+cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/mags.txt --mode swing --mock --cron
