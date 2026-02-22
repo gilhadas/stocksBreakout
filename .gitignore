@@ -3,6 +3,9 @@
 .env
 /venv
 .streamlit/secrets.toml
+.sheet_id
+token.json
+credentials.json
 *.csv
 *.log
 **/__pycache__

@@ -287,10 +287,18 @@ class BreakoutDetector:
 
         # V5: Pre-compute values used in both scoring and non-scoring paths
         high_52w = df['high'].rolling(min(252, len(df))).max().iloc[-1]
+        low_52w  = df['low'].rolling(min(252, len(df))).min().iloc[-1]
         dist_from_52w = ((high_52w - latest['close']) / high_52w) * 100 if high_52w > 0 else 100
         near_52w_high = dist_from_52w <= 5.0
         rsi_bull_div = bool(latest.get('RSI_Bull_Div', False))
         sector_hot = kwargs.get('sector_hot', False)
+
+        # V8: Minervini Stage 2 Trend Template
+        from indicators import calculate_minervini_template
+        _minervini_conditions, minervini_score = calculate_minervini_template(
+            df, high_52w=float(high_52w), low_52w=float(low_52w)
+        )
+        minervini_pass = minervini_score >= 7   # strict: 7 or 8 of 8 conditions
 
         # --- SIGNAL SCORING SYSTEM ---
         use_scoring = kwargs.get('use_scoring', True)
@@ -339,6 +347,9 @@ class BreakoutDetector:
 
             # V7: Momentum surge
             checks['momentum_surge'] = momentum_surge
+
+            # V8: Minervini Stage 2 Trend Template (7+ of 8 conditions)
+            checks['minervini_template'] = minervini_pass
 
             if mode_name != 'scalping':
                 checks['rs_ok'] = rs_ok
@@ -457,6 +468,7 @@ class BreakoutDetector:
             'PatternVolConf': pattern_vol_confirmed if use_scoring else False,
             'Type': 'Momentum' if momentum_surge else '',
             'RSI': round(float(rsi_val), 1) if not pd.isna(rsi_val) else '',
+            'MinerviniScore': minervini_score,   # V8: 0-8 conditions met
         }
         
         if mode_name == 'scalping' and spread_pct is not None:
@@ -629,6 +641,7 @@ class BreakoutDetector:
         'sector_momentum': 6,      # V5: Sector ETF momentum
         'pattern_vol_confirmed': 6, # V6: Pattern confirmed by volume
         'momentum_surge': 12,      # V7: Explosive gap/intraday move + high volume (no consolidation needed)
+        'minervini_template': 15,  # V8: Minervini Stage 2 Trend Template (7+ of 8 conditions)
         # V1 legacy weights (used when use_legacy_momentum=True)
         'vwap_ok': 8,
         'rsi_favorable': 8,
