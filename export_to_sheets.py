@@ -68,10 +68,8 @@ except ImportError:
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE = "token.json"
+SHEET_ID_FILE = ".sheet_id"          # auto-saved after first run
 SIGNALS_DIR = Path("scanner_output/signals")
-
-# Symbol column index (0-based) — "Symbol" is the first column
-SYMBOL_COL_INDEX = 0
 
 
 def get_credentials() -> Credentials:
@@ -125,6 +123,39 @@ def read_csv_rows(filepath: Path) -> list[list[str]]:
             if any(cell.strip() for cell in row):  # skip blank rows
                 rows.append(row)
     return rows
+
+
+# Quality tiers used by the scanner
+_QUALITY_TIERS = {
+    "premium": {"PREMIUM", "GOLD"},
+    "high":    {"HIGH", "PREMIUM", "GOLD"},
+    "all":     None,   # None = no filter
+}
+
+
+def filter_rows_by_quality(rows: list[list[str]], score: str) -> list[list[str]]:
+    """
+    Keep the header row plus only data rows whose Quality cell is in the
+    allowed set for the given score tier.
+      premium → PREMIUM, GOLD
+      high    → HIGH, PREMIUM, GOLD
+      all     → no filter (returns rows unchanged)
+    """
+    allowed = _QUALITY_TIERS.get(score)
+    if allowed is None or len(rows) < 2:
+        return rows
+
+    header = rows[0]
+    quality_idx = header.index("Quality") if "Quality" in header else -1
+    if quality_idx < 0:
+        return rows   # no Quality column — can't filter, return as-is
+
+    filtered = [header]
+    for row in rows[1:]:
+        cell = row[quality_idx].strip() if quality_idx < len(row) else ""
+        if cell in allowed:
+            filtered.append(row)
+    return filtered
 
 
 def _col_letter(zero_based_idx: int) -> str:
@@ -479,6 +510,13 @@ def main():
     parser.add_argument("--sheet-id", help="Existing spreadsheet ID to update")
     parser.add_argument("--mode", choices=["swing", "daytrade", "longterm", "scalping"],
                         help="Filter by trading mode")
+    parser.add_argument("--score", choices=["premium", "high", "all"], default="all",
+                        help=(
+                            "Filter signals by quality score: "
+                            "'premium' = PREMIUM + GOLD only, "
+                            "'high' = HIGH + PREMIUM + GOLD, "
+                            "'all' = no filter (default)"
+                        ))
     parser.add_argument("--max-files", type=int, default=0,
                         help="Max number of files to export (0 = all, newest first)")
     parser.add_argument("--signals-dir", default=str(SIGNALS_DIR),
@@ -515,18 +553,37 @@ def main():
     service = build("sheets", "v4", credentials=creds)
 
     # ── Create or open spreadsheet ────────────────────────────────────────────
-    if args.sheet_id:
-        spreadsheet_id = args.sheet_id
-        print(f"Using existing spreadsheet: {spreadsheet_id}")
-    else:
+    # Priority: 1) --sheet-id flag  2) saved .sheet_id file  3) create new
+    spreadsheet_id = args.sheet_id or ""
+
+    if not spreadsheet_id and os.path.exists(SHEET_ID_FILE):
+        saved_id = Path(SHEET_ID_FILE).read_text().strip()
+        if saved_id:
+            spreadsheet_id = saved_id
+            print(f"Loaded sheet ID from {SHEET_ID_FILE}: {spreadsheet_id}")
+
+    if spreadsheet_id:
+        # Verify the sheet is accessible before proceeding
+        try:
+            service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            print(f"Updating existing spreadsheet: {spreadsheet_id}")
+            print(f"  URL: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
+        except Exception as e:
+            print(f"ERROR: Could not access sheet '{spreadsheet_id}': {e}")
+            print("Creating a new spreadsheet instead...")
+            spreadsheet_id = ""
+
+    if not spreadsheet_id:
         title = f"Breakout Signals {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         spreadsheet = service.spreadsheets().create(
             body={"properties": {"title": title}},
             fields="spreadsheetId",
         ).execute()
         spreadsheet_id = spreadsheet["spreadsheetId"]
+        # Save for future runs — no need to pass --sheet-id again
+        Path(SHEET_ID_FILE).write_text(spreadsheet_id)
         print(f"Created new spreadsheet: {title}")
-        print(f"  ID: {spreadsheet_id}")
+        print(f"  ID: {spreadsheet_id}  (saved to {SHEET_ID_FILE})")
         print(f"  URL: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
 
     # ── Export each CSV ───────────────────────────────────────────────────────
@@ -546,6 +603,11 @@ def main():
 
         if len(rows) < 2:
             print(f"  Skipping: no data rows (only header or empty)")
+            continue
+
+        rows = filter_rows_by_quality(rows, args.score)
+        if len(rows) < 2:
+            print(f"  Skipping: no rows matching --score={args.score}")
             continue
 
         data, num_data_rows = build_sheet_data(rows)

@@ -2,6 +2,9 @@
 .DS_Store
 .env
 .streamlit/secrets.toml
+.sheet_id
+token.json
+credentials.json
 *.csv
 *.log
 **/__pycache__
@@ -11,5 +14,3 @@
 !CLAUDE_BUILD_SUMMARY.txt
 !COMPLETE_BUILDOUT.txt
 !requirements.txt
-token.json
-credentials.json
