@@ -47,4 +47,11 @@ else
     LOG_FILE="$BASE_DIR/scanner_output/logs/cron_run.log"
 fi
 
-$PYTHON_BIN "${FILTERED_ARGS[@]}" >> "$LOG_FILE" 2>&1
+# If first arg ends in .py → run it directly (monitor_watch.py, validate_signals.py, …)
+# Otherwise → pass all args to breakout_scanner.py (watchlist scans)
+FIRST_ARG="${FILTERED_ARGS[0]:-}"
+if [[ "$FIRST_ARG" == *.py ]]; then
+    $PYTHON_BIN "${FILTERED_ARGS[@]}" >> "$LOG_FILE" 2>&1
+else
+    $PYTHON_BIN breakout_scanner.py "${FILTERED_ARGS[@]}" >> "$LOG_FILE" 2>&1
+fi
