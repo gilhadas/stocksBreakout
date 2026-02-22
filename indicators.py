@@ -380,3 +380,99 @@ def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
     df['RSI_Bull_Div'], df['RSI_Bear_Div'] = detect_rsi_divergence(df)
 
     return df
+
+
+def calculate_minervini_template(
+    df: pd.DataFrame,
+    high_52w: float = None,
+    low_52w: float = None,
+) -> tuple:
+    """
+    Evaluate Mark Minervini's Stage 2 Trend Template (8 conditions).
+
+    Conditions
+    ----------
+    C1  Price > SMA150 AND Price > SMA200
+    C2  SMA150 > SMA200
+    C3  SMA200 slope is positive (trending up over last 20 trading days)
+    C4  SMA50 > SMA150 AND SMA50 > SMA200
+    C5  Price > SMA50
+    C6  Price is at least 25% above its 52-week low
+    C7  Price is within 25% of its 52-week high  (price / 52w_high >= 0.75)
+    C8  Relative Strength: stock 252-day return > 0  (positive annual momentum,
+        a simplified proxy for IBD RS Rating >= 70)
+
+    Parameters
+    ----------
+    df        : DataFrame with a 'close' column (daily bars recommended)
+    high_52w  : pre-computed 52-week high (optional, computed from df if None)
+    low_52w   : pre-computed 52-week low  (optional, computed from df if None)
+
+    Returns
+    -------
+    (conditions: dict[str, bool], score: int 0-8)
+    Empty dict and 0 if insufficient data (<50 bars).
+    """
+    if df is None or len(df) < 50:
+        return {}, 0
+
+    close = df['close']
+    price = float(close.iloc[-1])
+
+    # ── Moving averages ───────────────────────────────────────────────────────
+    sma50  = float(close.rolling(50).mean().iloc[-1])  if len(df) >= 50  else None
+    sma150 = float(close.rolling(150).mean().iloc[-1]) if len(df) >= 150 else None
+    sma200 = float(close.rolling(200).mean().iloc[-1]) if len(df) >= 200 else None
+
+    # SMA200 slope: compare today's SMA200 to value 20 bars ago
+    sma200_trending_up = False
+    if sma200 is not None and len(df) >= 221:
+        sma200_series  = close.rolling(200).mean()
+        sma200_20d_ago = sma200_series.iloc[-21]
+        if not pd.isna(sma200_20d_ago):
+            sma200_trending_up = sma200 > float(sma200_20d_ago)
+
+    # ── 52-week high / low ────────────────────────────────────────────────────
+    if high_52w is None:
+        high_52w = float(close.rolling(252).max().iloc[-1]) if len(df) >= 252 else float(close.max())
+    if low_52w is None:
+        low_52w  = float(close.rolling(252).min().iloc[-1]) if len(df) >= 252 else float(close.min())
+
+    # ── Relative Strength (simplified) ───────────────────────────────────────
+    # True IBD RS Rating requires comparing vs. 10 000 stocks; we use the
+    # stock's own 252-day return as a proxy: positive annual return ≈ RS ≥ 70.
+    rs_positive = False
+    if len(df) >= 252:
+        price_252_ago = float(close.iloc[-252])
+        if price_252_ago > 0:
+            rs_positive = price > price_252_ago   # stock is up on the year
+
+    # ── Evaluate all 8 conditions ─────────────────────────────────────────────
+    def _above(*args):
+        return all(v is not None and not pd.isna(v) for v in args)
+
+    conditions = {
+        'c1_price_above_sma150_200': (
+            _above(sma150, sma200) and price > sma150 and price > sma200
+        ),
+        'c2_sma150_above_sma200': (
+            _above(sma150, sma200) and sma150 > sma200
+        ),
+        'c3_sma200_trending_up': sma200_trending_up,
+        'c4_sma50_above_sma150_200': (
+            _above(sma50, sma150, sma200) and sma50 > sma150 and sma50 > sma200
+        ),
+        'c5_price_above_sma50': (
+            _above(sma50) and price > sma50
+        ),
+        'c6_above_52w_low_25pct': (
+            low_52w > 0 and price >= low_52w * 1.25
+        ),
+        'c7_within_25pct_of_52w_high': (
+            high_52w > 0 and price >= high_52w * 0.75
+        ),
+        'c8_rs_positive': rs_positive,
+    }
+
+    score = sum(conditions.values())
+    return conditions, score

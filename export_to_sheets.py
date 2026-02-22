@@ -170,19 +170,22 @@ def _col_letter(zero_based_idx: int) -> str:
 
 def build_sheet_data(rows: list[list[str]]) -> tuple[list[list[str]], int]:
     """
-    Insert three new columns after the original Price column (B).
+    Insert new columns after the original Price column (B), and move
+    MinerviniScore (when present in the CSV) to column F.
 
     Final layout:
-      Col A: Symbol           (original)
-      Col B: Entry Price      (original)
-      Col C: Live Price       =GOOGLEFINANCE(A{row},"price")
-      Col D: Total % Gain/Loss  =(C-B)/B  for every signal  [formatted as %]
-      Col E: PREMIUM/Gold %   same formula, blank if Quality ≠ PREMIUM/GOLD
-      Col F+: remaining original columns (Vol, Dist, …, Quality, …)
+      Col A: Symbol              (original)
+      Col B: Entry Price         (original)
+      Col C: Live Price          =GOOGLEFINANCE(A{row},"price")
+      Col D: Total % Gain/Loss   =(C-B)/B  for every signal  [formatted as %]
+      Col E: PREMIUM/Gold %      same formula, blank if Quality ≠ PREMIUM/GOLD
+      Col F: MinerviniScore      (moved from its CSV position, if present in CSV)
+      Col G+: remaining original columns (Vol, Dist, …, Quality, …)
+              (Col F+: if MinerviniScore is absent from the CSV)
 
     Bottom row:
-      D → AVERAGE of all signals (total portfolio avg)
-      E → AVERAGE of PREMIUM/GOLD rows only (blank rows ignored by AVERAGE)
+      D → SUM of all signals (total portfolio)
+      E → SUM of PREMIUM/GOLD rows only (blank cells skipped by SUM)
 
     Returns (data_rows, num_data_rows) — num_data_rows excludes header & total.
     """
@@ -192,25 +195,43 @@ def build_sheet_data(rows: list[list[str]]) -> tuple[list[list[str]], int]:
     NUM_INSERTED = 3           # Live Price, Total %, PREM/Gold %
     num_data_rows = len(rows) - 1
 
-    # Locate Quality column in the original CSV header
+    # Locate special columns in the original CSV header
     orig_header = rows[0]
-    quality_orig_idx = orig_header.index("Quality") if "Quality" in orig_header else -1
-    # After inserting NUM_INSERTED cols starting at position 2,
-    # original col k shifts to k + NUM_INSERTED for k >= 2
+    quality_orig_idx   = orig_header.index("Quality")       if "Quality"       in orig_header else -1
+    minervini_orig_idx = orig_header.index("MinerviniScore") if "MinerviniScore" in orig_header else -1
+
+    # When MinerviniScore exists it becomes an extra inserted column (col F)
+    has_minervini = minervini_orig_idx >= 0
+    num_new_cols = NUM_INSERTED + (1 if has_minervini else 0)
+
+    # Compute where Quality lands in the sheet after all insertions/moves.
+    # Original cols 0,1 stay at A,B.  num_new_cols computed cols go at C..F (or E).
+    # The remaining original cols (from index 2, minus MinerviniScore if moved)
+    # come next.  Quality's offset within that remaining block accounts for any
+    # original column that was removed (i.e. MinerviniScore) before Quality.
     if quality_orig_idx >= 0:
-        quality_sheet_col = _col_letter(quality_orig_idx + NUM_INSERTED)
+        skip_before_quality = (
+            1 if has_minervini
+               and minervini_orig_idx >= 2
+               and minervini_orig_idx < quality_orig_idx
+            else 0
+        )
+        quality_sheet_col = _col_letter(quality_orig_idx + num_new_cols - skip_before_quality)
     else:
         quality_sheet_col = None  # fallback: PREM/Gold % column stays blank
 
     result = []
     for i, row in enumerate(rows):
         if i == 0:
-            new_row = row[:2] + ["Live Price", "Total % Gain/Loss", "PREMIUM/Gold %"] + row[2:]
-            result.append(new_row)
+            extra_cols = ["Live Price", "Total % Gain/Loss", "PREMIUM/Gold %"]
+            if has_minervini:
+                extra_cols.append("MinerviniScore")
+            rest = [col for j, col in enumerate(row) if j >= 2 and j != minervini_orig_idx]
+            result.append(row[:2] + extra_cols + rest)
         else:
             sheet_row = i + 1   # 1-indexed; header is row 1
-            live_price  = f'=GOOGLEFINANCE(A{sheet_row},"price")'
-            total_pct   = f'=(C{sheet_row}-B{sheet_row})/B{sheet_row}'
+            live_price = f'=GOOGLEFINANCE(A{sheet_row},"price")'
+            total_pct  = f'=(C{sheet_row}-B{sheet_row})/B{sheet_row}'
             if quality_sheet_col:
                 q = quality_sheet_col
                 prem_pct = (
@@ -219,8 +240,12 @@ def build_sheet_data(rows: list[list[str]]) -> tuple[list[list[str]], int]:
                 )
             else:
                 prem_pct = ""
-            new_row = row[:2] + [live_price, total_pct, prem_pct] + row[2:]
-            result.append(new_row)
+            extra_vals = [live_price, total_pct, prem_pct]
+            if has_minervini:
+                minervini_val = row[minervini_orig_idx] if minervini_orig_idx < len(row) else ""
+                extra_vals.append(minervini_val)
+            rest = [val for j, val in enumerate(row) if j >= 2 and j != minervini_orig_idx]
+            result.append(row[:2] + extra_vals + rest)
 
     # Total row
     last_data_row = num_data_rows + 1      # sheet row number of the last data row
