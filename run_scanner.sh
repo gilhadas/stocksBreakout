@@ -13,20 +13,38 @@ fi
 # WSL/Mac usually use 'bin/python3', Windows-created venvs use 'Scripts/python.exe'
 if [[ -f "$BASE_DIR/venv/bin/python3" ]]; then
     PYTHON_BIN="$BASE_DIR/venv/bin/python3"
-else
+elif [[ -f "$BASE_DIR/venv/Scripts/python.exe" ]]; then
     PYTHON_BIN="$BASE_DIR/venv/Scripts/python.exe"
+else
+    PYTHON_BIN="python3"
 fi
 
-# --- 3. Execution ---
+# --- 3. Setup ---
 cd "$BASE_DIR" || exit
+mkdir -p "$BASE_DIR/scanner_output/logs"
 
+# --- 4. Parse --logName (shell-only flag, stripped before passing to Python)
+# Usage: run_scanner.sh <script_or_watchlist> [args...] --logName cron_swing
+# Builds absolute log path: $BASE_DIR/scanner_output/logs/<logName>.log
+# Falls back to cron_run.log if --logName is omitted.
+LOG_NAME=""
+FILTERED_ARGS=()
+skip_next=false
+for arg in "$@"; do
+    if $skip_next; then
+        LOG_NAME="$arg"
+        skip_next=false
+    elif [[ "$arg" == "--logName" ]]; then
+        skip_next=true
+    else
+        FILTERED_ARGS+=("$arg")
+    fi
+done
 
-# Create log directory if it doesn't exist
-mkdir -p "scanner_output/logs"
+if [[ -n "$LOG_NAME" ]]; then
+    LOG_FILE="$BASE_DIR/scanner_output/logs/${LOG_NAME}.log"
+else
+    LOG_FILE="$BASE_DIR/scanner_output/logs/cron_run.log"
+fi
 
-exec $PYTHON_BIN breakout_scanner.py "$@"
-# Use the filename (e.g., MAGS) to create the log name
-#LOG_FILE="scanner_output/logs/cron_$(basename "$1" .txt).log"
-
-# Run it!
-#$PYTHON_BIN breakout_scanner.py "$@" >> "$LOG_FILE" 2>&1
+$PYTHON_BIN "${FILTERED_ARGS[@]}" >> "$LOG_FILE" 2>&1
