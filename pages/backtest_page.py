@@ -128,6 +128,16 @@ def render_backtest_page():
         cols[2].metric("SPY Max DD",  _format_pct(spy_data.get('max_drawdown', 0)))
         cols[3].metric("Period",      period)
 
+    # ── Minervini Screen benchmark ────────────────────────────────────────────
+    mb_data = data.get('minervini_benchmark') if isinstance(data, dict) else None
+    if mb_data and mb_data.get('total_return') is not None:
+        mb_n = mb_data.get('num_stocks', '?')
+        st.markdown(f"**Minervini Screen ({mb_n} qualifying stocks, buy-and-hold)**")
+        mb_cols = st.columns(3)
+        mb_cols[0].metric("Minervini Return",  _format_pct(mb_data.get('total_return', 0)))
+        mb_cols[1].metric("Minervini Sharpe",  f"{mb_data.get('sharpe_ratio', 0):.2f}")
+        mb_cols[2].metric("Minervini Max DD",  _format_pct(mb_data.get('max_drawdown', 0)))
+
     # ── Raw JSON expander ─────────────────────────────────────────────────────
     with st.expander("Raw JSON"):
         st.json(data)

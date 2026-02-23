@@ -282,6 +282,70 @@ def calculate_spy_benchmark(historical, start_date, end_date, initial_capital=10
     }
 
 
+def calculate_minervini_benchmark(historical, start_date, end_date,
+                                  initial_capital=100000, m_thresh=7):
+    """Equal-weight buy-and-hold of all stocks meeting Minervini Stage 2 at start_date."""
+    from indicators import calculate_minervini_template
+
+    sd = pd.to_datetime(start_date)
+    ed = pd.to_datetime(end_date)
+
+    qualifying = []
+    for symbol, df in historical.items():
+        if symbol == 'SPY':
+            continue
+        df_pre = df[df.index <= sd]
+        if len(df_pre) < 50:
+            continue
+        _, score = calculate_minervini_template(df_pre)
+        if score >= m_thresh:
+            qualifying.append(symbol)
+
+    if not qualifying:
+        return None
+
+    per_stock = initial_capital / len(qualifying)
+    portfolio_series = None
+
+    for symbol in qualifying:
+        df = historical[symbol]
+        period = df[(df.index >= sd) & (df.index <= ed)]
+        if len(period) < 2:
+            continue
+        start_price = float(period.iloc[0]['close'])
+        if start_price == 0:
+            continue
+        shares = per_stock / start_price
+        stock_values = period['close'].astype(float) * shares
+        if portfolio_series is None:
+            portfolio_series = stock_values.copy()
+        else:
+            portfolio_series = portfolio_series.add(stock_values, fill_value=0)
+
+    if portfolio_series is None or len(portfolio_series) < 2:
+        return None
+
+    end_value = float(portfolio_series.iloc[-1])
+    total_return = ((end_value - initial_capital) / initial_capital) * 100
+
+    daily_rets = portfolio_series.pct_change().dropna()
+    mean_ret = daily_rets.mean()
+    std_ret = daily_rets.std()
+    sharpe = (mean_ret / std_ret) * np.sqrt(252) if std_ret > 0 else 0
+
+    cummax = portfolio_series.cummax()
+    dd = (portfolio_series / cummax - 1) * 100
+    max_dd = float(dd.min())
+
+    return {
+        'total_return': total_return,
+        'sharpe_ratio': sharpe,
+        'max_drawdown': max_dd,
+        'num_stocks': len(qualifying),
+        'end_value': end_value,
+    }
+
+
 # ── Run one config ──────────────────────────────────────────────────────────
 
 def run_sim(signals, start_date, end_date, end_prices, historical,
@@ -306,7 +370,8 @@ def run_sim(signals, start_date, end_date, end_prices, historical,
 
 # ── Print table ─────────────────────────────────────────────────────────────
 
-def print_results_table(period_name, results_list, spy_report, initial_capital):
+def print_results_table(period_name, results_list, spy_report, initial_capital,
+                        minervini_bench=None, m_thresh=7):
     spy_ret = spy_report['total_return'] if spy_report else 0
     spy_sharpe = spy_report['sharpe_ratio'] if spy_report else 0
     spy_dd = spy_report['max_drawdown'] if spy_report else 0
@@ -322,6 +387,17 @@ def print_results_table(period_name, results_list, spy_report, initial_capital):
 
     print(f"{'SPY Buy & Hold':<44} {'1':>5} {'1':>6} {spy_ret:>+9.2f}% "
           f"{'N/A':>8} {spy_sharpe:>7.2f} {spy_dd:>+7.2f}% {'N/A':>6} {'--':>10}")
+
+    if minervini_bench:
+        mb_n      = minervini_bench['num_stocks']
+        mb_ret    = minervini_bench['total_return']
+        mb_sharpe = minervini_bench['sharpe_ratio']
+        mb_dd     = minervini_bench['max_drawdown']
+        mb_label  = f"Minervini Screen (≥{m_thresh}, {mb_n} stks)"
+        mb_diff   = mb_ret - spy_ret
+        print(f"{mb_label:<44} {mb_n:>5} {mb_n:>6} {mb_ret:>+9.2f}% "
+              f"{'N/A':>8} {mb_sharpe:>7.2f} {mb_dd:>+7.2f}% {'N/A':>6} {mb_diff:>+9.2f}%")
+
     print("-" * 130)
 
     best_return = -999
@@ -386,6 +462,16 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
     # SPY benchmark
     spy_report = calculate_spy_benchmark(historical, start_date, end_date,
                                           initial_capital)
+
+    # Minervini Screen benchmark
+    print(f"\n  Computing Minervini Screen benchmark (score ≥ {m_thresh})...")
+    minervini_bench = calculate_minervini_benchmark(historical, start_date, end_date,
+                                                    initial_capital, m_thresh)
+    if minervini_bench:
+        print(f"  Minervini Screen: {minervini_bench['num_stocks']} qualifying stocks, "
+              f"return {minervini_bench['total_return']:+.2f}%")
+    else:
+        print(f"  Minervini Screen: no qualifying stocks at {start_date}")
 
     # Single-pass scan — all 3 variants (V1/V2/V5X) in one loop
     print(f"\n  Scanning signals (single-pass: V1 / V2-V6 / V5X-V6X / V7 / V8 / V8X)...")
@@ -531,13 +617,15 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
             report['signal_count'] = len(filtered)
             results_list.append(report)
 
-    print_results_table(period_name, results_list, spy_report, initial_capital)
+    print_results_table(period_name, results_list, spy_report, initial_capital,
+                        minervini_bench=minervini_bench, m_thresh=m_thresh)
 
     return {
         'period': period_name,
         'start': start_date,
         'end': end_date,
         'spy': spy_report,
+        'minervini_benchmark': minervini_bench,
         'results': results_list,
     }
 
@@ -586,6 +674,24 @@ def print_cross_period_summary(all_periods, m_thresh=7):
     if spy_rets:
         spy_row += f" {np.mean(spy_rets):>{col_w-1}.2f}%"
     print(spy_row)
+
+    # Minervini Screen benchmark row
+    mb_label = f"Minervini Screen (≥{m_thresh})"
+    mb_row = f"{mb_label:<44}"
+    mb_rets = []
+    for p in all_periods:
+        mb = p.get('minervini_benchmark') if p else None
+        if mb:
+            r = mb['total_return']
+            mb_rets.append(r)
+            mb_row += f" {r:>{col_w-1}.2f}%"
+        else:
+            mb_row += f" {'N/A':>{col_w}}"
+    if mb_rets:
+        mb_row += f" {np.mean(mb_rets):>{col_w-1}.2f}%"
+    else:
+        mb_row += f" {'--':>{col_w}}"
+    print(mb_row)
     print("-" * 130)
 
     # Config rows

@@ -401,6 +401,76 @@ def calculate_spy_benchmark(historical, start_date, end_date, initial_capital=10
     }
 
 
+def calculate_minervini_benchmark(historical, start_date, end_date,
+                                  initial_capital=100000, m_thresh=7):
+    """Equal-weight buy-and-hold of all stocks meeting Minervini Stage 2 at start_date.
+
+    Uses the 365-day lookback data already in `historical` (fetched by fetch_all_data).
+    Score is computed on bars up to start_date, then position held through end_date.
+    """
+    from indicators import calculate_minervini_template
+
+    sd = pd.to_datetime(start_date)
+    ed = pd.to_datetime(end_date)
+
+    qualifying = []
+    for symbol, df in historical.items():
+        if symbol == 'SPY':
+            continue
+        # Data available at the start of the test period
+        df_pre = df[df.index <= sd]
+        if len(df_pre) < 50:
+            continue
+        _, score = calculate_minervini_template(df_pre)
+        if score >= m_thresh:
+            qualifying.append(symbol)
+
+    if not qualifying:
+        return None
+
+    # Equal-weight allocation per stock
+    per_stock = initial_capital / len(qualifying)
+    portfolio_series = None
+
+    for symbol in qualifying:
+        df = historical[symbol]
+        period = df[(df.index >= sd) & (df.index <= ed)]
+        if len(period) < 2:
+            continue
+        start_price = float(period.iloc[0]['close'])
+        if start_price == 0:
+            continue
+        shares = per_stock / start_price
+        stock_values = period['close'].astype(float) * shares
+        if portfolio_series is None:
+            portfolio_series = stock_values.copy()
+        else:
+            portfolio_series = portfolio_series.add(stock_values, fill_value=0)
+
+    if portfolio_series is None or len(portfolio_series) < 2:
+        return None
+
+    end_value = float(portfolio_series.iloc[-1])
+    total_return = ((end_value - initial_capital) / initial_capital) * 100
+
+    daily_rets = portfolio_series.pct_change().dropna()
+    mean_ret = daily_rets.mean()
+    std_ret = daily_rets.std()
+    sharpe = (mean_ret / std_ret) * np.sqrt(252) if std_ret > 0 else 0
+
+    cummax = portfolio_series.cummax()
+    dd = (portfolio_series / cummax - 1) * 100
+    max_dd = float(dd.min())
+
+    return {
+        'total_return': total_return,
+        'sharpe_ratio': sharpe,
+        'max_drawdown': max_dd,
+        'num_stocks': len(qualifying),
+        'end_value': end_value,
+    }
+
+
 def print_comparison(strategy, spy, initial_capital, start_date, end_date):
     """Print side-by-side comparison"""
     if not strategy or not spy:
@@ -531,6 +601,16 @@ async def main():
     # SPY benchmark (once)
     spy_report = calculate_spy_benchmark(historical, start_date, end_date,
                                           initial_capital)
+
+    # Minervini Screen benchmark: buy-and-hold all stocks with Minervini score ≥ threshold
+    print(f"\n  Computing Minervini Screen benchmark (score ≥ {m_thresh})...")
+    minervini_bench = calculate_minervini_benchmark(historical, start_date, end_date,
+                                                    initial_capital, m_thresh)
+    if minervini_bench:
+        print(f"  Minervini Screen: {minervini_bench['num_stocks']} qualifying stocks, "
+              f"return {minervini_bench['total_return']:+.2f}%")
+    else:
+        print(f"  Minervini Screen: no qualifying stocks at {start_date}")
 
     # Define configurations to test — V1 and V2 side by side
     configs = [
@@ -854,7 +934,7 @@ async def main():
 
     # Print comparison table
     print("\n\n" + "=" * 120)
-    print("V1 / V2 / V3–V6 / V6X / V7 / V8 / V8X  vs  SPY")
+    print("V1 / V2 / V3–V6 / V6X / V7 / V8 / V8X  vs  SPY  vs  Minervini Screen")
     print("=" * 120)
 
     spy_ret = spy_report['total_return'] if spy_report else 0
@@ -867,6 +947,16 @@ async def main():
 
     # SPY row
     print(f"{'SPY Buy & Hold':<42} {'1':>7} {'1':>7} {spy_ret:>+9.2f}% {'N/A':>8} {spy_sharpe:>7.2f} {spy_dd:>+7.2f}% {'N/A':>6} {'--':>10}")
+
+    # Minervini Screen benchmark row
+    if minervini_bench:
+        mb_ret    = minervini_bench['total_return']
+        mb_sharpe = minervini_bench['sharpe_ratio']
+        mb_dd     = minervini_bench['max_drawdown']
+        mb_n      = minervini_bench['num_stocks']
+        mb_label  = f"Minervini Screen (≥{m_thresh}, {mb_n} stocks)"
+        mb_diff   = mb_ret - spy_ret
+        print(f"{mb_label:<42} {mb_n:>7} {mb_n:>7} {mb_ret:>+9.2f}% {'N/A':>8} {mb_sharpe:>7.2f} {mb_dd:>+7.2f}% {'N/A':>6} {mb_diff:>+9.2f}%")
     print("-" * 120)
 
     best_return = -999
@@ -919,6 +1009,7 @@ async def main():
     save_data = {
         'test': {'start': start_date, 'end': end_date, 'capital': initial_capital},
         'spy': {k: safe_val(v) for k, v in (spy_report or {}).items()},
+        'minervini_benchmark': {k: safe_val(v) for k, v in (minervini_bench or {}).items()},
         'configs': [{k: safe_val(v) for k, v in r.items()} for r in results_list],
     }
 
