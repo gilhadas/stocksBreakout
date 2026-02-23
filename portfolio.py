@@ -214,7 +214,11 @@ class Portfolio:
         self._save()
 
     def _fetch_current_prices(self) -> Dict[str, float]:
-        """Fetch current prices for all open positions via yfinance."""
+        """Fetch current prices for all open positions via yfinance.
+
+        yfinance ≥ 1.0 always returns multi-level columns from yf.download(),
+        even for a single ticker.  We always index by ticker name.
+        """
         prices = {}
         symbols = list(self._data['positions'].keys())
         if not symbols:
@@ -222,18 +226,20 @@ class Portfolio:
 
         try:
             import yfinance as yf
-            tickers_str = ' '.join(s.replace(' ', '-') for s in symbols)
-            data = yf.download(tickers_str, period='1d', progress=False)
-            if data is not None and not data.empty:
-                if len(symbols) == 1:
-                    prices[symbols[0]] = float(data['Close'].iloc[-1])
-                else:
-                    for sym in symbols:
-                        yf_sym = sym.replace(' ', '-')
-                        try:
-                            prices[sym] = float(data['Close'][yf_sym].iloc[-1])
-                        except (KeyError, IndexError):
-                            pass
+            yf_syms = [s.replace(' ', '-') for s in symbols]
+            tickers_str = ' '.join(yf_syms)
+            data = yf.download(tickers_str, period='2d', progress=False, auto_adjust=True)
+            if data is None or data.empty:
+                return prices
+
+            # data['Close'] is always a DataFrame in yfinance ≥ 1.0
+            close_df = data['Close']
+            for sym, yf_sym in zip(symbols, yf_syms):
+                try:
+                    val = close_df[yf_sym].dropna().iloc[-1]
+                    prices[sym] = float(val)
+                except (KeyError, IndexError, TypeError):
+                    pass
         except Exception as e:
             logger.debug(f"Price fetch failed: {e}")
 
@@ -290,8 +296,8 @@ class Portfolio:
 
         # Period P&L from snapshots
         daily_pnl = self._period_pnl(days=1)
-        wtd_pnl = self._period_pnl(days=7)
-        ytd_pnl = self._ytd_pnl()
+        wtd_pnl   = self._wtd_pnl()
+        ytd_pnl   = self._ytd_pnl()
 
         return {
             'cash': round(self._data['cash'], 2),
@@ -306,37 +312,84 @@ class Portfolio:
             'initial_capital': initial,
         }
 
-    def _period_pnl(self, days: int) -> float:
-        """Calculate P&L change over N days from snapshots."""
-        target_date = datetime.now(_NY_TZ).replace(tzinfo=None) - timedelta(days=days)
-        # Find nearest snapshot on or before target date
-        for i in range(days + 5):
+    def _current_portfolio_value(self) -> float:
+        return self._data['cash'] + sum(
+            p['current_price'] * p['shares']
+            for p in self._data['positions'].values()
+        )
+
+    def _snap_value_on_or_before(self, target_date) -> Optional[float]:
+        """Return total_value from the nearest snapshot on or before target_date.
+
+        Rejects snapshots dated before the portfolio's creation date (stale
+        data from a prior portfolio that was reset).
+        """
+        created_str = self._data.get('created', '')
+        try:
+            created_date = datetime.fromisoformat(created_str).date()
+        except (ValueError, TypeError):
+            created_date = None
+
+        for i in range(10):
             check = target_date - timedelta(days=i)
             snap_file = SNAPSHOTS_DIR / f"snap_{check.strftime('%Y-%m-%d')}.json"
             if snap_file.exists():
+                # Skip snapshots from on or before this portfolio was created
+                # (same-day snapshot is from the prior portfolio instance)
+                if created_date and check <= created_date:
+                    logger.debug(f"Skipping pre-creation snapshot {check} (portfolio created {created_date})")
+                    continue
                 snap = json.loads(snap_file.read_text())
-                current_value = self._data['cash'] + sum(
-                    p['current_price'] * p['shares']
-                    for p in self._data['positions'].values()
-                )
-                return round(current_value - snap['total_value'], 2)
-        return 0.0
+                return snap['total_value']
+        return None
 
-    def _ytd_pnl(self) -> float:
-        """Calculate year-to-date P&L."""
-        year_start = datetime(datetime.now(_NY_TZ).year, 1, 1)
-        # Find first snapshot of the year
-        for i in range(10):
+    def ensure_today_snapshot(self):
+        """Save today's snapshot if one doesn't exist yet. Idempotent."""
+        today_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
+        snap_file = SNAPSHOTS_DIR / f"snap_{today_str}.json"
+        if not snap_file.exists():
+            self.daily_snapshot()
+            return True
+        return False
+
+    def _period_pnl(self, days: int) -> Optional[float]:
+        """Calculate P&L change over the last N calendar days from snapshots."""
+        target = datetime.now(_NY_TZ).date() - timedelta(days=days)
+        ref = self._snap_value_on_or_before(target)
+        if ref is None:
+            return None
+        return round(self._current_portfolio_value() - ref, 2)
+
+    def _wtd_pnl(self) -> Optional[float]:
+        """Week-to-date P&L: change since last Monday's snapshot."""
+        today = datetime.now(_NY_TZ).date()
+        last_monday = today - timedelta(days=today.weekday())  # weekday() 0=Mon
+        ref = self._snap_value_on_or_before(last_monday)
+        if ref is None:
+            return None
+        return round(self._current_portfolio_value() - ref, 2)
+
+    def _ytd_pnl(self) -> Optional[float]:
+        """Year-to-date P&L: change since the first snapshot of the current year."""
+        created_str = self._data.get('created', '')
+        try:
+            created_date = datetime.fromisoformat(created_str).date()
+        except (ValueError, TypeError):
+            created_date = None
+
+        year_start = datetime(datetime.now(_NY_TZ).year, 1, 1).date()
+        # Scan forward up to 30 days to find the first valid snapshot of the year
+        for i in range(30):
             check = year_start + timedelta(days=i)
+            if check > datetime.now(_NY_TZ).date():
+                break
+            if created_date and check < created_date:
+                continue  # skip pre-creation snapshots
             snap_file = SNAPSHOTS_DIR / f"snap_{check.strftime('%Y-%m-%d')}.json"
             if snap_file.exists():
                 snap = json.loads(snap_file.read_text())
-                current_value = self._data['cash'] + sum(
-                    p['current_price'] * p['shares']
-                    for p in self._data['positions'].values()
-                )
-                return round(current_value - snap['total_value'], 2)
-        return 0.0
+                return round(self._current_portfolio_value() - snap['total_value'], 2)
+        return None
 
     def get_performance(self) -> dict:
         """

@@ -1,13 +1,13 @@
 """
 Signal Performance Page — track how past signals performed.
-Filters: date, trade type, quality tier → Performance by Scan summary table.
+Filters: date range, trade type, quality tier → Performance by Scan summary table.
 Drill down into individual signals per scan.
 """
 
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 PROJECT_ROOT = Path(__file__).parent.parent
 SIGNALS_DIR = PROJECT_ROOT / 'scanner_output' / 'signals'
@@ -61,6 +61,90 @@ def _find_signal_files(selected_date, trade_type):
     return sorted(SIGNALS_DIR.glob(pattern), reverse=True)
 
 
+def _find_signal_files_range(start_date, end_date, trade_type):
+    """Find signal CSV files matching a date range and trade type."""
+    all_files = []
+    for f in SIGNALS_DIR.glob('signals_*.csv'):
+        parts = f.stem.split('_')
+        # Extract date from filename
+        file_date = None
+        for p in parts:
+            if len(p) == 8 and p.isdigit():
+                try:
+                    file_date = datetime.strptime(p, '%Y%m%d').date()
+                except ValueError:
+                    pass
+        if file_date is None:
+            continue
+        if file_date < start_date or file_date > end_date:
+            continue
+        # Filter by trade type
+        if trade_type != 'All':
+            mode = parts[1] if len(parts) >= 2 else ''
+            if mode != trade_type:
+                continue
+        all_files.append(f)
+    return sorted(all_files, reverse=True)
+
+
+def _fetch_prices_at_date(symbols, target_date):
+    """Fetch closing prices for symbols at a specific date using yfinance."""
+    if not symbols:
+        return {}
+    try:
+        import yfinance as yf
+        # Fetch a few days around target to handle weekends/holidays
+        start = target_date - timedelta(days=5)
+        end = target_date + timedelta(days=1)
+        yf_syms = [s.replace(' ', '-') for s in symbols]
+        data = yf.download(yf_syms, start=start.strftime('%Y-%m-%d'),
+                           end=end.strftime('%Y-%m-%d'), progress=False, auto_adjust=True)
+        if data is None or data.empty:
+            return {}
+        close_df = data['Close']
+        # If single ticker, close_df may be a Series
+        if isinstance(close_df, pd.Series):
+            close_df = close_df.to_frame(columns=[yf_syms[0]])
+        prices = {}
+        for sym, yf_sym in zip(symbols, yf_syms):
+            try:
+                col = close_df[yf_sym].dropna()
+                if len(col) > 0:
+                    # Get the last available price on or before target_date
+                    valid = col[col.index.date <= target_date]
+                    if len(valid) > 0:
+                        prices[sym] = round(float(valid.iloc[-1]), 2)
+            except (KeyError, IndexError, TypeError):
+                pass
+        return prices
+    except Exception:
+        return {}
+
+
+def _compute_realized_gain(df):
+    """Recompute Gain% using Target/Stop price when hit, else Current.
+
+    Priority: HitTarget → use Target price, else HitStop → use Stop price.
+    Updates df in-place and returns it.
+    """
+    if 'Price' not in df.columns or 'Gain%' not in df.columns:
+        return df
+    for idx, row in df.iterrows():
+        entry = row.get('Price')
+        if pd.isna(entry) or entry == 0:
+            continue
+        entry = float(entry)
+        hit_target = row.get('HitTarget', False)
+        hit_stop = row.get('HitStop', False)
+        if hit_target and pd.notna(row.get('Target')) and float(row['Target']) > 0:
+            realized = float(row['Target'])
+            df.at[idx, 'Gain%'] = round(((realized - entry) / entry) * 100, 2)
+        elif hit_stop and pd.notna(row.get('Stop')) and float(row['Stop']) > 0:
+            realized = float(row['Stop'])
+            df.at[idx, 'Gain%'] = round(((realized - entry) / entry) * 100, 2)
+    return df
+
+
 def _get_report_path(signal_file):
     """Get the corresponding report path for a signal file."""
     return REPORTS_DIR / signal_file.name.replace('signals_', 'report_')
@@ -77,7 +161,8 @@ def _build_quality_filtered_summary(report_path, signal_file, allowed_tiers):
         return None
 
     # Filter by quality
-    filtered = df[df['Quality'].isin(allowed_tiers)]
+    filtered = df[df['Quality'].isin(allowed_tiers)].copy()
+    filtered = _compute_realized_gain(filtered)
     valid = filtered.dropna(subset=['Gain%']) if 'Gain%' in filtered.columns else filtered
 
     n = len(valid)
@@ -106,7 +191,7 @@ def _build_quality_filtered_summary(report_path, signal_file, allowed_tiers):
     if n == 0:
         return {
             'Date': date_display, 'Time': time_display, 'Mode': mode.title(),
-            'Signals': 0, 'Avg Gain': 0, 'Median Gain': 0, 'Win Rate': 0,
+            'Signals': 0, 'Avg Gain': 0, 'Total Gain': 0, 'Win Rate': 0,
             'Winners': 0, 'Losers': 0, 'Best': 0, 'Worst': 0,
             'Hit Target': 0, 'Hit Stop': 0, '_file': signal_file.name,
         }
@@ -120,7 +205,7 @@ def _build_quality_filtered_summary(report_path, signal_file, allowed_tiers):
         'Mode': mode.title(),
         'Signals': n,
         'Avg Gain': round(valid['Gain%'].mean(), 2),
-        'Median Gain': round(valid['Gain%'].median(), 2),
+        'Total Gain': round(valid['Gain%'].sum(), 2),
         'Win Rate': round((winners / n) * 100, 1) if n > 0 else 0,
         'Winners': winners,
         'Losers': losers,
@@ -144,13 +229,21 @@ def render_signals_page():
         return
 
     with col_date:
-        selected_date = st.date_input(
-            "Signal Date",
-            value=available_dates[0],
+        date_range = st.date_input(
+            "Signal Date Range",
+            value=(available_dates[0], available_dates[0]),
             min_value=available_dates[-1],
             max_value=available_dates[0],
-            key="sig_date",
+            key="sig_date_range",
         )
+        # Handle single date or range tuple
+        if isinstance(date_range, (list, tuple)):
+            if len(date_range) == 2:
+                start_date, end_date = date_range
+            else:
+                start_date = end_date = date_range[0]
+        else:
+            start_date = end_date = date_range
 
     with col_type:
         trade_type = st.selectbox("Trade Type", TRADE_TYPES, key="sig_trade_type")
@@ -163,8 +256,11 @@ def render_signals_page():
 
     allowed_tiers = QUALITY_FILTERS[quality_filter]
 
-    # Find matching signal files for this date + type
-    matching_files = _find_signal_files(selected_date, trade_type)
+    # Find matching signal files for date range + type
+    if start_date == end_date:
+        matching_files = _find_signal_files(start_date, trade_type)
+    else:
+        matching_files = _find_signal_files_range(start_date, end_date, trade_type)
 
     # Check which have reports and which don't
     files_without_reports = [f for f in matching_files if not _get_report_path(f).exists()]
@@ -179,7 +275,8 @@ def render_signals_page():
                                     disabled=len(matching_files) == 0)
 
     if not matching_files:
-        st.warning(f"No signals found for **{selected_date}** / **{trade_type}**.")
+        date_label = str(start_date) if start_date == end_date else f"{start_date} to {end_date}"
+        st.warning(f"No signals found for **{date_label}** / **{trade_type}**.")
         # Show available dates hint
         all_files = sorted(SIGNALS_DIR.glob('signals_*.csv'), reverse=True)
         if all_files:
@@ -259,39 +356,98 @@ def render_signals_page():
 
     st.divider()
 
-    # ── Performance by Scan Table ──
+    # ── Performance by Scan Table (clickable rows) ──
     st.subheader("Performance by Scan")
+    st.caption("Click a row to see individual trades")
 
-    display_cols = ['Date', 'Time', 'Mode', 'Signals', 'Avg Gain', 'Median Gain',
+    display_cols = ['Date', 'Time', 'Mode', 'Signals', 'Avg Gain', 'Total Gain',
                     'Win Rate', 'Winners', 'Losers', 'Best', 'Worst',
                     'Hit Target', 'Hit Stop']
     display_cols = [c for c in display_cols if c in summary_df.columns]
 
-    gain_style_cols = [c for c in ['Avg Gain', 'Median Gain', 'Best', 'Worst']
+    # ── Build TOTAL row for Performance by Scan ──
+    scan_total = {}
+    for c in display_cols:
+        scan_total[c] = None
+    scan_total['Date'] = 'TOTAL'
+    scan_total['Time'] = ''
+    scan_total['Mode'] = ''
+    scan_total['Signals'] = int(summary_df['Signals'].sum())
+    if 'Avg Gain' in summary_df.columns:
+        # Weighted average gain
+        total_sigs = summary_df['Signals'].sum()
+        if total_sigs > 0:
+            scan_total['Avg Gain'] = round(
+                (summary_df['Avg Gain'] * summary_df['Signals']).sum() / total_sigs, 2)
+        else:
+            scan_total['Avg Gain'] = 0
+    if 'Total Gain' in summary_df.columns:
+        scan_total['Total Gain'] = round(summary_df['Total Gain'].sum(), 2)
+    if 'Win Rate' in summary_df.columns:
+        scan_total['Win Rate'] = round(summary_df['Win Rate'].mean(), 1)
+    if 'Winners' in summary_df.columns:
+        scan_total['Winners'] = int(summary_df['Winners'].sum())
+    if 'Losers' in summary_df.columns:
+        scan_total['Losers'] = int(summary_df['Losers'].sum())
+    if 'Best' in summary_df.columns:
+        scan_total['Best'] = round(summary_df['Best'].max(), 2)
+    if 'Worst' in summary_df.columns:
+        scan_total['Worst'] = round(summary_df['Worst'].min(), 2)
+    if 'Hit Target' in summary_df.columns:
+        scan_total['Hit Target'] = int(summary_df['Hit Target'].sum())
+    if 'Hit Stop' in summary_df.columns:
+        scan_total['Hit Stop'] = int(summary_df['Hit Stop'].sum())
+    scan_total['_file'] = ''
+
+    scan_total_df = pd.DataFrame([scan_total])
+    scan_display_df = pd.concat([summary_df[display_cols], scan_total_df[display_cols]], ignore_index=True)
+
+    gain_style_cols = [c for c in ['Avg Gain', 'Total Gain', 'Best', 'Worst']
                        if c in display_cols]
 
-    styled = summary_df[display_cols].style.applymap(_color_gain, subset=gain_style_cols)
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=300)
+    def _color_scan_row(row):
+        """Bold styling for TOTAL row in scan table."""
+        if row.get('Date') == 'TOTAL':
+            return ['background-color: #1a1a2e; color: #ffffff; font-weight: bold'] * len(row)
+        return [''] * len(row)
+
+    styled = (
+        scan_display_df
+        .style
+        .applymap(_color_gain, subset=gain_style_cols)
+        .apply(_color_scan_row, axis=1)
+    )
+
+    event = st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        height=min(400, 40 + len(scan_display_df) * 35),
+        on_select="rerun",
+        selection_mode="single-row",
+        key="perf_scan_table",
+    )
+
+    # ── Determine selected scan row ──
+    selected_rows = event.selection.rows if event and event.selection else []
+    selected_scan_idx = selected_rows[0] if selected_rows else None
+
+    # Ignore click on the TOTAL row
+    if selected_scan_idx is not None and selected_scan_idx >= len(summary_df):
+        selected_scan_idx = None
+
+    if selected_scan_idx is None:
+        st.info("Select a scan row above to view individual trade details.")
+        return
 
     st.divider()
 
-    # ── Signal Details (drill-down) ──
-    st.subheader("Signal Details")
+    # ── Signal Details (drill-down for the selected row) ──
+    sel_row = summary_df.iloc[selected_scan_idx]
+    scan_label = f"{sel_row['Mode']} | {sel_row['Date']} {sel_row['Time']} | {int(sel_row['Signals'])} signals"
+    st.subheader(f"Trade Details — {scan_label}")
 
-    # Build selectbox labels from summary
-    scan_labels = []
-    for _, row in summary_df.iterrows():
-        label = f"{row['Mode']} | {row['Date']} {row['Time']} | {int(row['Signals'])} signals, {row['Avg Gain']:+.2f}%"
-        scan_labels.append(label)
-
-    selected_scan_idx = st.selectbox(
-        "Select Scan", range(len(scan_labels)),
-        format_func=lambda i: scan_labels[i],
-        key="sig_detail_scan",
-    )
-
-    # Load the selected report
-    selected_file_name = summary_df.iloc[selected_scan_idx]['_file']
+    selected_file_name = sel_row['_file']
     report_path = REPORTS_DIR / selected_file_name.replace('signals_', 'report_')
 
     try:
@@ -304,7 +460,7 @@ def render_signals_page():
         st.warning("Empty report file.")
         return
 
-    # Apply quality filter
+    # Apply quality filter and recompute gain from stop/target
     if 'Quality' in detail_df.columns:
         detail_df = detail_df[detail_df['Quality'].isin(allowed_tiers)].copy()
 
@@ -312,9 +468,35 @@ def render_signals_page():
         st.info("No signals match the selected quality filter in this scan.")
         return
 
-    # Outcome filter
-    outcome_filter = st.radio("Outcome", ["All", "Winners", "Losers", "Hit Target", "Hit Stop"],
-                              horizontal=True, key="sig_outcome")
+    detail_df = _compute_realized_gain(detail_df)
+
+    # Determine signal date for Price@Date min constraint
+    signal_date_str = sel_row.get('Date', '')
+    try:
+        signal_date = datetime.strptime(signal_date_str, '%Y-%m-%d').date()
+    except (ValueError, TypeError):
+        signal_date = available_dates[-1] if available_dates else None
+
+    # Outcome filter + Gain filter + Price@Date picker
+    filter_col, gain_filter_col, price_date_col = st.columns([3, 1, 1])
+    with filter_col:
+        outcome_filter = st.radio("Outcome", ["All", "Winners", "Losers", "Hit Target", "Hit Stop"],
+                                  horizontal=True, key="sig_outcome")
+    with gain_filter_col:
+        min_abs_gain = st.number_input(
+            "Min |Gain%|",
+            min_value=0.0, max_value=100.0, value=0.0, step=0.5,
+            help="Filter out rows where abs(Gain%) < this value",
+            key="sig_min_abs_gain",
+        )
+    with price_date_col:
+        price_at_date = st.date_input(
+            "Price @ Date",
+            value=None,
+            min_value=signal_date,
+            max_value=datetime.now().date(),
+            key="sig_price_at_date",
+        )
 
     filtered = detail_df.copy()
     if outcome_filter == 'Winners' and 'Gain%' in filtered.columns:
@@ -322,26 +504,140 @@ def render_signals_page():
     elif outcome_filter == 'Losers' and 'Gain%' in filtered.columns:
         filtered = filtered[filtered['Gain%'] < 0]
     elif outcome_filter == 'Hit Target' and 'HitTarget' in filtered.columns:
-        filtered = filtered[filtered['HitTarget'] == True]
+        mask = filtered['HitTarget'] == True
+        if 'HitStop' in filtered.columns:
+            mask = mask & (filtered['HitStop'] != True)
+        filtered = filtered[mask]
     elif outcome_filter == 'Hit Stop' and 'HitStop' in filtered.columns:
-        filtered = filtered[filtered['HitStop'] == True]
+        mask = filtered['HitStop'] == True
+        if 'HitTarget' in filtered.columns:
+            mask = mask & (filtered['HitTarget'] != True)
+        filtered = filtered[mask]
 
-    # Signal table
-    detail_cols = ['Symbol', 'Quality', 'Price', 'Current', 'Gain%',
-                   'Stop', 'Target', 'R:R', 'HitTarget', 'HitStop',
-                   'Patterns', 'Sector', 'DaysSince']
-    detail_cols = [c for c in detail_cols if c in filtered.columns]
+    # Apply abs gain filter
+    if min_abs_gain > 0 and 'Gain%' in filtered.columns:
+        filtered = filtered[filtered['Gain%'].abs() >= min_abs_gain]
 
     if filtered.empty:
-        st.info("No signals match the selected outcome filter.")
+        st.info("No signals match the selected filters.")
         return
 
+    # Sort by gain
     if 'Gain%' in filtered.columns:
         filtered = filtered.sort_values('Gain%', ascending=False)
 
-    gain_cols = [c for c in ['Gain%'] if c in detail_cols]
-    styled_detail = filtered[detail_cols].style.applymap(_color_gain, subset=gain_cols)
-    st.dataframe(styled_detail, use_container_width=True, hide_index=True, height=500)
+    # Fetch Price@Date if selected
+    if price_at_date is not None:
+        symbols = filtered['Symbol'].tolist()
+        cache_key = f"price_at_{price_at_date}_{','.join(sorted(symbols))}"
+        if cache_key not in st.session_state:
+            with st.spinner(f"Fetching prices for {price_at_date}..."):
+                st.session_state[cache_key] = _fetch_prices_at_date(symbols, price_at_date)
+        prices_at = st.session_state[cache_key]
+        col_label = f"Price@{price_at_date.strftime('%m/%d')}"
+        filtered[col_label] = filtered['Symbol'].map(prices_at)
+        # Calculate gain from entry to that date
+        gain_label = f"Gain@{price_at_date.strftime('%m/%d')}%"
+        if 'Price' in filtered.columns:
+            filtered[gain_label] = filtered.apply(
+                lambda r: round(((r[col_label] - r['Price']) / r['Price']) * 100, 2)
+                if pd.notna(r.get(col_label)) and pd.notna(r.get('Price')) and r['Price'] > 0
+                else None, axis=1)
+    else:
+        col_label = None
+        gain_label = None
+
+    # Signal table with full row coloring (green = winner, red = loser)
+    detail_cols = ['Symbol', 'Quality', 'Price', 'Current', 'Gain%',
+                   'Stop', 'Target', 'R:R', 'HitTarget', 'HitStop',
+                   'Patterns', 'Sector', 'DaysSince']
+    # Insert Price@Date columns after Current
+    if col_label and col_label in filtered.columns:
+        cur_idx = detail_cols.index('Current') + 1 if 'Current' in detail_cols else 4
+        detail_cols.insert(cur_idx, col_label)
+        if gain_label and gain_label in filtered.columns:
+            detail_cols.insert(cur_idx + 1, gain_label)
+    detail_cols = [c for c in detail_cols if c in filtered.columns]
+
+    # ── Build TOTAL row ──
+    total_row = {}
+    for c in detail_cols:
+        total_row[c] = None
+    total_row['Symbol'] = 'TOTAL'
+    if 'Gain%' in filtered.columns:
+        total_row['Gain%'] = round(filtered['Gain%'].dropna().sum(), 2)
+    if 'HitTarget' in filtered.columns:
+        total_row['HitTarget'] = int(filtered['HitTarget'].sum())
+    if 'HitStop' in filtered.columns:
+        total_row['HitStop'] = int(filtered['HitStop'].sum())
+    if col_label and col_label in detail_cols:
+        total_row[col_label] = None
+    if gain_label and gain_label in detail_cols:
+        valid_gains = filtered[gain_label].dropna()
+        total_row[gain_label] = round(valid_gains.sum(), 2) if len(valid_gains) > 0 else None
+
+    total_df = pd.DataFrame([total_row])[detail_cols]
+
+    def _color_trade_row(row):
+        """Color entire row: green for winners, red for losers."""
+        gain = row.get('Gain%', 0) if pd.notna(row.get('Gain%', 0)) else 0
+        if gain > 0:
+            return ['background-color: #0d2618; color: #4caf50'] * len(row)
+        elif gain < 0:
+            return ['background-color: #2a1111; color: #ef5350'] * len(row)
+        return [''] * len(row)
+
+    def _color_total_row(row):
+        return ['background-color: #1a1a2e; color: #ffffff; font-weight: bold'] * len(row)
+
+    # Build format dict
+    fmt = {
+        'Gain%': '{:+.2f}%',
+        'Price': '${:.2f}',
+        'Current': '${:.2f}',
+        'Stop': '${:.2f}',
+        'Target': '${:.2f}',
+        'R:R': '{:.1f}',
+    }
+    if col_label:
+        fmt[col_label] = '${:.2f}'
+    if gain_label:
+        fmt[gain_label] = '{:+.2f}%'
+    fmt_subset = [c for c in fmt if c in detail_cols]
+
+    styled_detail = (
+        filtered[detail_cols]
+        .style
+        .apply(_color_trade_row, axis=1)
+        .format(fmt, na_rep='N/A', subset=fmt_subset)
+    )
+    detail_height = min(600, 38 + len(filtered) * 35)
+    st.dataframe(styled_detail, use_container_width=True, hide_index=True, height=detail_height)
+
+    # TOTAL row displayed separately so sorting doesn't move it
+    styled_total = (
+        total_df
+        .style
+        .apply(_color_total_row, axis=1)
+        .format(fmt, na_rep='', subset=fmt_subset)
+    )
+    st.dataframe(styled_total, use_container_width=True, hide_index=True, height=38 + 35)
+
+    # Quick stats for this scan
+    if 'Gain%' in filtered.columns and len(filtered) > 0:
+        n_win = int((filtered['Gain%'] > 0).sum())
+        n_lose = int((filtered['Gain%'] < 0).sum())
+        avg_g = filtered['Gain%'].mean()
+        best_sym = filtered.iloc[0]['Symbol'] if len(filtered) > 0 else ''
+        best_g = filtered['Gain%'].max()
+        worst_sym = filtered.iloc[-1]['Symbol'] if len(filtered) > 0 else ''
+        worst_g = filtered['Gain%'].min()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Winners / Losers", f"{n_win} / {n_lose}")
+        c2.metric("Avg Gain", f"{avg_g:+.2f}%")
+        c3.metric("Best", f"{best_sym} {best_g:+.2f}%")
+        c4.metric("Worst", f"{worst_sym} {worst_g:+.2f}%")
 
     # Per-quality tier breakdown
     if 'Quality' in filtered.columns and 'Gain%' in filtered.columns and len(filtered) > 1:

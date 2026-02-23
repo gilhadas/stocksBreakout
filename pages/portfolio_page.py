@@ -13,6 +13,7 @@ def _get_portfolio():
     if 'portfolio_obj' not in st.session_state:
         from portfolio import Portfolio
         st.session_state['portfolio_obj'] = Portfolio()
+        st.session_state['prices_fetched_session'] = False  # refresh once per session
     return st.session_state['portfolio_obj']
 
 
@@ -47,12 +48,22 @@ def _color_pnl(val):
 def render_portfolio_page():
     portfolio = _get_portfolio()
 
+    # Auto-fetch prices once per session (on first load) if positions exist
+    if not st.session_state.get('prices_fetched_session', False):
+        if portfolio.positions_count > 0:
+            with st.spinner("Fetching current prices..."):
+                portfolio.update_prices()
+        # Ensure today's snapshot exists (needed for tomorrow's daily P&L)
+        portfolio.ensure_today_snapshot()
+        st.session_state['prices_fetched_session'] = True
+
     # ── Refresh / Snapshot buttons ──
     col_refresh, col_snap, _ = st.columns([1, 1, 4])
     with col_refresh:
         if st.button("Refresh Prices"):
             with st.spinner("Fetching prices..."):
                 portfolio.update_prices()
+                st.session_state['prices_fetched_session'] = True
                 st.toast("Prices updated")
                 st.rerun()
     with col_snap:
@@ -64,13 +75,21 @@ def render_portfolio_page():
     summary = portfolio.get_summary()
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
+    def _fmt_pnl(v):
+        if v is None:
+            return "N/A"
+        return f"${v:+,.0f}" if v != 0 else "$0"
+
     m1.metric("Total Value", f"${summary['total_value']:,.0f}",
               delta=f"${summary['total_pnl']:+,.0f}" if summary['total_pnl'] != 0 else None)
     m2.metric("Cash", f"${summary['cash']:,.0f}")
     m3.metric("Market Value", f"${summary['market_value']:,.0f}")
-    m4.metric("Daily P&L", f"${summary['daily_pnl']:+,.0f}" if summary['daily_pnl'] else "$0")
-    m5.metric("WTD P&L", f"${summary['wtd_pnl']:+,.0f}" if summary['wtd_pnl'] else "$0")
-    m6.metric("YTD P&L", f"${summary['ytd_pnl']:+,.0f}" if summary['ytd_pnl'] else "$0")
+    m4.metric("Daily P&L",  _fmt_pnl(summary['daily_pnl']),
+              help="Change vs yesterday's snapshot. Requires daily snapshots.")
+    m5.metric("WTD P&L",   _fmt_pnl(summary['wtd_pnl']),
+              help="Change since Monday's snapshot.")
+    m6.metric("YTD P&L",   _fmt_pnl(summary['ytd_pnl']),
+              help="Change since first snapshot of the year.")
 
     st.divider()
 
@@ -80,24 +99,55 @@ def render_portfolio_page():
         st.subheader(f"Open Positions ({len(positions)})")
 
         rows = []
+        today = datetime.now(tz=None).date()
         for p in positions:
             change_pct = ((p['current_price'] - p['entry_price']) / p['entry_price']) * 100
+            entry_date = p.get('entry_date', '')
+            hold_days = None
+            if entry_date:
+                try:
+                    hold_days = (today - datetime.strptime(entry_date, '%Y-%m-%d').date()).days
+                except ValueError:
+                    pass
             rows.append({
                 'Symbol': p['symbol'],
+                'Date': entry_date,
+                'Days': hold_days,
                 'Mode': p.get('mode', ''),
                 'Shares': p['shares'],
-                'Entry': f"${p['entry_price']:.2f}",
-                'Current': f"${p['current_price']:.2f}",
+                'Entry $': f"${p['entry_price']:.2f}",
+                'Current $': f"${p['current_price']:.2f}",
                 'Change%': round(change_pct, 1),
-                'P&L': round(p['unrealized_pnl'], 0),
+                'P&L $': round(p.get('unrealized_pnl', 0), 0),
                 'Quality': p['quality'],
                 'Stop': f"${p['stop']:.2f}",
                 'Target': f"${p['target']:.2f}",
                 'Sector': p.get('sector', ''),
             })
 
+        # ── Total row ──
+        total_market = sum(p['current_price'] * p['shares'] for p in positions)
+        total_cost   = sum(p.get('cost_basis', p['entry_price'] * p['shares']) for p in positions)
+        total_pnl    = sum(p.get('unrealized_pnl', 0) for p in positions)
+        total_pnl_pct = ((total_market - total_cost) / total_cost * 100) if total_cost > 0 else 0
+        rows.append({
+            'Symbol': 'TOTAL',
+            'Date': '',
+            'Days': None,
+            'Mode': '',
+            'Shares': None,
+            'Entry $': f"${total_cost:,.0f}",
+            'Current $': f"${total_market:,.0f}",
+            'Change%': round(total_pnl_pct, 1),
+            'P&L $': round(total_pnl, 0),
+            'Quality': '',
+            'Stop': '',
+            'Target': '',
+            'Sector': '',
+        })
+
         df_pos = pd.DataFrame(rows)
-        pnl_cols = [c for c in ['Change%', 'P&L'] if c in df_pos.columns]
+        pnl_cols = [c for c in ['Change%', 'P&L $'] if c in df_pos.columns]
         styled = df_pos.style.applymap(_color_pnl, subset=pnl_cols)
         st.dataframe(styled, use_container_width=True, hide_index=True)
     else:
