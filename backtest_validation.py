@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-V6 Breakout Validation: Multi-Period Market Regime Testing
+V8 Breakout Validation: Multi-Period Market Regime Testing
 ------------------------------------------------------------
-Tests all strategy versions (V1 through V6X) across different market regimes:
+Tests all strategy versions (V1 through V8X) across different market regimes:
 
   - BEARISH: 2022-01-01 to 2022-12-31  (SPY ~-19%)
   - BULLISH: 2023-01-01 to 2024-06-30  (SPY ~+40%)
   - MIXED:   2024-01-01 to 2025-12-31  (primary test period)
 
 Uses single-pass scanning (V1/V2/V5X variants) consistent with enhanced_backtest.py.
-Includes V6 scoring: 23 pattern detectors with volume confirmation, overextension filter,
-52-week high proximity, RSI divergence, sector momentum, GOLD tier.
+Includes V8 scoring: Minervini Stage 2 proportional scoring, V7 momentum surge,
+23 pattern detectors with volume confirmation, overextension filter.
 """
+import argparse
 import asyncio
 import pandas as pd
 import numpy as np
@@ -33,10 +34,30 @@ from yfinance_adapter import YFinanceAdapter
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-# ── Symbol loading (reused from enhanced_backtest) ──────────────────────────
+# ── CLI args ─────────────────────────────────────────────────────────────────
 
-def load_symbols():
-    for path in ['input/watchlist3.txt', 'input/watchlist2.txt', 'watchlist.txt']:
+def parse_args():
+    p = argparse.ArgumentParser(description='V8 Breakout Validation: Multi-Period Regime Testing')
+    p.add_argument('--watchlist', default=None, help='Watchlist file path')
+    p.add_argument('--capital', type=int, default=100_000, help='Initial capital')
+    p.add_argument('--modes', default='swing,longterm', help='Scan modes (default: swing,longterm)')
+    p.add_argument('--limit', type=int, default=0, help='Cap symbol count (0 = no cap)')
+    p.add_argument('--minervini-threshold', type=int, default=7,
+                   help='Min MinerviniScore for V8/V8X pool (default: 7)')
+    p.add_argument('--versions', default='all',
+                   help='Comma-separated versions to compare, e.g. v1,v6x,v8,v8x (default: all)')
+    return p.parse_args()
+
+
+# ── Symbol loading ────────────────────────────────────────────────────────────
+
+def load_symbols(watchlist_path=None, limit=0):
+    search_paths = [watchlist_path] if watchlist_path else [
+        'input/watchlist3.txt', 'input/watchlist2.txt', 'watchlist.txt'
+    ]
+    for path in search_paths:
+        if path is None:
+            continue
         try:
             with open(path, 'r') as f:
                 content = f.read()
@@ -47,8 +68,11 @@ def load_symbols():
                     continue
                 if ':' in s:
                     s = s.split(':')[1]
-                symbols.append(s)
-            symbols = sorted(list(set(symbols)))[:100]
+                if s:
+                    symbols.append(s)
+            symbols = sorted(list(set(symbols)))
+            if limit > 0:
+                symbols = symbols[:limit]
             if len(symbols) > 10:
                 print(f"  Loaded {len(symbols)} symbols from {path}")
                 return symbols
@@ -145,6 +169,8 @@ def run_all_scans(historical, start_date, end_date, modes=None):
             'price': sig['Price'], 'entry_price': sig['Price'],
             'stop_loss': sig['Stop'], 'take_profit': sig['Target'],
             'quality': sig['Quality'], 'mode': mode_name, 'type': sig_type,
+            'minervini_score': sig.get('MinerviniScore', 0),   # V8: 0-8
+            'is_momentum': sig.get('Type') == 'Momentum',      # V7
         }
         if sig_type == 'BREAKOUT':
             base.update({
@@ -340,13 +366,17 @@ def print_results_table(period_name, results_list, spy_report, initial_capital):
 
 # ── Run one period ──────────────────────────────────────────────────────────
 
-def run_period(period_name, start_date, end_date, symbols, initial_capital=100000):
+def run_period(period_name, start_date, end_date, symbols, initial_capital=100000,
+               scan_modes=None, m_thresh=7, requested_versions='all'):
+    if scan_modes is None:
+        scan_modes = ['swing', 'longterm']
+
     print(f"\n\n{'#' * 130}")
     print(f"#  {period_name}: {start_date} to {end_date}")
     print(f"{'#' * 130}")
 
-    # Fetch data
-    print("\n  Fetching historical data...")
+    # Fetch data (disk-cached — fast on repeat runs)
+    print("\n  Fetching historical data (disk-cached)...")
     historical, end_prices = fetch_all_data(symbols, start_date, end_date)
 
     if len(historical) < 5:
@@ -358,23 +388,31 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
                                           initial_capital)
 
     # Single-pass scan — all 3 variants (V1/V2/V5X) in one loop
-    print("\n  Scanning signals (single-pass: V1 / V2-V6 / V5X-V6X)...")
-    all_scan_results = run_all_scans(historical, start_date, end_date,
-                                      modes=['swing', 'longterm'])
+    print(f"\n  Scanning signals (single-pass: V1 / V2-V6 / V5X-V6X / V7 / V8 / V8X)...")
+    all_scan_results = run_all_scans(historical, start_date, end_date, modes=scan_modes)
 
     v1_signals  = all_scan_results['v1']
     v2_signals  = all_scan_results['v2']
     v5x_signals = all_scan_results['v5x']
 
-    # Aliases — V5/V6 reuse v2 signals, V5X/V6X reuse v5x signals
-    v5_signals = v2_signals
-    v4_signals = v5x_signals
+    v5_signals = v2_signals   # V5/V6 reuse v2 base
+
+    # V7: momentum surge only
+    v7_signals = [s for s in v2_signals if s.get('is_momentum')]
+    # V8: Minervini ≥ threshold on V2 base
+    v8_signals  = [s for s in v2_signals  if s.get('minervini_score', 0) >= m_thresh]
+    # V8X: Minervini ≥ threshold + overextension filter
+    v8x_signals = [s for s in v5x_signals if s.get('minervini_score', 0) >= m_thresh]
+
+    print(f"  [V7]  Momentum surge: {len(v7_signals)}  "
+          f"[V8]  Minervini≥{m_thresh}: {len(v8_signals)}  "
+          f"[V8X] Minervini≥{m_thresh}+overext: {len(v8x_signals)}")
 
     if not v1_signals and not v2_signals:
         print("\n  No signals generated. Skipping period.")
         return None
 
-    # Define configs — V1 through V6X
+    # Define configs — V1 through V8X
     configs = [
         # V1 baseline
         {
@@ -390,7 +428,7 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
             'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
         },
-        # V6 configs (V5 + 23 patterns with volume confirmation scoring)
+        # V6 (V5 + 23 patterns with volume confirmation scoring)
         {
             'name': 'V6-A) HIGH+, 10% cap',
             'signals': v5_signals,
@@ -403,7 +441,7 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
             'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
         },
-        # V6X configs: V6 + overextension filter (recommended)
+        # V6X: V6 + overextension filter (previous recommended)
         {
             'name': 'V6X-A) HIGH+, overext+10% cap',
             'signals': v5x_signals,
@@ -416,7 +454,7 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
             'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
         },
-        # SPY hedge variants
+        # V6X SPY hedge variants
         {
             'name': 'V6X-C) HIGH+, 30% SPY hedge',
             'signals': v5x_signals,
@@ -424,14 +462,54 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
             'pos_pct': 0.10, 'risk_pct': 0.02,
             'spy_hedge': True, 'spy_alloc': 0.30,
         },
+        # V7: momentum surge signals only
         {
-            'name': 'V6-D) PREMIUM+, 40% SPY hedge',
-            'signals': v5_signals,
+            'name': 'V7) Momentum-surge, HIGH+',
+            'signals': v7_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+        },
+        # V8: Minervini Stage 2 filter on V2 base
+        {
+            'name': f'V8-A) Minervini≥{m_thresh}, HIGH+',
+            'signals': v8_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+        },
+        {
+            'name': f'V8-B) Minervini≥{m_thresh}, PREMIUM+',
+            'signals': v8_signals,
             'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
-            'spy_hedge': True, 'spy_alloc': 0.40,
+        },
+        # V8X: Minervini Stage 2 + overextension filter (most selective)
+        {
+            'name': f'V8X-A) Minervini≥{m_thresh}+overext, HIGH+',
+            'signals': v8x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+        },
+        {
+            'name': f'V8X-B) Minervini≥{m_thresh}+overext, PREMIUM+',
+            'signals': v8x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
         },
     ]
+
+    # Filter by --versions if specified
+    if requested_versions.lower() != 'all':
+        requested = sorted(
+            [v.strip().upper() for v in requested_versions.split(',')],
+            key=len, reverse=True,
+        )
+        def _version_match(name):
+            nu = name.upper()
+            for v in requested:
+                if nu.startswith(v + ')') or nu.startswith(v + '-'):
+                    return True
+            return False
+        configs = [c for c in configs if _version_match(c['name'])]
 
     results_list = []
     for cfg in configs:
@@ -466,22 +544,22 @@ def run_period(period_name, start_date, end_date, symbols, initial_capital=10000
 
 # ── Cross-period comparison ─────────────────────────────────────────────────
 
-def print_cross_period_summary(all_periods):
+def print_cross_period_summary(all_periods, m_thresh=7):
     print(f"\n\n{'=' * 130}")
-    print("CROSS-PERIOD SUMMARY: V6 Breakout Strategy (23 patterns + volume confirmation)")
+    print("CROSS-PERIOD SUMMARY: V8 Breakout Strategy — Bear / Bull / Mixed")
     print(f"{'=' * 130}")
 
-    # For each config name, gather returns across periods
-    config_names_ordered = [
-        'V1) HIGH+, legacy momentum',
-        'V2) HIGH+, composite momentum',
-        'V6-A) HIGH+, 10% cap',
-        'V6-B) PREMIUM+, 10% cap',
-        'V6X-A) HIGH+, overext+10% cap',
-        'V6X-B) PREMIUM+, overext+10% cap',
-        'V6X-C) HIGH+, 30% SPY hedge',
-        'V6-D) PREMIUM+, 40% SPY hedge',
-    ]
+    # Gather all unique config names from actual results (order preserved)
+    seen = set()
+    config_names_ordered = []
+    for p in all_periods:
+        if not p:
+            continue
+        for r in p.get('results', []):
+            name = r['config_name']
+            if name not in seen:
+                seen.add(name)
+                config_names_ordered.append(name)
 
     period_names = [p['period'] for p in all_periods if p]
 
@@ -613,31 +691,43 @@ def print_cross_period_summary(all_periods):
 # ── Main ────────────────────────────────────────────────────────────────────
 
 async def main():
-    print("=" * 130)
-    print("V6 BREAKOUT VALIDATION: Multi-Period Market Regime Testing")
-    print("=" * 130)
+    args = parse_args()
+    scan_modes = [m.strip() for m in args.modes.split(',')]
+    m_thresh   = args.minervini_threshold
 
-    initial_capital = 100000
+    print("=" * 130)
+    print("V8 BREAKOUT VALIDATION: Multi-Period Market Regime Testing")
+    print("=" * 130)
+    print(f"  Modes: {', '.join(scan_modes)}  |  Minervini threshold: {m_thresh}"
+          f"  |  Versions: {args.versions}")
+    if args.watchlist:
+        print(f"  Watchlist: {args.watchlist}")
 
-    # Load symbols once
+    # Load symbols once (shared across all periods — data fetched per period separately)
     print("\nLoading symbols...")
-    symbols = load_symbols()
+    symbols = load_symbols(watchlist_path=args.watchlist, limit=args.limit)
 
     # Define test periods
     periods = [
-        ("BEARISH 2022: SPY -19%", "2022-01-01", "2022-12-31"),
-        ("BULLISH 2023-24: SPY +40%", "2023-01-01", "2024-06-30"),
-        ("MIXED 2024-25: original test", "2024-01-01", "2025-12-31"),
+        ("BEARISH 2022: SPY ~-19%",     "2022-01-01", "2022-12-31"),
+        ("BULLISH 2023-H1-2024: SPY ~+40%", "2023-01-01", "2024-06-30"),
+        ("MIXED 2024-2025: primary test", "2024-01-01", "2025-12-31"),
     ]
 
     all_period_results = []
 
     for period_name, start, end in periods:
-        result = run_period(period_name, start, end, symbols, initial_capital)
+        result = run_period(
+            period_name, start, end, symbols,
+            initial_capital=args.capital,
+            scan_modes=scan_modes,
+            m_thresh=m_thresh,
+            requested_versions=args.versions,
+        )
         all_period_results.append(result)
 
     # Cross-period comparison
-    print_cross_period_summary(all_period_results)
+    print_cross_period_summary(all_period_results, m_thresh=m_thresh)
 
     # Save results
     output_dir = Path('scanner_output/backtests')
@@ -663,7 +753,7 @@ async def main():
                 'configs': [{k: safe_val(v) for k, v in r.items()} for r in p['results']],
             })
 
-    fname = output_dir / 'v6_validation_multi_period.json'
+    fname = output_dir / 'v8_validation_multi_period.json'
     with open(fname, 'w') as f:
         json.dump(save_data, f, indent=2)
     print(f"\nResults saved to {fname}")

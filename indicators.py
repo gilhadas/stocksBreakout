@@ -35,7 +35,8 @@ def calculate_vwap(df: pd.DataFrame, timeframe: str) -> pd.Series:
     if hasattr(df.index, 'date'):
         df['date_only'] = df.index.date
         vwap = df.groupby('date_only').apply(
-            lambda x: (x['typical_price'] * x['volume']).cumsum() / x['volume'].cumsum()
+            lambda x: (x['typical_price'] * x['volume']).cumsum() / x['volume'].cumsum(),
+            include_groups=False,
         ).reset_index(level=0, drop=True)
     else:
         # Single day or continuous

@@ -298,7 +298,7 @@ class BreakoutDetector:
         _minervini_conditions, minervini_score = calculate_minervini_template(
             df, high_52w=float(high_52w), low_52w=float(low_52w)
         )
-        minervini_pass = minervini_score >= 7   # strict: 7 or 8 of 8 conditions
+        minervini_pass = minervini_score >= 7   # kept for reference; checks uses proportional value
 
         # --- SIGNAL SCORING SYSTEM ---
         use_scoring = kwargs.get('use_scoring', True)
@@ -348,8 +348,8 @@ class BreakoutDetector:
             # V7: Momentum surge
             checks['momentum_surge'] = momentum_surge
 
-            # V8: Minervini Stage 2 Trend Template (7+ of 8 conditions)
-            checks['minervini_template'] = minervini_pass
+            # V8: Minervini Stage 2 Trend Template — proportional (0/8–8/8 → 0–15 pts)
+            checks['minervini_template'] = minervini_score / 8.0
 
             if mode_name != 'scalping':
                 checks['rs_ok'] = rs_ok
@@ -650,13 +650,17 @@ class BreakoutDetector:
     }
 
     def _calculate_signal_score(self, checks: dict) -> tuple:
-        """Calculate weighted signal score from boolean checks"""
+        """Calculate weighted signal score from boolean checks.
+        Float values in [0.0, 1.0] contribute proportionally (e.g., minervini_template).
+        """
         score = 0
         max_score = 0
         for key, passed in checks.items():
             weight = self.scoring_weights.get(key, 5)
             max_score += weight
-            if passed:
+            if isinstance(passed, float) and not isinstance(passed, bool):
+                score += weight * passed  # proportional: 6/8 → 0.75 × 15 = 11.25 pts
+            elif passed:
                 score += weight
 
         pct = (score / max_score * 100) if max_score > 0 else 0

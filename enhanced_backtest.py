@@ -11,6 +11,7 @@ Comprehensive multi-mode backtest with:
 - Scale-out partial exits
 - 10-day per-symbol cooldown to avoid over-trading
 """
+import argparse
 import asyncio
 import pandas as pd
 import numpy as np
@@ -32,9 +33,33 @@ logging.basicConfig(level=logging.WARNING, format='%(message)s')
 logger = logging.getLogger(__name__)
 
 
-def load_symbols():
-    """Load symbols from watchlist files"""
-    for path in ['input/watchlist3.txt', 'input/watchlist2.txt', 'watchlist.txt']:
+def parse_args():
+    """Parse CLI arguments for the backtest."""
+    p = argparse.ArgumentParser(description='Enhanced Backtest: strategy vs SPY')
+    p.add_argument('--watchlist', default=None,
+                   help='Watchlist file path (default: tries watchlist3/2.txt)')
+    p.add_argument('--start', default='2024-01-01', help='Start date YYYY-MM-DD')
+    p.add_argument('--end',   default='2025-12-31', help='End date   YYYY-MM-DD')
+    p.add_argument('--capital', type=int, default=100_000, help='Initial capital')
+    p.add_argument('--versions', default='all',
+                   help='Comma-separated versions to compare, e.g. v1,v6x,v7,v8,v8x  (default: all)')
+    p.add_argument('--modes', default='swing,longterm',
+                   help='Comma-separated scan modes  (default: swing,longterm)')
+    p.add_argument('--limit', type=int, default=0,
+                   help='Cap number of symbols loaded (0 = no cap, default: 0)')
+    p.add_argument('--minervini-threshold', type=int, default=7,
+                   help='Min MinerviniScore for V8/V8X signal pool (default: 7)')
+    return p.parse_args()
+
+
+def load_symbols(watchlist_path=None, limit=0):
+    """Load symbols from watchlist file (or fallback paths). No symbol cap by default."""
+    search_paths = [watchlist_path] if watchlist_path else [
+        'input/watchlist3.txt', 'input/watchlist2.txt', 'watchlist.txt'
+    ]
+    for path in search_paths:
+        if path is None:
+            continue
         try:
             with open(path, 'r') as f:
                 content = f.read()
@@ -45,8 +70,11 @@ def load_symbols():
                     continue
                 if ':' in s:
                     s = s.split(':')[1]
-                symbols.append(s)
-            symbols = sorted(list(set(symbols)))[:100]
+                if s:
+                    symbols.append(s)
+            symbols = sorted(list(set(symbols)))
+            if limit > 0:
+                symbols = symbols[:limit]
             if len(symbols) > 10:
                 print(f"  Loaded {len(symbols)} symbols from {path}")
                 return symbols
@@ -149,6 +177,8 @@ def run_all_scans(historical, start_date, end_date, modes=None):
             'price': sig['Price'], 'entry_price': sig['Price'],
             'stop_loss': sig['Stop'], 'take_profit': sig['Target'],
             'quality': sig['Quality'], 'mode': mode_name, 'type': sig_type,
+            'minervini_score': sig.get('MinerviniScore', 0),   # V8: 0-8
+            'is_momentum': sig.get('Type') == 'Momentum',      # V7
         }
         if sig_type == 'BREAKOUT':
             base.update({
@@ -435,24 +465,32 @@ def print_comparison(strategy, spy, initial_capital, start_date, end_date):
 
 
 async def main():
+    args = parse_args()
+
     print("=" * 80)
     print("ENHANCED BACKTEST: Strategy vs SPY")
     print("Multi-configuration comparison")
     print("=" * 80)
 
-    start_date = "2024-01-01"
-    end_date = "2025-12-31"
-    initial_capital = 100000
+    start_date     = args.start
+    end_date       = args.end
+    initial_capital = args.capital
+    scan_modes     = [m.strip() for m in args.modes.split(',')]
+    m_thresh       = args.minervini_threshold
 
-    print(f"\nPeriod: {start_date} to {end_date}")
-    print(f"Capital: ${initial_capital:,}")
+    print(f"\nPeriod:   {start_date} → {end_date}")
+    print(f"Capital:  ${initial_capital:,}")
+    print(f"Modes:    {', '.join(scan_modes)}")
+    print(f"Versions: {args.versions}")
+    if args.watchlist:
+        print(f"Watchlist: {args.watchlist}")
 
     # Load symbols
     print("\nLoading symbols...")
-    symbols = load_symbols()
+    symbols = load_symbols(watchlist_path=args.watchlist, limit=args.limit)
 
-    # Fetch data (once, reused across configs)
-    print("\nFetching historical data...")
+    # Fetch data (once, reused across configs; disk-cached in scanner_output/cache/)
+    print("\nFetching historical data (disk-cached — fast on repeat runs)...")
     historical, end_prices = fetch_all_data(symbols, start_date, end_date)
 
     if len(historical) < 5:
@@ -464,8 +502,7 @@ async def main():
     print("SCANNING FOR SIGNALS — Single pass: V1 / V2-V6 / V5X-V6X all at once")
     print("=" * 80)
 
-    all_scan_results = run_all_scans(historical, start_date, end_date,
-                                      modes=['swing', 'longterm'])
+    all_scan_results = run_all_scans(historical, start_date, end_date, modes=scan_modes)
 
     v1_signals  = all_scan_results['v1']
     v2_signals  = all_scan_results['v2']
@@ -475,6 +512,17 @@ async def main():
     v3_signals = v2_signals   # V3 = V2 with different filters
     v4_signals = v5x_signals  # V4 = V5X (overextension filter)
     v5_signals = v2_signals   # V5 baseline = V2
+
+    # V7 = momentum surge signals only (Type=Momentum in scanner)
+    v7_signals = [s for s in v2_signals if s.get('is_momentum')]
+    # V8 = Minervini Stage 2 filter on V2 base signals (score >= threshold)
+    v8_signals  = [s for s in v2_signals  if s.get('minervini_score', 0) >= m_thresh]
+    # V8X = V8 + overextension filter (V5X base)
+    v8x_signals = [s for s in v5x_signals if s.get('minervini_score', 0) >= m_thresh]
+
+    print(f"\n  [V7]  Momentum surge signals: {len(v7_signals)}")
+    print(f"  [V8]  Minervini≥{m_thresh} signals (V2 base): {len(v8_signals)}")
+    print(f"  [V8X] Minervini≥{m_thresh}+overextension:     {len(v8x_signals)}")
 
     if not v1_signals and not v2_signals:
         print("\nNo signals generated. Exiting.")
@@ -697,7 +745,81 @@ async def main():
             'pos_pct': 0.10, 'risk_pct': 0.02,
             'trailing': False,
         },
+        # V7 configs: Momentum surge signals only (gap/intraday ≥5% + VolRatio ≥3)
+        {
+            'name': 'V7-A) Momentum-surge, HIGH+',
+            'signals': v7_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V7-B) Momentum-surge, PREMIUM+, aggressive',
+            'signals': v7_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.15, 'risk_pct': 0.025,
+            'trailing': False,
+        },
+        # V8 configs: Minervini Stage 2 filter (proportional score contributes to quality)
+        {
+            'name': f'V8-A) Minervini≥{m_thresh}, HIGH+, 10% cap',
+            'signals': v8_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V8-B) Minervini≥{m_thresh}, PREMIUM+',
+            'signals': v8_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V8-C) Minervini≥{m_thresh}, HIGH+, aggressive',
+            'signals': v8_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.15, 'risk_pct': 0.025,
+            'trailing': False,
+        },
+        # V8X configs: Minervini Stage 2 + overextension filter
+        {
+            'name': f'V8X-A) Minervini≥{m_thresh}+overextension, HIGH+',
+            'signals': v8x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V8X-B) Minervini≥{m_thresh}+overextension, PREMIUM+',
+            'signals': v8x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V8X-C) Minervini≥{m_thresh}+overextension, aggressive',
+            'signals': v8x_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.15, 'risk_pct': 0.025,
+            'trailing': False,
+        },
     ]
+
+    # ── Filter by --versions (e.g. "v1,v6x,v8,v8x") ──────────────────────────
+    if args.versions.lower() != 'all':
+        requested = sorted(
+            [v.strip().upper() for v in args.versions.split(',')],
+            key=len, reverse=True,   # longer first so V8X matched before V8
+        )
+        def _version_match(name: str) -> bool:
+            nu = name.upper()
+            for v in requested:
+                if nu.startswith(v + ')') or nu.startswith(v + '-'):
+                    return True
+            return False
+        configs = [c for c in configs if _version_match(c['name'])]
+        print(f"\n  Running {len(configs)} configs for versions: {args.versions}")
 
     results_list = []
 
@@ -732,7 +854,7 @@ async def main():
 
     # Print comparison table
     print("\n\n" + "=" * 120)
-    print("V1 vs V2 vs V3 vs V4 vs V5 COMPARISON vs SPY")
+    print("V1 / V2 / V3–V6 / V6X / V7 / V8 / V8X  vs  SPY")
     print("=" * 120)
 
     spy_ret = spy_report['total_return'] if spy_report else 0
