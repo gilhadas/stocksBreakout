@@ -14,7 +14,7 @@ from st_files_connection import FilesConnection
 conn = st.connection('s3', type=FilesConnection)
 
 # Read a file from your bucket (e.g., a CSV)
-df = conn.read("my-streamlit-data-bucket/data.csv", input_format="csv", ttl=600)
+df = conn.read("stocks-breakout-scanner-s3-bucket/data.csv", input_format="csv", ttl=600)
 
 st.write("Data from S3:")
 st.dataframe(df)
