@@ -63,6 +63,7 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
     """
     if s3_path is None:
         s3_path = f"{S3_BUCKET}/{local_path}"
+        logger.info(f"CHECK: Accessing S3 now... {s3_path}")
 
     if _is_cloud():
         try:
