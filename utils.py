@@ -61,14 +61,17 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
         s3_path:    S3 key (e.g. "bucket/scanner_output/signals/file.csv")
                     Auto-generated from local_path if None.
     """
+  print("Attempting to connect to S3...
     if s3_path is None:
         s3_path = f"{S3_BUCKET}/{local_path}"
 
     if _is_cloud():
         try:
             conn = _s3_conn()
+                logger.debug("Successfully read file from S3: {s3_path}")
             return conn.read(s3_path, input_format="csv", ttl=600)
         except Exception as e:
+            logger.error(f"Failed to access S3: {e}")   
             logger.warning(f"S3 read failed for {s3_path}, falling back to local: {e}")
 
     if os.path.exists(local_path):
