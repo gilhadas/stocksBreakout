@@ -268,8 +268,7 @@ def render_signals_page():
         matching_files = _find_signal_files_range(start_date, end_date, trade_type)
 
     # Check which have reports and which don't
-    existing_reports = set(list_files(REPORTS_DIR, 'report_*.csv'))
-    files_without_reports = [f for f in matching_files if _get_report_name(f) not in existing_reports]
+    files_without_reports = [f for f in matching_files if not _get_report_path(f).exists()]
 
     with col_refresh:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -284,11 +283,11 @@ def render_signals_page():
         date_label = str(start_date) if start_date == end_date else f"{start_date} to {end_date}"
         st.warning(f"No signals found for **{date_label}** / **{trade_type}**.")
         # Show available dates hint
-        all_files = list_files(SIGNALS_DIR, 'signals_*.csv')
+        all_files = sorted(SIGNALS_DIR.glob('signals_*.csv'), reverse=True)
         if all_files:
             hint_dates = set()
-            for fname in all_files[:30]:
-                parts = fname.replace('.csv', '').split('_')
+            for f in all_files[:30]:
+                parts = f.stem.split('_')
                 for p in parts:
                     if len(p) == 8 and p.isdigit():
                         try:
@@ -304,18 +303,16 @@ def render_signals_page():
         from signal_tracker import track_signal_file
         from yfinance_adapter import YFinanceAdapter
         yf = YFinanceAdapter()
-        import os
-        os.makedirs(REPORTS_DIR, exist_ok=True)
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
         progress = st.progress(0, text="Processing signal files...")
-        for i, sig_fname in enumerate(files_without_reports):
+        for i, sig_file in enumerate(files_without_reports):
             progress.progress((i + 1) / len(files_without_reports),
-                              text=f"Processing {sig_fname}...")
-            sig_local = f"{SIGNALS_DIR}/{sig_fname}"
-            df = track_signal_file(Path(sig_local), yf)
+                              text=f"Processing {sig_file.name}...")
+            df = track_signal_file(sig_file, yf)
             if not df.empty:
-                report_local = f"{REPORTS_DIR}/{_get_report_name(sig_fname)}"
-                save_data(df, report_local)
+                report_path = _get_report_path(sig_file)
+                df.to_csv(report_path, index=False)
         progress.empty()
         st.toast(f"Processed {len(files_without_reports)} signal files")
         st.rerun()
@@ -323,13 +320,13 @@ def render_signals_page():
     # ── Build Performance by Scan table ──
     summary_rows = []
     files_with_reports = []
-    for sig_fname in matching_files:
-        report_name = _get_report_name(sig_fname)
-        if report_name in existing_reports:
-            row = _build_quality_filtered_summary(report_name, sig_fname, allowed_tiers)
+    for sig_file in matching_files:
+        report_path = _get_report_path(sig_file)
+        if report_path.exists():
+            row = _build_quality_filtered_summary(report_path, sig_file, allowed_tiers)
             if row:
                 summary_rows.append(row)
-                files_with_reports.append(sig_fname)
+                files_with_reports.append(sig_file)
 
     if not summary_rows:
         if files_without_reports:
@@ -456,12 +453,12 @@ def render_signals_page():
     st.subheader(f"Trade Details — {scan_label}")
 
     selected_file_name = sel_row['_file']
-    report_name = _get_report_name(selected_file_name)
-    report_local = f"{REPORTS_DIR}/{report_name}"
+    report_path = REPORTS_DIR / selected_file_name.replace('signals_', 'report_')
 
-    detail_df = load_data(report_local)
-    if detail_df is None:
-        st.error(f"Could not load report: {report_name}")
+    try:
+        detail_df = pd.read_csv(report_path)
+    except Exception:
+        st.error(f"Could not load report: {report_path.name}")
         return
 
     if detail_df.empty:
