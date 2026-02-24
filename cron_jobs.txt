@@ -12,26 +12,26 @@
 # 3. Replace HC_UUID_xxx placeholders below with your real UUIDs
 # 4. Install mobile app for push notifications on failures
 # Ping format: curl -fsS -m 10 --retry 3 https://hc-ping.com/UUID
+PROJECT_ROOT=/users/gilhadas/Documents/GitHub/stocksBreakout
+PYTHON_BIN=venv/bin/python3
 
 TZ=America/New_York
-# cron sets $HOME automatically — no hardcoded username needed
-LAUNCHER=$HOME/Documents/GitHub/stocksBreakout/run_scanner.sh
-#LAUNCHER=/mnt/c/Users/User/Desktop/Develop/stocksBreakout/run_scanner.sh  # WSL override
 HC_BASE=https://hc-ping.com
 
 # ============================================
 # LONG-TERM POSITION TRADING (Weekly scans)
 # ============================================
 
-#* * * * * $LAUNCHER "input/MAGS.txt" --mode swing --live --cron --notify --logName cron_swing 
-#* * * * * $LAUNCHER "input/MAGS.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify --logName cron_swing
-#* * * * * $LAUNCHER "input/MAGS.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify --logName cron_longterm
+#* * * * * cd $PROJECT_ROOT && $PYTHON_BIN  "input/MAGS.txt" --mode swing --live --cron --notify --logName cron_swing 
+#* * * * * cd $PROJECT_ROOT && $PYTHON_BIN  "input/MAGS.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify --logName cron_swing
+#* * * * * cd $PROJECT_ROOT && $PYTHON_BIN  "input/MAGS.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify
+* * * * * cd $PROJECT_ROOT && $PYTHON_BIN  "input/MAGS.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify
 
 # Every Monday at 9:00 AM - Phase 1: S&P 500 wide scan, export PREMIUM tickers
-0 9 * * 1  $LAUNCHER "input/ALL.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify --logName cron_longterm 
+0 9 * * 1  cd $PROJECT_ROOT && $PYTHON_BIN  "input/ALL.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify --logName cron_longterm 
 
 # Every Monday at 9:15 AM - Long-term exit evaluation
-15 9 * * 1  $LAUNCHER input/1_26_setups.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify --logName cron_longterm_exit
+15 9 * * 1  cd $PROJECT_ROOT && $PYTHON_BIN  input/1_26_setups.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify --logName cron_longterm_exit
 
 
 # ============================================
@@ -39,16 +39,16 @@ HC_BASE=https://hc-ping.com
 # ============================================
 
 # Every weekday at 9:35 AM (after market open) - Phase 1: S&P 500 wide scan, export PREMIUM tickers
-35 9 * * 1-5  $LAUNCHER "input/ALL.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify --logName cron_swing 
+35 9 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  "input/ALL.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify --logName cron_swing 
 
 # Every weekday at 3:45 PM (before market close) - Swing exit evaluation (mock positions)
-45 15 * * 1-5  $LAUNCHER input/1_26_setups.txt --mode swing --exit-file input/positions_swing_mock.csv --live --cron --notify --logName cron_swing_exit
+45 15 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  input/1_26_setups.txt --mode swing --exit-file input/positions_swing_mock.csv --live --cron --notify --logName cron_swing_exit
 
 # Every weekday at 4:30 PM (after market close) - Phase 2: Re-evaluate PREMIUM + exit check
-30 16 * * 1-5  $LAUNCHER input/premium_swing.txt --mode swing --bounce --exit-file input/positions_swing_mock.csv --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify --logName cron_swing_combined 
+30 16 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  input/premium_swing.txt --mode swing --bounce --exit-file input/positions_swing_mock.csv --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify --logName cron_swing_combined 
 
 # Every weekday at 7:30 PM - Phase 2: Evening PREMIUM re-evaluation
-30 19 * * 1-5  $LAUNCHER input/premium_swing.txt --mode swing --bounce --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify --logName cron_swing_evening
+30 19 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  input/premium_swing.txt --mode swing --bounce --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify --logName cron_swing_evening
 
 
 # ============================================
@@ -57,19 +57,19 @@ HC_BASE=https://hc-ping.com
 
 # Every weekday at 9:35 AM - Phase 1: S&P 500 wide scan, export PREMIUM + momentum-watch tickers
 # momentum_watch_daytrade.txt = PREMIUM/GOLD + HIGH-momentum + near-miss high-vol (for Phase 2 re-scans)
-35 9 * * 1-5  $LAUNCHER "input/ALL.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify --logName cron_daytrade_morning 
+35 9 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  "input/ALL.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify --logName cron_daytrade_morning 
 
 # Every weekday at 10:00 AM - Phase 2: Re-evaluate momentum-watch tickers (PREMIUM + HIGH-mom + near-miss)
-0 10 * * 1-5  $LAUNCHER input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_mid
+0 10 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_mid
 
 # Every weekday at 2:00 PM - Phase 2: Re-evaluate momentum-watch tickers
-0 14 * * 1-5  $LAUNCHER input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_afternoon 
+0 14 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_afternoon 
 
 # Every weekday at 3:30 PM - Day trade exit check (mock positions)
-30 15 * * 1-5  $LAUNCHER input/1_26_setups.txt --mode daytrade --exit-file input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_exit
+30 15 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  input/1_26_setups.txt --mode daytrade --exit-file input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_exit
 
 # Every weekday at 8:20 PM - Phase 4: Evening re-evaluate momentum-watch tickers
-20 20 * * 1-5  $LAUNCHER input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_evening
+20 20 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify --logName cron_daytrade_evening
 
 
 # ============================================
@@ -88,13 +88,13 @@ HC_BASE=https://hc-ping.com
 # Sends Discord alert on first status change to FADING or FAILED
 
 # Every weekday at 9:45 AM - First check after Phase 1 scan (watch list just populated)
-45 9 * * 1-5 $LAUNCHER monitor_watch.py --notify --logName cron_watch_monitor
+45 9 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN  monitor_watch.py --notify --logName cron_watch_monitor
 
 # Every 15 minutes from 10:00 AM to 3:45 PM - Continuous momentum validation
-*/15 10-15 * * 1-5 $LAUNCHER monitor_watch.py --notify --logName cron_watch_monitor
+*/15 10-15 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN  monitor_watch.py --notify --logName cron_watch_monitor
 
 # Every weekday at 4:00 PM - Final check at market close
-0 16 * * 1-5 $LAUNCHER monitor_watch.py --notify --logName cron_watch_monitor
+0 16 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN  monitor_watch.py --notify --logName cron_watch_monitor
 
 
 # ============================================
@@ -107,13 +107,13 @@ HC_BASE=https://hc-ping.com
 30 9 * * 1-5 cd /users/gilhadas/documents/github/stocksbreakout && mv scanner_output/.monitor_alerts.txt scanner_output/.monitor_alerts_$(date +\%Y\%m\%d).txt 2>/dev/null || true
 
 # Every weekday at 9:45 AM - First check after market open
-45 9 * * 1-5  $LAUNCHER "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify --logName cron_monitor 
+45 9 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify --logName cron_monitor 
 
 # Every 15 minutes from 10:00 AM to 3:45 PM - Continuous monitoring
-*/15 10-15 * * 1-5  $LAUNCHER "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify --logName cron_monitor 
+*/15 10-15 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify --logName cron_monitor 
 
 # Every weekday at 4:00 PM - Final check at market close
-0 16 * * 1-5  $LAUNCHER "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify --logName cron_monitor 
+0 16 * * 1-5  cd $PROJECT_ROOT && $PYTHON_BIN  "input/ALL.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify --logName cron_monitor 
 
 
 # ============================================
@@ -121,10 +121,10 @@ HC_BASE=https://hc-ping.com
 # ============================================
 
 # Every weekday at 8:30 PM - Validate signals from 3+ days ago (swing signals need time to resolve)
-30 20 * * 1-5 $LAUNCHER validate_signals.py validate-all --min-age-days 3 --logName cron_validate 
+30 20 * * 1-5 cd $PROJECT_ROOT && $PYTHON_BIN  validate_signals.py validate-all --min-age-days 3 --logName cron_validate 
 
 # Every Sunday at 9:00 PM - Generate learning recommendations from accumulated outcomes
-0 21 * * 0 $LAUNCHER validate_signals.py learn --logName cron_learn 
+0 21 * * 0 cd $PROJECT_ROOT && $PYTHON_BIN  validate_signals.py learn --logName cron_learn 
 
 
 # ============================================
