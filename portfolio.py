@@ -18,19 +18,18 @@ _NY_TZ = ZoneInfo('America/New_York')
 import numpy as np
 
 from config import OUTPUT_DIR, PORTFOLIO, QUALITY_SIZING
+from utils import load_json, save_json, list_files
 
 logger = logging.getLogger(__name__)
 
-PORTFOLIO_DIR = Path(OUTPUT_DIR) / 'portfolio'
-SNAPSHOTS_DIR = PORTFOLIO_DIR / 'snapshots'
-PORTFOLIO_FILE = PORTFOLIO_DIR / 'portfolio.json'
+PORTFOLIO_DIR = str(Path(OUTPUT_DIR) / 'portfolio')
+SNAPSHOTS_DIR = f"{PORTFOLIO_DIR}/snapshots"
+PORTFOLIO_FILE = f"{PORTFOLIO_DIR}/portfolio.json"
 
 
-def _atomic_write(path: Path, data: dict):
-    """Write JSON atomically: write to .tmp then os.replace()."""
-    tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(data, indent=2, default=str))
-    os.replace(tmp, path)
+def _atomic_write(path: str, data: dict):
+    """Write JSON atomically: write to .tmp then os.replace() (local), or save_json (S3)."""
+    save_json(data, path)
 
 
 class Portfolio:
@@ -46,11 +45,12 @@ class Portfolio:
     """
 
     def __init__(self, capital: float = None):
-        PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
-        SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        os.makedirs(PORTFOLIO_DIR, exist_ok=True)
+        os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
 
-        if PORTFOLIO_FILE.exists():
-            self._data = json.loads(PORTFOLIO_FILE.read_text())
+        loaded = load_json(PORTFOLIO_FILE)
+        if loaded is not None:
+            self._data = loaded
         else:
             init_capital = capital or PORTFOLIO['initial_capital']
             self._data = {

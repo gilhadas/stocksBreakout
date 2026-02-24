@@ -7,9 +7,6 @@ import sys
 import os
 from pathlib import Path
 
-import streamlit as st
-from st_files_connection import FilesConnection
-
 
 # Ensure project root is on Python path
 PROJECT_ROOT = Path(__file__).parent

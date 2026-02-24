@@ -6,6 +6,8 @@ import asyncio
 from pathlib import Path
 from streamlit_lightweight_charts import renderLightweightCharts
 
+from utils import load_data, list_files
+
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
@@ -15,22 +17,23 @@ PROJECT_ROOT = Path(__file__).parent.parent
 
 def _get_watchlist_files():
     """Get available watchlist files from input/ directory."""
-    input_dir = PROJECT_ROOT / 'input'
-    if not input_dir.exists():
-        return {}
-    files = sorted(input_dir.glob('*.txt'))
-    return {f.stem: str(f) for f in files if f.stem != 'email_recipients'}
+    input_dir = str(PROJECT_ROOT / 'input')
+    names = list_files(input_dir, '*.txt')
+    return {n.replace('.txt', ''): f"{input_dir}/{n}"
+            for n in names if n != 'email_recipients.txt'}
 
 
 def _load_latest_signals():
     """Load the most recent signals CSV."""
-    signals_dir = PROJECT_ROOT / 'scanner_output' / 'signals'
-    if not signals_dir.exists():
-        return None
-    csvs = sorted(signals_dir.glob('signals_*.csv'), reverse=True)
+    signals_dir = str(PROJECT_ROOT / 'scanner_output' / 'signals')
+    csvs = list_files(signals_dir, 'signals_*.csv')
     if not csvs:
         return None
-    return pd.read_csv(csvs[0]), csvs[0].name
+    latest = csvs[0]  # list_files returns newest-first
+    df = load_data(f"{signals_dir}/{latest}")
+    if df is None:
+        return None
+    return df, latest
 
 
 def _run_async(coro):

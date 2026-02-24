@@ -2,21 +2,23 @@
 import streamlit as st
 from pathlib import Path
 
+from utils import load_text, save_text, list_files
+
 PROJECT_ROOT = Path(__file__).parent.parent
-INPUT_DIR = PROJECT_ROOT / 'input'
+INPUT_DIR = str(PROJECT_ROOT / 'input')
 
 
 def _get_watchlists():
-    """Return dict of {name: path} for all watchlist .txt files."""
-    if not INPUT_DIR.exists():
-        return {}
-    files = sorted(INPUT_DIR.glob('*.txt'))
-    return {f.stem: f for f in files if f.stem != 'email_recipients'}
+    """Return dict of {name: filename} for all watchlist .txt files."""
+    names = list_files(INPUT_DIR, '*.txt')
+    return {n.replace('.txt', ''): n
+            for n in names if n != 'email_recipients.txt'}
 
 
-def _read_watchlist(path):
+def _read_watchlist(filename):
     """Read watchlist file and return raw content."""
-    return path.read_text().strip()
+    content = load_text(f"{INPUT_DIR}/{filename}")
+    return content or ''
 
 
 def _parse_symbols(content):
@@ -48,10 +50,8 @@ def render_watchlist_page():
         key="wl_page_upload",
     )
     if uploaded:
-        INPUT_DIR.mkdir(exist_ok=True)
-        dest = INPUT_DIR / uploaded.name
         content = uploaded.getvalue().decode('utf-8')
-        dest.write_text(content)
+        save_text(content.strip(), f"{INPUT_DIR}/{uploaded.name}")
         symbols = _parse_symbols(content)
         st.success(f"Saved **{uploaded.name}** ({len(symbols)} symbols)")
         # Refresh list
@@ -77,15 +77,15 @@ def render_watchlist_page():
         if st.button("Create", type="primary", use_container_width=True):
             if new_name and new_symbols.strip():
                 clean_name = new_name.strip().replace(' ', '_')
-                dest = INPUT_DIR / f"{clean_name}.txt"
-                if dest.exists():
+                fname = f"{clean_name}.txt"
+                existing = set(list_files(INPUT_DIR, '*.txt'))
+                if fname in existing:
                     st.error(f"**{clean_name}** already exists. Use edit below.")
                 else:
-                    INPUT_DIR.mkdir(exist_ok=True)
-                    dest.write_text(new_symbols.strip())
+                    save_text(new_symbols.strip(), f"{INPUT_DIR}/{fname}")
                     symbols = _parse_symbols(new_symbols)
                     st.success(
-                        f"Created **{clean_name}.txt** ({len(symbols)} symbols)"
+                        f"Created **{fname}** ({len(symbols)} symbols)"
                     )
                     watchlists = _get_watchlists()
             else:
@@ -100,8 +100,8 @@ def render_watchlist_page():
         st.info("No watchlists found. Upload or create one above.")
         return
 
-    for name, path in watchlists.items():
-        content = _read_watchlist(path)
+    for name, filename in watchlists.items():
+        content = _read_watchlist(filename)
         symbols = _parse_symbols(content)
 
         with st.expander(f"**{name}** — {len(symbols)} symbols"):
@@ -128,7 +128,7 @@ def render_watchlist_page():
 
             with col_save:
                 if st.button("Save", key=f"save_{name}", use_container_width=True):
-                    path.write_text(edited.strip())
+                    save_text(edited.strip(), f"{INPUT_DIR}/{filename}")
                     new_symbols_list = _parse_symbols(edited)
                     st.success(f"Saved ({len(new_symbols_list)} symbols)")
 
@@ -149,7 +149,8 @@ def render_watchlist_page():
                         type="primary",
                         use_container_width=True,
                     ):
-                        path.unlink()
+                        import os
+                        os.remove(f"{INPUT_DIR}/{filename}")
                         st.session_state.pop(f'confirm_del_{name}', None)
                         st.success(f"Deleted {name}.txt")
                         st.rerun()

@@ -1,29 +1,27 @@
 """Backtest Viewer — display backtest comparison results."""
 import streamlit as st
 import pandas as pd
-import json
 from pathlib import Path
 
+from utils import load_json, list_files
+
 PROJECT_ROOT = Path(__file__).parent.parent
-BACKTESTS_DIR = PROJECT_ROOT / 'scanner_output' / 'backtests'
+BACKTESTS_DIR = str(PROJECT_ROOT / 'scanner_output' / 'backtests')
 
 
-def _list_backtest_files() -> list[Path]:
-    """Return all backtest JSONs sorted newest-first (multi_config first, then others)."""
-    if not BACKTESTS_DIR.exists():
+def _list_backtest_files() -> list[str]:
+    """Return all backtest JSON filenames sorted newest-first (multi_config first, then others)."""
+    all_names = list_files(BACKTESTS_DIR, '*.json')
+    if not all_names:
         return []
-    multi = sorted(BACKTESTS_DIR.glob('multi_config_vs_spy_*.json'), reverse=True)
-    others = sorted(
-        [p for p in BACKTESTS_DIR.glob('*.json') if p not in multi],
-        reverse=True,
-    )
+    multi = sorted([n for n in all_names if n.startswith('multi_config_vs_spy_')], reverse=True)
+    others = sorted([n for n in all_names if not n.startswith('multi_config_vs_spy_')], reverse=True)
     return multi + others
 
 
-def _load_backtest(path: Path):
+def _load_backtest(filename: str):
     """Load a single backtest JSON file."""
-    with open(path) as f:
-        return json.load(f)
+    return load_json(f"{BACKTESTS_DIR}/{filename}")
 
 
 def _format_pct(val):
@@ -53,11 +51,12 @@ def render_backtest_page():
         st.code("python enhanced_backtest.py", language="bash")
         return
 
-    names = [p.name for p in all_files]
-    selected = st.selectbox("Backtest file", names, index=0)
-    chosen_path = BACKTESTS_DIR / selected
+    selected = st.selectbox("Backtest file", all_files, index=0)
 
-    data = _load_backtest(chosen_path)
+    data = _load_backtest(selected)
+    if data is None:
+        st.error(f"Could not load {selected}")
+        return
     filename = selected
 
     st.caption(f"Source: {filename}")

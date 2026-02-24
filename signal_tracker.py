@@ -22,12 +22,13 @@ from pathlib import Path
 import pandas as pd
 
 from config import OUTPUT_DIR
+from utils import load_data, save_data, list_files
 from yfinance_adapter import YFinanceAdapter
 
 logger = logging.getLogger(__name__)
 
-SIGNALS_DIR = Path(OUTPUT_DIR) / 'signals'
-REPORTS_DIR = Path(OUTPUT_DIR) / 'signal_reports'
+SIGNALS_DIR = str(Path(OUTPUT_DIR) / 'signals')
+REPORTS_DIR = str(Path(OUTPUT_DIR) / 'signal_reports')
 
 
 def _parse_date_from_filename(filename: str) -> str:
@@ -46,8 +47,8 @@ def track_signal_file(csv_path: Path, yf: YFinanceAdapter) -> pd.DataFrame:
     Returns:
         DataFrame with original columns + Current, Gain%, DaysSince, HitTarget, HitStop
     """
-    df = pd.read_csv(csv_path)
-    if df.empty or 'Symbol' not in df.columns:
+    df = load_data(str(csv_path))
+    if df is None or df.empty or 'Symbol' not in df.columns:
         return pd.DataFrame()
 
     # Parse signal date from filename
@@ -141,61 +142,66 @@ def track_all_signals(days: int = None, single_file: str = None) -> list:
     Returns:
         List of (source_csv, report_csv, summary_dict) tuples
     """
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
     yf = YFinanceAdapter()
 
     if single_file:
-        csv_files = [Path(single_file)]
+        csv_names = [Path(single_file).name]
+        csv_dir = str(Path(single_file).parent) or SIGNALS_DIR
     else:
-        csv_files = sorted(SIGNALS_DIR.glob('signals_*.csv'))
+        csv_names = sorted(list_files(SIGNALS_DIR, 'signals_*.csv'))
+        csv_dir = SIGNALS_DIR
 
     if days is not None:
         cutoff = (datetime.now() - timedelta(days=days)).date()
         filtered = []
-        for f in csv_files:
-            date_str = _parse_date_from_filename(f.name)
+        for fname in csv_names:
+            date_str = _parse_date_from_filename(fname)
             if date_str:
                 try:
                     fdate = datetime.strptime(date_str, '%Y%m%d').date()
                     if fdate >= cutoff:
-                        filtered.append(f)
+                        filtered.append(fname)
                 except ValueError:
                     pass
-        csv_files = filtered
+        csv_names = filtered
 
     results = []
-    for csv_path in csv_files:
-        report_name = csv_path.name.replace('signals_', 'report_')
-        report_path = REPORTS_DIR / report_name
+    for csv_name in csv_names:
+        csv_local = f"{csv_dir}/{csv_name}"
+        report_name = csv_name.replace('signals_', 'report_')
+        report_local = f"{REPORTS_DIR}/{report_name}"
 
         # Skip if report already exists and is newer than source
-        if report_path.exists() and report_path.stat().st_mtime > csv_path.stat().st_mtime:
+        if os.path.exists(report_local) and os.path.exists(csv_local) and \
+           os.path.getmtime(report_local) > os.path.getmtime(csv_local):
             # Still load for summary
             try:
-                df = pd.read_csv(report_path)
-                summary = _build_summary(df, csv_path.name)
-                results.append((str(csv_path), str(report_path), summary))
+                df = load_data(report_local)
+                if df is not None:
+                    summary = _build_summary(df, csv_name)
+                    results.append((csv_local, report_local, summary))
             except Exception:
                 pass
             continue
 
-        print(f"  Processing {csv_path.name}...", end='\r')
-        df = track_signal_file(csv_path, yf)
+        print(f"  Processing {csv_name}...", end='\r')
+        df = track_signal_file(Path(csv_local), yf)
         if df.empty:
             continue
 
-        df.to_csv(report_path, index=False)
+        save_data(df, report_local)
 
-        summary = _build_summary(df, csv_path.name)
-        results.append((str(csv_path), str(report_path), summary))
-        print(f"  {csv_path.name} -> {len(df)} signals, avg gain: {summary['avg_gain']:+.2f}%")
+        summary = _build_summary(df, csv_name)
+        results.append((csv_local, report_local, summary))
+        print(f"  {csv_name} -> {len(df)} signals, avg gain: {summary['avg_gain']:+.2f}%")
 
     # Save combined summary
     if results:
         summary_df = pd.DataFrame([r[2] for r in results])
-        summary_path = REPORTS_DIR / 'summary.csv'
-        summary_df.to_csv(summary_path, index=False)
-        print(f"\nSummary saved to {summary_path}")
+        summary_local = f"{REPORTS_DIR}/summary.csv"
+        save_data(summary_df, summary_local)
+        print(f"\nSummary saved to {summary_local}")
 
     return results
 
@@ -230,16 +236,17 @@ def _build_summary(df: pd.DataFrame, source_name: str) -> dict:
 
 def get_all_reports() -> pd.DataFrame:
     """Load all report CSVs and return combined DataFrame for Streamlit."""
-    reports = sorted(REPORTS_DIR.glob('report_*.csv'))
-    if not reports:
+    report_names = sorted(list_files(REPORTS_DIR, 'report_*.csv'))
+    if not report_names:
         return pd.DataFrame()
 
     frames = []
-    for rp in reports:
+    for rname in report_names:
         try:
-            df = pd.read_csv(rp)
-            df['_source'] = rp.stem
-            frames.append(df)
+            df = load_data(f"{REPORTS_DIR}/{rname}")
+            if df is not None:
+                df['_source'] = rname.replace('.csv', '')
+                frames.append(df)
         except Exception:
             continue
 
@@ -248,10 +255,8 @@ def get_all_reports() -> pd.DataFrame:
 
 def get_summary_table() -> pd.DataFrame:
     """Load the summary.csv for Streamlit display."""
-    summary_path = REPORTS_DIR / 'summary.csv'
-    if summary_path.exists():
-        return pd.read_csv(summary_path)
-    return pd.DataFrame()
+    df = load_data(f"{REPORTS_DIR}/summary.csv")
+    return df if df is not None else pd.DataFrame()
 
 
 if __name__ == '__main__':

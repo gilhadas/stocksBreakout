@@ -9,9 +9,11 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 
+from utils import load_data, save_data, list_files
+
 PROJECT_ROOT = Path(__file__).parent.parent
-SIGNALS_DIR = PROJECT_ROOT / 'scanner_output' / 'signals'
-REPORTS_DIR = PROJECT_ROOT / 'scanner_output' / 'signal_reports'
+SIGNALS_DIR = str(PROJECT_ROOT / 'scanner_output' / 'signals')
+REPORTS_DIR = str(PROJECT_ROOT / 'scanner_output' / 'signal_reports')
 
 QUALITY_FILTERS = {
     'Gold Only': ['GOLD'],
@@ -40,8 +42,8 @@ def _color_gain(val):
 def _get_available_dates():
     """Scan signal files and return sorted list of unique dates."""
     dates = set()
-    for f in SIGNALS_DIR.glob('signals_*.csv'):
-        parts = f.stem.split('_')
+    for fname in list_files(SIGNALS_DIR, 'signals_*.csv'):
+        parts = fname.replace('.csv', '').split('_')
         for p in parts:
             if len(p) == 8 and p.isdigit():
                 try:
@@ -58,14 +60,14 @@ def _find_signal_files(selected_date, trade_type):
         pattern = f'signals_*_{date_str}_*.csv'
     else:
         pattern = f'signals_{trade_type}_{date_str}_*.csv'
-    return sorted(SIGNALS_DIR.glob(pattern), reverse=True)
+    return list_files(SIGNALS_DIR, pattern)
 
 
 def _find_signal_files_range(start_date, end_date, trade_type):
     """Find signal CSV files matching a date range and trade type."""
     all_files = []
-    for f in SIGNALS_DIR.glob('signals_*.csv'):
-        parts = f.stem.split('_')
+    for fname in list_files(SIGNALS_DIR, 'signals_*.csv'):
+        parts = fname.replace('.csv', '').split('_')
         # Extract date from filename
         file_date = None
         for p in parts:
@@ -83,7 +85,7 @@ def _find_signal_files_range(start_date, end_date, trade_type):
             mode = parts[1] if len(parts) >= 2 else ''
             if mode != trade_type:
                 continue
-        all_files.append(f)
+        all_files.append(fname)
     return sorted(all_files, reverse=True)
 
 
@@ -151,19 +153,16 @@ def _compute_realized_gain(df):
     return df
 
 
-def _get_report_path(signal_file):
-    """Get the corresponding report path for a signal file."""
-    return REPORTS_DIR / signal_file.name.replace('signals_', 'report_')
+def _get_report_name(signal_filename):
+    """Get the corresponding report filename for a signal filename."""
+    return signal_filename.replace('signals_', 'report_')
 
 
-def _build_quality_filtered_summary(report_path, signal_file, allowed_tiers):
+def _build_quality_filtered_summary(report_name, signal_filename, allowed_tiers):
     """Load a report CSV, filter by quality tiers, compute summary stats."""
-    try:
-        df = pd.read_csv(report_path)
-    except Exception:
-        return None
-
-    if df.empty or 'Quality' not in df.columns:
+    report_local = f"{REPORTS_DIR}/{report_name}"
+    df = load_data(report_local)
+    if df is None or df.empty or 'Quality' not in df.columns:
         return None
 
     # Filter by quality
@@ -174,7 +173,7 @@ def _build_quality_filtered_summary(report_path, signal_file, allowed_tiers):
     n = len(valid)
 
     # Parse mode and time from filename
-    parts = signal_file.stem.split('_')  # signals_swing_20260217_093039
+    parts = signal_filename.replace('.csv', '').split('_')  # signals_swing_20260217_093039
     mode = parts[1] if len(parts) >= 2 else ''
     date_str = ''
     time_str = ''
@@ -199,7 +198,7 @@ def _build_quality_filtered_summary(report_path, signal_file, allowed_tiers):
             'Date': date_display, 'Time': time_display, 'Mode': mode.title(),
             'Signals': 0, 'Avg Gain': 0, 'Total Gain': 0, 'Win Rate': 0,
             'Winners': 0, 'Losers': 0, 'Best': 0, 'Worst': 0,
-            'Hit Target': 0, 'Hit Stop': 0, '_file': signal_file.name,
+            'Hit Target': 0, 'Hit Stop': 0, '_file': signal_filename,
         }
 
     winners = int((valid['Gain%'] > 0).sum())
@@ -219,7 +218,7 @@ def _build_quality_filtered_summary(report_path, signal_file, allowed_tiers):
         'Worst': round(valid['Gain%'].min(), 2),
         'Hit Target': int(valid['HitTarget'].sum()) if 'HitTarget' in valid.columns else 0,
         'Hit Stop': int(valid['HitStop'].sum()) if 'HitStop' in valid.columns else 0,
-        '_file': signal_file.name,
+        '_file': signal_filename,
     }
 
 
@@ -269,7 +268,8 @@ def render_signals_page():
         matching_files = _find_signal_files_range(start_date, end_date, trade_type)
 
     # Check which have reports and which don't
-    files_without_reports = [f for f in matching_files if not _get_report_path(f).exists()]
+    existing_reports = set(list_files(REPORTS_DIR, 'report_*.csv'))
+    files_without_reports = [f for f in matching_files if _get_report_name(f) not in existing_reports]
 
     with col_refresh:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -284,11 +284,11 @@ def render_signals_page():
         date_label = str(start_date) if start_date == end_date else f"{start_date} to {end_date}"
         st.warning(f"No signals found for **{date_label}** / **{trade_type}**.")
         # Show available dates hint
-        all_files = sorted(SIGNALS_DIR.glob('signals_*.csv'), reverse=True)
+        all_files = list_files(SIGNALS_DIR, 'signals_*.csv')
         if all_files:
             hint_dates = set()
-            for f in all_files[:30]:
-                parts = f.stem.split('_')
+            for fname in all_files[:30]:
+                parts = fname.replace('.csv', '').split('_')
                 for p in parts:
                     if len(p) == 8 and p.isdigit():
                         try:
@@ -304,16 +304,18 @@ def render_signals_page():
         from signal_tracker import track_signal_file
         from yfinance_adapter import YFinanceAdapter
         yf = YFinanceAdapter()
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        import os
+        os.makedirs(REPORTS_DIR, exist_ok=True)
 
         progress = st.progress(0, text="Processing signal files...")
-        for i, sig_file in enumerate(files_without_reports):
+        for i, sig_fname in enumerate(files_without_reports):
             progress.progress((i + 1) / len(files_without_reports),
-                              text=f"Processing {sig_file.name}...")
-            df = track_signal_file(sig_file, yf)
+                              text=f"Processing {sig_fname}...")
+            sig_local = f"{SIGNALS_DIR}/{sig_fname}"
+            df = track_signal_file(Path(sig_local), yf)
             if not df.empty:
-                report_path = _get_report_path(sig_file)
-                df.to_csv(report_path, index=False)
+                report_local = f"{REPORTS_DIR}/{_get_report_name(sig_fname)}"
+                save_data(df, report_local)
         progress.empty()
         st.toast(f"Processed {len(files_without_reports)} signal files")
         st.rerun()
@@ -321,13 +323,13 @@ def render_signals_page():
     # ── Build Performance by Scan table ──
     summary_rows = []
     files_with_reports = []
-    for sig_file in matching_files:
-        report_path = _get_report_path(sig_file)
-        if report_path.exists():
-            row = _build_quality_filtered_summary(report_path, sig_file, allowed_tiers)
+    for sig_fname in matching_files:
+        report_name = _get_report_name(sig_fname)
+        if report_name in existing_reports:
+            row = _build_quality_filtered_summary(report_name, sig_fname, allowed_tiers)
             if row:
                 summary_rows.append(row)
-                files_with_reports.append(sig_file)
+                files_with_reports.append(sig_fname)
 
     if not summary_rows:
         if files_without_reports:
@@ -454,12 +456,12 @@ def render_signals_page():
     st.subheader(f"Trade Details — {scan_label}")
 
     selected_file_name = sel_row['_file']
-    report_path = REPORTS_DIR / selected_file_name.replace('signals_', 'report_')
+    report_name = _get_report_name(selected_file_name)
+    report_local = f"{REPORTS_DIR}/{report_name}"
 
-    try:
-        detail_df = pd.read_csv(report_path)
-    except Exception:
-        st.error(f"Could not load report: {report_path.name}")
+    detail_df = load_data(report_local)
+    if detail_df is None:
+        st.error(f"Could not load report: {report_name}")
         return
 
     if detail_df.empty:

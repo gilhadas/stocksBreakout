@@ -1,22 +1,227 @@
 """
-Utility functions for file I/O and helpers
+Utility functions for file I/O and helpers.
+
+Provides hybrid local/S3 I/O for Streamlit pages:
+  - load_data(local_path, s3_path)   → pd.DataFrame (CSV)
+  - save_data(df, local_path, s3_path)
+  - load_text(local_path, s3_path)   → str
+  - save_text(content, local_path, s3_path)
+  - load_json(local_path, s3_path)   → dict/list
+  - save_json(data, local_path, s3_path)
+  - list_files(local_dir, s3_prefix, pattern) → list[str]
+
+All functions try S3 first (if st.secrets has "connections"),
+then fall back to local filesystem.
 """
 
 import csv
+import json
 import logging
+import os
 from datetime import datetime
-from typing import List, Dict
+from pathlib import Path
+from typing import List, Dict, Optional
+
+import pandas as pd
 from zoneinfo import ZoneInfo
 
 _NY_TZ = ZoneInfo('America/New_York')
 
 logger = logging.getLogger(__name__)
 
+# S3 bucket name (must match .streamlit/secrets.toml)
+S3_BUCKET = "stocks-breakout-scanner-s3-bucket"
+
+
+# ─── Hybrid I/O helpers (local + S3) ───────────────────────────────────────
+
+def _is_cloud() -> bool:
+    """Check if running in Streamlit Cloud with S3 secrets configured."""
+    try:
+        import streamlit as st
+        return "connections" in st.secrets
+    except Exception:
+        return False
+
+
+def _s3_conn():
+    """Get Streamlit S3 connection (lazy import)."""
+    import streamlit as st
+    from st_files_connection import FilesConnection
+    return st.connection('s3', type=FilesConnection)
+
+
+# ─── CSV ────────────────────────────────────────────────────────────────────
+
+def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
+    """Load CSV as DataFrame — tries S3 first, falls back to local.
+
+    Args:
+        local_path: Local filesystem path (relative or absolute)
+        s3_path:    S3 key (e.g. "bucket/scanner_output/signals/file.csv")
+                    Auto-generated from local_path if None.
+    """
+    if s3_path is None:
+        s3_path = f"{S3_BUCKET}/{local_path}"
+
+    if _is_cloud():
+        try:
+            conn = _s3_conn()
+            return conn.read(s3_path, input_format="csv", ttl=600)
+        except Exception as e:
+            logger.warning(f"S3 read failed for {s3_path}, falling back to local: {e}")
+
+    if os.path.exists(local_path):
+        return pd.read_csv(local_path)
+
+    logger.warning(f"File not found: {local_path}")
+    return None
+
+
+def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
+    """Save DataFrame as CSV — writes to S3 if cloud, else local.
+
+    Args:
+        df:         DataFrame to save
+        local_path: Local filesystem path
+        s3_path:    S3 key (auto-generated if None)
+    """
+    if s3_path is None:
+        s3_path = f"{S3_BUCKET}/{local_path}"
+
+    if _is_cloud():
+        try:
+            conn = _s3_conn()
+            with conn.open(s3_path, mode="w") as f:
+                df.to_csv(f, index=False)
+            return
+        except Exception as e:
+            logger.warning(f"S3 write failed for {s3_path}, falling back to local: {e}")
+
+    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
+    df.to_csv(local_path, index=False)
+
+
+# ─── Text (TXT, watchlists) ────────────────────────────────────────────────
+
+def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
+    """Load text file — tries S3 first, falls back to local."""
+    if s3_path is None:
+        s3_path = f"{S3_BUCKET}/{local_path}"
+
+    if _is_cloud():
+        try:
+            conn = _s3_conn()
+            return conn.read(s3_path, input_format="text", ttl=600)
+        except Exception as e:
+            logger.warning(f"S3 text read failed for {s3_path}: {e}")
+
+    if os.path.exists(local_path):
+        return Path(local_path).read_text().strip()
+
+    logger.warning(f"Text file not found: {local_path}")
+    return None
+
+
+def save_text(content: str, local_path: str, s3_path: str = None):
+    """Save text file — writes to S3 if cloud, else local."""
+    if s3_path is None:
+        s3_path = f"{S3_BUCKET}/{local_path}"
+
+    if _is_cloud():
+        try:
+            conn = _s3_conn()
+            with conn.open(s3_path, mode="w") as f:
+                f.write(content)
+            return
+        except Exception as e:
+            logger.warning(f"S3 text write failed for {s3_path}: {e}")
+
+    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
+    Path(local_path).write_text(content)
+
+
+# ─── JSON ───────────────────────────────────────────────────────────────────
+
+def load_json(local_path: str, s3_path: str = None):
+    """Load JSON file — tries S3 first, falls back to local."""
+    if s3_path is None:
+        s3_path = f"{S3_BUCKET}/{local_path}"
+
+    if _is_cloud():
+        try:
+            conn = _s3_conn()
+            text = conn.read(s3_path, input_format="text", ttl=600)
+            return json.loads(text)
+        except Exception as e:
+            logger.warning(f"S3 JSON read failed for {s3_path}: {e}")
+
+    if os.path.exists(local_path):
+        with open(local_path) as f:
+            return json.load(f)
+
+    logger.warning(f"JSON file not found: {local_path}")
+    return None
+
+
+def save_json(data, local_path: str, s3_path: str = None):
+    """Save JSON file — writes to S3 if cloud, else local."""
+    if s3_path is None:
+        s3_path = f"{S3_BUCKET}/{local_path}"
+
+    content = json.dumps(data, indent=2, default=str)
+
+    if _is_cloud():
+        try:
+            conn = _s3_conn()
+            with conn.open(s3_path, mode="w") as f:
+                f.write(content)
+            return
+        except Exception as e:
+            logger.warning(f"S3 JSON write failed for {s3_path}: {e}")
+
+    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
+    with open(local_path, 'w') as f:
+        f.write(content)
+
+
+# ─── File listing (glob) ───────────────────────────────────────────────────
+
+def list_files(local_dir: str, pattern: str = "*",
+               s3_prefix: str = None) -> List[str]:
+    """List files matching pattern — tries S3 first, falls back to local.
+
+    Returns list of filenames (not full paths) sorted newest-first.
+    """
+    if s3_prefix is None:
+        s3_prefix = f"{S3_BUCKET}/{local_dir}"
+
+    if _is_cloud():
+        try:
+            conn = _s3_conn()
+            # S3 list returns full keys; filter by pattern
+            import fnmatch
+            all_keys = conn.fs.ls(s3_prefix, detail=False)
+            names = [os.path.basename(k) for k in all_keys]
+            matched = [n for n in names if fnmatch.fnmatch(n, pattern)]
+            return sorted(matched, reverse=True)
+        except Exception as e:
+            logger.warning(f"S3 list failed for {s3_prefix}: {e}")
+
+    local = Path(local_dir)
+    if local.exists():
+        files = sorted(local.glob(pattern), reverse=True)
+        return [f.name for f in files]
+
+    return []
+
+
+# ─── Original utility functions (used by CLI scripts) ──────────────────────
 
 def get_watchlist_from_file(file_path: str) -> List[str]:
     """
     Load watchlist from file
-    
+
     Format:
         AAPL, MSFT, GOOGL
         ### Comments start with ###
@@ -29,23 +234,23 @@ def get_watchlist_from_file(file_path: str) -> List[str]:
                 line = line.strip()
                 if not line or line.startswith('###'):
                     continue
-                
+
                 for s in line.split(','):
                     s = s.strip()
                     if s and not s.startswith('###'):
                         # Extract symbol (handle "EXCHANGE:SYMBOL" format)
                         clean = s.split(':')[-1]
-                        
+
                         # Handle special cases
                         if clean == 'BRK.B':
                             clean = 'BRK B'
-                        
+
                         # Skip ETFs starting with XL
                         if not (clean.startswith('XL') and len(clean) <= 4):
                             watchlist.append(clean)
-        
+
         return list(set(watchlist))  # Remove duplicates
-    
+
     except Exception as e:
         logger.error(f"Failed to load watchlist from {file_path}: {e}")
         return []
@@ -54,7 +259,7 @@ def get_watchlist_from_file(file_path: str) -> List[str]:
 def get_positions_from_file(file_path: str) -> List[Dict]:
     """
     Load positions from CSV file
-    
+
     Required columns:
         symbol, mode, entry, stop, target, timeframe
     Optional columns:
@@ -82,12 +287,12 @@ def get_positions_from_file(file_path: str) -> List[Dict]:
                     })
                 except (KeyError, ValueError) as e:
                     logger.warning(f"Skip invalid row in {file_path}: {row} ({e})")
-    
+
     except FileNotFoundError:
         logger.error(f"Positions file not found: {file_path}")
     except Exception as e:
         logger.error(f"Failed to load positions from {file_path}: {e}")
-    
+
     return positions
 
 
@@ -101,7 +306,6 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
     - Creates file with headers if it doesn't exist
     - Returns number of new positions appended
     """
-    import os
     from config import MODES
 
     quality_rank = {'GOLD': 4, 'PREMIUM': 3, 'HIGH': 2, 'STANDARD': 1, 'REJECT': 0}
@@ -206,19 +410,19 @@ def update_position_stops(positions_file: str, price_map: Dict[str, float]) -> L
 def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
     """
     Classify market regime based on SPY performance and volatility
-    
+
     Returns: CHOPPY | EXPANSION | NORMAL
     """
     from config import REGIME_CONFIG
-    
+
     if abs(spy_perf) < REGIME_CONFIG['CHOPPY']['spy_perf_threshold'] and \
        spy_vol < REGIME_CONFIG['CHOPPY']['spy_vol_threshold']:
         return 'CHOPPY'
-    
+
     if abs(spy_perf) > REGIME_CONFIG['EXPANSION']['spy_perf_threshold'] and \
        spy_vol > REGIME_CONFIG['EXPANSION']['spy_vol_threshold']:
         return 'EXPANSION'
-    
+
     return 'NORMAL'
 
 
@@ -229,14 +433,14 @@ def setup_logging(log_file: str = None):
     from datetime import datetime
     from pathlib import Path
     from config import OUTPUT_DIR
-    
+
     # Ensure logs directory exists
     log_dir = Path(OUTPUT_DIR, 'logs')
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if log_file is None:
         log_file = log_dir / f'scanner_{datetime.now():%Y%m%d}.log'
-    
+
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s | %(levelname)s | %(message)s',
@@ -245,6 +449,6 @@ def setup_logging(log_file: str = None):
             logging.StreamHandler()
         ]
     )
-    
+
     # Reduce ib_insync verbosity
     logging.getLogger('ib_insync').setLevel(logging.WARNING)

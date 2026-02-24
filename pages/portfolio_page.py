@@ -7,6 +7,8 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
+from utils import load_data, list_files
+
 
 def _get_portfolio():
     """Get or create Portfolio instance (cached in session state)."""
@@ -218,25 +220,24 @@ def render_portfolio_page():
         if scan_results is None:
             # Try to load latest signals from CSV
             from pathlib import Path
-            signals_dir = Path(__file__).parent.parent / 'scanner_output' / 'signals'
+            signals_dir = str(Path(__file__).parent.parent / 'scanner_output' / 'signals')
             scan_results = []
 
-            if signals_dir.exists():
-                csvs = sorted(signals_dir.glob('signals_*.csv'), reverse=True)
-                # Search first 20 recent files for HIGH+ signals
-                for csv in csvs[:20]:
-                    try:
-                        scan_df = pd.read_csv(csv)
-                        if not scan_df.empty and 'Quality' in scan_df.columns:
-                            # Filter by quality (HIGH+ by default, like scan_page)
-                            scan_df = scan_df[scan_df['Quality'].isin(['GOLD', 'PREMIUM', 'HIGH'])]
+            csvs = list_files(signals_dir, 'signals_*.csv')
+            # Search first 20 recent files for HIGH+ signals
+            for csv_name in csvs[:20]:
+                try:
+                    scan_df = load_data(f"{signals_dir}/{csv_name}")
+                    if scan_df is not None and not scan_df.empty and 'Quality' in scan_df.columns:
+                        # Filter by quality (HIGH+ by default, like scan_page)
+                        scan_df = scan_df[scan_df['Quality'].isin(['GOLD', 'PREMIUM', 'HIGH'])]
 
-                            if not scan_df.empty:
-                                scan_results = scan_df.to_dict('records')
-                                st.session_state['scan_results'] = scan_results
-                                break  # Found signals, stop searching
-                    except Exception:
-                        continue  # Try next file
+                        if not scan_df.empty:
+                            scan_results = scan_df.to_dict('records')
+                            st.session_state['scan_results'] = scan_results
+                            break  # Found signals, stop searching
+                except Exception:
+                    continue  # Try next file
 
         if scan_results and len(scan_results) > 0:
             symbols = [r.get('Symbol', r.get('symbol', '')) for r in scan_results]
