@@ -10,14 +10,6 @@ from pathlib import Path
 import streamlit as st
 from st_files_connection import FilesConnection
 
-# Create the connection object
-conn = st.connection('s3', type=FilesConnection)
-
-# Read a file from your bucket (e.g., a CSV)
-df = conn.read("stocks-breakout-scanner-s3-bucket/data.csv", input_format="csv", ttl=600)
-
-st.write("Data from S3:")
-st.dataframe(df)
 
 # Ensure project root is on Python path
 PROJECT_ROOT = Path(__file__).parent
