@@ -13,15 +13,20 @@
 # 4. Install mobile app for push notifications on failures
 # Ping format: curl -fsS -m 10 --retry 3 https://hc-ping.com/UUID
 
+# ============================================
+# GLOBAL CONFIGURATION
+# ============================================
+# Ensure all jobs run on US Eastern Time [cite: 1]
 TZ=America/New_York
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
+# PROJECT PATHS
 #PROJECT_ROOT=/users/gilhadas/Documents/GitHub/stocksBreakout
 PROJECT_ROOT=/mnt/c/Users/User/Desktop/Develop/stocksBreakout
 PYTHON_BIN=venv/bin/python3
-
 HC_BASE=https://hc-ping.com
 
-#* * * * * cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/MAGS.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
 
 # ============================================
 # LONG-TERM POSITION TRADING (Weekly scans)
@@ -31,7 +36,7 @@ HC_BASE=https://hc-ping.com
 0 9 * * 1 cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1 && curl -fsS -m 10 --retry 3 $HC_BASE/HC_UUID_LONGTERM > /dev/null
 
 # Every Monday at 9:15 AM - Long-term exit evaluation
-15 9 * * 1 cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/1_26_setups.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
+15 9 * * 1 cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/ALL.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
 
 
 # ============================================
@@ -128,18 +133,18 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
-# MAINTENANCE TASKS
+# ============================================
+# MAINTENANCE TASKS (Fixed Paths)
 # ============================================
 
-# Every Sunday at 11:00 PM - Clean old logs (keep last 30 days)
-0 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output/logs -name "*.log" -mtime +30 -delete
+# Every Sunday at 11:00 PM - Clean old logs (using $PROJECT_ROOT) 
+0 23 * * 0 find $PROJECT_ROOT/scanner_output/logs -name "*.log" -mtime +30 -delete
 
-# Every Sunday at 11:05 PM - Archive old results (keep last 90 days)
-5 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output/signals -name "*.csv" -mtime +90 -delete
-5 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output/exits -name "*.csv" -mtime +90 -delete
-5 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output/rejections -name "*.csv" -mtime +90 -delete
+# Every Sunday at 11:05 PM - Archive old results 
+5 23 * * 0 find $PROJECT_ROOT/scanner_output/signals -name "*.csv" -mtime +90 -delete
+5 23 * * 0 find $PROJECT_ROOT/scanner_output/exits -name "*.csv" -mtime +90 -delete
+5 23 * * 0 find $PROJECT_ROOT/scanner_output/rejections -name "*.csv" -mtime +90 -delete
 
-# Every Sunday at 11:10 PM - Clean old monitor alert history archives (keep last 30 days)
-10 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output -name ".monitor_alerts_*.txt" -mtime +30 -delete
-10 23 * * 0 find /users/gilhadas/documents/github/stocksbreakout/scanner_output -name ".watch_monitor_*.json" -mtime +30 -delete
-
+# Every Sunday at 11:10 PM - Clean old monitor alert history 
+10 23 * * 0 find $PROJECT_ROOT/scanner_output -name ".monitor_alerts_*.txt" -mtime +30 -delete
+10 23 * * 0 find $PROJECT_ROOT/scanner_output -name ".watch_monitor_*.json" -mtime +30 -delete
