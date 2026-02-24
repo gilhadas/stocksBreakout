@@ -37,19 +37,26 @@ _PROJECT_ROOT = str(Path(__file__).parent)
 
 
 def _to_s3_key(local_path: str) -> str:
-    """Convert an absolute local path to an S3 key: bucket/relative_path.
+    """Convert a local path (absolute or relative) to an S3 key.
 
     Example:
         /Users/gil/.../stocksBreakout/scanner_output/signals/file.csv
         → stocks-breakout-scanner-s3-bucket/scanner_output/signals/file.csv
+
+        scanner_output/portfolio/portfolio.json  (relative, CWD = project root)
+        → stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/portfolio.json
     """
     abs_path = os.path.abspath(local_path)
-    if abs_path.startswith(_PROJECT_ROOT):
-        rel = abs_path[len(_PROJECT_ROOT):].lstrip(os.sep)
+    # Guard: ensure we're truly under the project root (not a sibling dir)
+    root_prefix = _PROJECT_ROOT + os.sep
+    if abs_path.startswith(root_prefix):
+        rel = abs_path[len(root_prefix):]
+    elif abs_path == _PROJECT_ROOT:
+        rel = ""
     else:
-        # Fallback: use the path as-is (already relative)
+        # Path is outside the project root — use relative portion as-is
         rel = local_path.lstrip(os.sep)
-    return f"{S3_BUCKET}/{rel}"
+    return f"{S3_BUCKET}/{rel}" if rel else S3_BUCKET
 
 
 # ─── Hybrid I/O helpers (local + S3) ───────────────────────────────────────
