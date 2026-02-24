@@ -143,6 +143,7 @@ class Portfolio:
             'unrealized_pnl': 0.0,
             'unrealized_pnl_pct': 0.0,
             'cost_basis': cost,
+            'tp_reached': False,
         }
 
         self._data['positions'][symbol] = position
@@ -530,6 +531,17 @@ class Portfolio:
         pos['target'] = new_target
         self._save()
         logger.info(f"Portfolio: {symbol} target updated: ${old_target:.2f} -> ${new_target:.2f}")
+        return pos
+
+    def mark_tp_reached(self, symbol: str) -> dict:
+        """Mark a position as having reached its take-profit target (V9 trailing activation)."""
+        if symbol not in self._data['positions']:
+            raise ValueError(f"{symbol} not in portfolio")
+        pos = self._data['positions'][symbol]
+        if not pos.get('tp_reached'):
+            pos['tp_reached'] = True
+            self._save()
+            logger.info(f"Portfolio: {symbol} TP reached — trailing stop activated")
         return pos
 
     def _fetch_single_price(self, symbol: str) -> Optional[float]:

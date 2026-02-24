@@ -19,15 +19,15 @@ class ExitEvaluator:
     def evaluate(self, df: pd.DataFrame, symbol: str, mode_name: str,
                 entry_price: float, stop_price: float, target_price: float,
                 timeframe: str, regime: str = "NORMAL",
-                days_held: int = 0) -> Dict[str, Any]:
+                days_held: int = 0, tp_reached: bool = False) -> Dict[str, Any]:
         """
         Evaluate exit conditions for a LONG position
-        
+
         Returns:
             Dict with Action: HOLD | TRAIL | EXIT_PARTIAL | EXIT_FULL
         """
         cfg = MODES[mode_name]
-        
+
         if len(df) < max(30, cfg.get('trend_period', 50)):
             return {
                 'Symbol': symbol,
@@ -38,23 +38,27 @@ class ExitEvaluator:
                 'UnrealizedR': 0,
                 'DaysHeld': days_held,
             }
-        
+
         # Calculate indicators
         df = calculate_all_indicators(
             df, cfg['trend_type'], cfg.get('trend_period'), timeframe
         )
         latest = df.iloc[-1]
-        
+
         price = float(latest['close'])
         trend_line = float(latest['Trend_Line'])
         atr = float(latest['ATR'])
         vwap_val = latest.get('vwap', np.nan)
-        
+
         unrealized_r = (price - entry_price) / max(entry_price - stop_price, 1e-6)
-        
+
+        # V9: Check if TP just reached — suggest trailing stop activation
+        if not tp_reached and price >= target_price and price > entry_price:
+            tp_reached = True
+
         # Collect exit signals (priority-ordered)
         exit_signals = []
-        
+
         # 1. CRITICAL: Hard stop hit
         if price <= stop_price:
             exit_signals.append((
@@ -62,22 +66,22 @@ class ExitEvaluator:
                 f'Stop hit: {price:.2f} <= {stop_price:.2f}',
                 100
             ))
-        
+
         # 2. CRITICAL: Trend broken
         trend_broken = price < trend_line
         vwap_broken = (
-            not pd.isna(vwap_val) and 
-            price < vwap_val and 
+            not pd.isna(vwap_val) and
+            price < vwap_val and
             ('min' in timeframe or 'hour' in timeframe)
         )
-        
+
         if trend_broken and (vwap_broken or mode_name == 'swing'):
             exit_signals.append((
                 'EXIT_FULL',
                 f'Trend broken: {price:.2f} < {trend_line:.2f}',
                 90
             ))
-        
+
         # 3. For swing: SMA150 support lost
         if mode_name == 'swing' and len(df) >= 150:
             sma150 = df['close'].rolling(150).mean().iloc[-1]
@@ -87,21 +91,22 @@ class ExitEvaluator:
                     f'Lost SMA150: {price:.2f} < {sma150:.2f}',
                     85
                 ))
-        
-        # 4. Reversal candle near target
-        reversal_signal = self._check_reversal_candle(
-            latest, target_price, atr, unrealized_r
-        )
-        if reversal_signal:
-            exit_signals.append(reversal_signal)
-        
+
+        # 4. Reversal candle near target (skip if TP reached — V9 lets winners run)
+        if not tp_reached:
+            reversal_signal = self._check_reversal_candle(
+                latest, target_price, atr, unrealized_r
+            )
+            if reversal_signal:
+                exit_signals.append(reversal_signal)
+
         # 5. Volume divergence
         vol_div_signal = self._check_volume_divergence(
             df, price, entry_price, unrealized_r
         )
         if vol_div_signal:
             exit_signals.append(vol_div_signal)
-        
+
         # 6. Choppy regime + no progress
         choppy_signal = self._check_choppy_conditions(
             df, price, regime, atr, cfg['lookback'], unrealized_r
@@ -119,36 +124,44 @@ class ExitEvaluator:
             ))
 
         # 7. Trail stop suggestion
-        trail_signal = self._check_trail_stop(
-            df, mode_name, stop_price, atr, unrealized_r
-        )
-        if trail_signal:
-            exit_signals.append(trail_signal)
-        
+        if tp_reached:
+            # V9: TP reached — suggest tighter trailing stop (2 ATR)
+            new_trail = round(price - 2.0 * atr, 2)
+            if new_trail > stop_price:
+                exit_signals.append((
+                    'TRAIL',
+                    f'TP reached — trail to {new_trail:.2f} (price - 2×ATR)',
+                    45
+                ))
+        else:
+            trail_signal = self._check_trail_stop(
+                df, mode_name, stop_price, atr, unrealized_r
+            )
+            if trail_signal:
+                exit_signals.append(trail_signal)
+
+        # Build result
+        result = {
+            'Symbol': symbol,
+            'Mode': mode_name,
+            'Price': round(price, 2),
+            'UnrealizedR': round(unrealized_r, 2),
+            'DaysHeld': days_held,
+            'TPReached': tp_reached,
+        }
+
         # Return highest priority signal
         if exit_signals:
             exit_signals.sort(key=lambda x: x[2], reverse=True)
             action, reason, _ = exit_signals[0]
-            return {
-                'Symbol': symbol,
-                'Mode': mode_name,
-                'Action': action,
-                'Reason': reason,
-                'Price': round(price, 2),
-                'UnrealizedR': round(unrealized_r, 2),
-                'DaysHeld': days_held,
-            }
+            result['Action'] = action
+            result['Reason'] = reason
+            return result
 
         # Default: HOLD
-        return {
-            'Symbol': symbol,
-            'Mode': mode_name,
-            'Action': 'HOLD',
-            'Reason': f'Above stop & trend (R={unrealized_r:.2f})',
-            'Price': round(price, 2),
-            'UnrealizedR': round(unrealized_r, 2),
-            'DaysHeld': days_held,
-        }
+        result['Action'] = 'HOLD'
+        result['Reason'] = f'Above stop & trend (R={unrealized_r:.2f})'
+        return result
     
     def _check_reversal_candle(self, latest, target_price: float, 
                                atr: float, unrealized_r: float):

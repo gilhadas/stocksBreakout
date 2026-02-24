@@ -124,7 +124,9 @@ def _fetch_prices_at_date(symbols, target_date):
 def _compute_realized_gain(df):
     """Recompute Gain% using Target/Stop price when hit, else Current.
 
-    Priority: HitTarget → use Target price, else HitStop → use Stop price.
+    V9 behavior: HitTarget means TP was touched but position may still be open
+    (trailing stop instead of hard exit). Use Current price if HitTarget but not HitStop.
+    Only use Target price if both HitTarget and HitStop are True (position actually closed).
     Updates df in-place and returns it.
     """
     if 'Price' not in df.columns or 'Gain%' not in df.columns:
@@ -136,12 +138,16 @@ def _compute_realized_gain(df):
         entry = float(entry)
         hit_target = row.get('HitTarget', False)
         hit_stop = row.get('HitStop', False)
-        if hit_target and pd.notna(row.get('Target')) and float(row['Target']) > 0:
-            realized = float(row['Target'])
-            df.at[idx, 'Gain%'] = round(((realized - entry) / entry) * 100, 2)
-        elif hit_stop and pd.notna(row.get('Stop')) and float(row['Stop']) > 0:
+        if hit_stop and pd.notna(row.get('Stop')) and float(row['Stop']) > 0:
+            # Position closed at stop (either original or trailing stop after TP)
             realized = float(row['Stop'])
             df.at[idx, 'Gain%'] = round(((realized - entry) / entry) * 100, 2)
+        elif hit_target and not hit_stop:
+            # V9: TP was touched but position still open — use current price
+            current = row.get('Current')
+            if pd.notna(current) and float(current) > 0:
+                realized = float(current)
+                df.at[idx, 'Gain%'] = round(((realized - entry) / entry) * 100, 2)
     return df
 
 

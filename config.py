@@ -26,9 +26,11 @@ PORTFOLIO = {
     'initial_capital': 100000,      # Starting capital in USD
     'max_position_pct': 0.10,       # 10% base, scaled by quality (PREMIUM=30%)
     'max_risk_pct': 0.02,           # 2% risk per trade (backtested optimal)
-    'use_trailing_stop': False,     # Trailing stops cut winners — backtesting shows 2x better returns without
-    'trailing_stop_atr_mult': 4.0,  # Optimized: Wide trail prevents shakeouts
-    'trailing_stop_activation_pct': 0.10, # Optimized: Only trail after +10% profit
+    'use_trailing_stop': False,     # Legacy trailing stops — disabled (V9 replaces this)
+    'trailing_stop_atr_mult': 4.0,  # Legacy: Wide trail prevents shakeouts
+    'trailing_stop_activation_pct': 0.10, # Legacy: Only trail after +10% profit
+    'tp_as_trail': True,            # V9: TP activates trailing stop instead of hard exit (+75.57%, -6.45% DD)
+    'tp_trail_atr_mult': 2.0,      # V9: 2.0 ATR trailing distance after TP hit
     'use_scoring_system': True,     # Use weighted scoring instead of all-or-nothing
     'use_pullback_entries': True,   # Enable pullback re-entry signals
     'max_concurrent_positions': 10, # Max open positions at once

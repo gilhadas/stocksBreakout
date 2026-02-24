@@ -508,7 +508,8 @@ class SimulationMode:
                  max_position_pct: float = 0.05, max_risk_pct: float = 0.01,
                  use_trailing_stop: bool = False, trailing_stop_atr_mult: float = 2.0,
                  trailing_stop_activation_pct: float = 0.0,
-                 spy_hedge_enabled: bool = False, spy_allocation_pct: float = 0.0):
+                 spy_hedge_enabled: bool = False, spy_allocation_pct: float = 0.0,
+                 tp_as_trail: bool = True, tp_trail_atr_mult: float = 2.0):
         """
         Args:
             start_date: YYYY-MM-DD
@@ -521,6 +522,8 @@ class SimulationMode:
             trailing_stop_activation_pct: Only activate trailing stop after this % profit (default 0.0)
             spy_hedge_enabled: Enable SPY hedge allocation (default False)
             spy_allocation_pct: Percentage of capital allocated to SPY (default 0.0)
+            tp_as_trail: V9 mode — when TP is hit, activate trailing stop instead of closing (default False)
+            tp_trail_atr_mult: ATR multiplier for trailing stop after TP hit (default 2.0)
         """
         self.start_date = pd.to_datetime(start_date)
         self.end_date = pd.to_datetime(end_date)
@@ -536,6 +539,9 @@ class SimulationMode:
         self.spy_allocation_pct = spy_allocation_pct
         self.spy_shares = 0
         self.spy_entry_price = 0.0
+        # V9: TP as trailing stop activation
+        self.tp_as_trail = tp_as_trail
+        self.tp_trail_atr_mult = tp_trail_atr_mult
     
     def run_simulation(self, signals: List[Dict], end_prices: Dict[str, float] = None,
                        historical_data: Dict[str, pd.DataFrame] = None):
@@ -614,8 +620,8 @@ class SimulationMode:
             if len(self.trader.open_positions) > 0:
                 self._check_exits(current_date)
             
-            # Check and update trailing stops if enabled
-            if self.use_trailing_stop and len(self.trader.open_positions) > 0:
+            # Check and update trailing stops if enabled (or if V9 tp_as_trail has TP-reached trades)
+            if (self.use_trailing_stop or self.tp_as_trail) and len(self.trader.open_positions) > 0:
                 self._update_trailing_stops(current_date)
             
             # Track equity
@@ -695,37 +701,56 @@ class SimulationMode:
                 self.trader.exit_trade(symbol, exit_price, 'Stop Loss')
                 continue
 
-            # Scale-out: partial exit at 1R profit
-            risk = trade.entry_price - trade.stop_loss
-            if risk > 0 and not getattr(trade, '_scaled_1r', False):
-                target_1r = trade.entry_price + risk
-                if current_high >= target_1r and trade.quantity >= 3:
-                    partial_qty = trade.quantity // 3
-                    trade.quantity -= partial_qty
-                    trade._scaled_qty = getattr(trade, '_scaled_qty', 0) + partial_qty
-                    pnl = (target_1r - trade.entry_price) * partial_qty
-                    trade.pnl += pnl
-                    self.trader.capital += target_1r * partial_qty
-                    trade._scaled_1r = True
-                    logger.debug(f"📊 Scale-out 1R: {symbol} sold {partial_qty} @ ${target_1r:.2f}")
+            # V9: TP activates trailing stop instead of closing
+            if self.tp_as_trail:
+                if current_high >= trade.take_profit and not getattr(trade, '_tp_reached', False):
+                    trade._tp_reached = True
+                    # Calculate ATR for trailing stop
+                    df_up = df[df.index <= current_date]
+                    if len(df_up) >= 14:
+                        df_atr = df_up.tail(14).copy()
+                        df_atr['h-l'] = df_atr['high'] - df_atr['low']
+                        df_atr['h-pc'] = abs(df_atr['high'] - df_atr['close'].shift(1))
+                        df_atr['l-pc'] = abs(df_atr['low'] - df_atr['close'].shift(1))
+                        df_atr['tr'] = df_atr[['h-l', 'h-pc', 'l-pc']].max(axis=1)
+                        atr = df_atr['tr'].mean()
+                        new_stop = current_close - (atr * self.tp_trail_atr_mult)
+                        if new_stop > trade.stop_loss:
+                            trade.stop_loss = new_stop
+                    logger.info(f"🎯 TP reached for {symbol} — trailing stop activated @ ${trade.stop_loss:.2f}")
+            else:
+                # Original behavior: scale-out + hard TP exit
+                # Scale-out: partial exit at 1R profit
+                risk = trade.entry_price - trade.stop_loss
+                if risk > 0 and not getattr(trade, '_scaled_1r', False):
+                    target_1r = trade.entry_price + risk
+                    if current_high >= target_1r and trade.quantity >= 3:
+                        partial_qty = trade.quantity // 3
+                        trade.quantity -= partial_qty
+                        trade._scaled_qty = getattr(trade, '_scaled_qty', 0) + partial_qty
+                        pnl = (target_1r - trade.entry_price) * partial_qty
+                        trade.pnl += pnl
+                        self.trader.capital += target_1r * partial_qty
+                        trade._scaled_1r = True
+                        logger.debug(f"📊 Scale-out 1R: {symbol} sold {partial_qty} @ ${target_1r:.2f}")
 
-            # Scale-out: partial exit at 2R profit
-            if risk > 0 and getattr(trade, '_scaled_1r', False) and not getattr(trade, '_scaled_2r', False):
-                target_2r = trade.entry_price + 2 * risk
-                if current_high >= target_2r and trade.quantity >= 2:
-                    partial_qty = trade.quantity // 2
-                    trade.quantity -= partial_qty
-                    trade._scaled_qty = getattr(trade, '_scaled_qty', 0) + partial_qty
-                    pnl = (target_2r - trade.entry_price) * partial_qty
-                    trade.pnl += pnl
-                    self.trader.capital += target_2r * partial_qty
-                    trade._scaled_2r = True
-                    logger.debug(f"📊 Scale-out 2R: {symbol} sold {partial_qty} @ ${target_2r:.2f}")
+                # Scale-out: partial exit at 2R profit
+                if risk > 0 and getattr(trade, '_scaled_1r', False) and not getattr(trade, '_scaled_2r', False):
+                    target_2r = trade.entry_price + 2 * risk
+                    if current_high >= target_2r and trade.quantity >= 2:
+                        partial_qty = trade.quantity // 2
+                        trade.quantity -= partial_qty
+                        trade._scaled_qty = getattr(trade, '_scaled_qty', 0) + partial_qty
+                        pnl = (target_2r - trade.entry_price) * partial_qty
+                        trade.pnl += pnl
+                        self.trader.capital += target_2r * partial_qty
+                        trade._scaled_2r = True
+                        logger.debug(f"📊 Scale-out 2R: {symbol} sold {partial_qty} @ ${target_2r:.2f}")
 
-            # Check if take profit was hit on remaining
-            if current_high >= trade.take_profit:
-                logger.info(f"🎯 Take profit hit for {symbol} @ ${trade.take_profit:.2f}")
-                self.trader.exit_trade(symbol, trade.take_profit, 'Take Profit')
+                # Check if take profit was hit on remaining
+                if current_high >= trade.take_profit:
+                    logger.info(f"🎯 Take profit hit for {symbol} @ ${trade.take_profit:.2f}")
+                    self.trader.exit_trade(symbol, trade.take_profit, 'Take Profit')
 
     def _update_trailing_stops(self, current_date: pd.Timestamp):
         """Update trailing stops based on current prices and ATR"""
@@ -753,11 +778,17 @@ class SimulationMode:
                 
             current_price = float(current_bar.iloc[-1]['close'])
             
-            # Check profit threshold activation
+            # Determine if trailing should activate
+            tp_reached = getattr(trade, '_tp_reached', False)
             profit_pct = (current_price - trade.entry_price) / trade.entry_price
-            
-            # Only update stop if profit condition met
-            if profit_pct >= self.trailing_stop_activation_pct:
+
+            # V9: trail if TP was reached; legacy: trail if profit threshold met
+            should_trail = (
+                (self.tp_as_trail and tp_reached) or
+                (not self.tp_as_trail and profit_pct >= self.trailing_stop_activation_pct)
+            )
+
+            if should_trail:
                 # Calculate ATR (14-period)
                 df_atr = df_up_to_date.tail(14).copy()
                 df_atr['h-l'] = df_atr['high'] - df_atr['low']
@@ -765,10 +796,13 @@ class SimulationMode:
                 df_atr['l-pc'] = abs(df_atr['low'] - df_atr['close'].shift(1))
                 df_atr['tr'] = df_atr[['h-l', 'h-pc', 'l-pc']].max(axis=1)
                 atr = df_atr['tr'].mean()
-                
+
+                # Use tp_trail_atr_mult for V9 TP-reached trades, else legacy mult
+                atr_mult = self.tp_trail_atr_mult if (self.tp_as_trail and tp_reached) else self.trailing_stop_atr_mult
+
                 # Calculate new trailing stop
-                new_stop = current_price - (atr * self.trailing_stop_atr_mult)
-                
+                new_stop = current_price - (atr * atr_mult)
+
                 # Only update if new stop is higher than current stop
                 if new_stop > trade.stop_loss:
                     old_stop = trade.stop_loss

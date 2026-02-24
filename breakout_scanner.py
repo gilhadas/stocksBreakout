@@ -14,6 +14,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
+import pandas as pd
+
 _NY_TZ = ZoneInfo('America/New_York')
 
 # Load .env file (cron doesn't inherit shell env vars like GMAIL_APP_PASSWORD)
@@ -421,7 +423,7 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
         else:
             price_map[symbol] = price
 
-    # Trail stops upward
+    # Trail stops upward (V9: activate trailing when TP reached)
     if from_portfolio:
         # Update stops in portfolio.json directly
         for pos in all_positions:
@@ -429,6 +431,33 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
             current_price = price_map.get(symbol)
             if current_price is None:
                 continue
+
+            # V9: Check if target reached — activate trailing stop
+            target = pos.get('target', 0)
+            if target > 0 and current_price >= target and not pos.get('tp_reached', False):
+                _portfolio.mark_tp_reached(symbol)
+                pos['tp_reached'] = True
+                # Compute ATR-based trailing stop (2.0 ATR)
+                try:
+                    from yfinance_adapter import YFinanceAdapter
+                    yf = YFinanceAdapter()
+                    hist = yf.get_historical_data(symbol, '1 day', lookback_bars=20)
+                    if hist is not None and len(hist) >= 14:
+                        h_l = hist['high'] - hist['low']
+                        h_pc = abs(hist['high'] - hist['close'].shift(1))
+                        l_pc = abs(hist['low'] - hist['close'].shift(1))
+                        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+                        atr = tr.tail(14).mean()
+                        new_stop = round(current_price - (atr * 2.0), 2)
+                        if new_stop > pos['stop']:
+                            logger.info(f"  🎯 {symbol} TP reached @ ${current_price:.2f} — trail stop: ${pos['stop']:.2f} → ${new_stop:.2f}")
+                            _portfolio.update_stop(symbol, new_stop)
+                            pos['stop'] = new_stop
+                        continue
+                except Exception as e:
+                    logger.debug(f"ATR calc failed for {symbol}: {e}")
+
+            # Standard trailing: 1% below current price
             new_trailing_stop = round(current_price * 0.99, 2)
             if new_trailing_stop > pos['stop']:
                 logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f})")

@@ -350,7 +350,7 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
 
 
 def run_simulation(signals, start_date, end_date, end_prices, historical,
-                   initial_capital=100000):
+                   initial_capital=100000, tp_as_trail=False, tp_trail_atr_mult=2.0):
     """Run simulation with adaptive sizing and scale-out"""
     if not signals:
         return None
@@ -362,6 +362,8 @@ def run_simulation(signals, start_date, end_date, end_prices, historical,
         max_position_pct=0.10,       # 10% base, scaled by quality (PREMIUM=30%)
         max_risk_pct=0.02,           # 2% risk per trade
         use_trailing_stop=False,     # Trailing stops cut winners too early
+        tp_as_trail=tp_as_trail,     # V9: TP activates trailing stop
+        tp_trail_atr_mult=tp_trail_atr_mult,
     )
 
     report = sim.run_simulation(signals, end_prices=end_prices,
@@ -884,6 +886,31 @@ async def main():
             'pos_pct': 0.15, 'risk_pct': 0.025,
             'trailing': False,
         },
+        # V9 configs: TP activates trailing stop instead of closing (no scale-outs)
+        {
+            'name': 'V9-A) V1+TP→Trail, HIGH+',
+            'signals': v1_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'tp_as_trail': True,
+        },
+        {
+            'name': f'V9-B) V8+TP→Trail, HIGH+',
+            'signals': v8_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'tp_as_trail': True,
+        },
+        {
+            'name': f'V9-C) V8+TP→Trail, PREMIUM+',
+            'signals': v8_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+            'tp_as_trail': True,
+        },
     ]
 
     # ── Filter by --versions (e.g. "v1,v6x,v8,v8x") ──────────────────────────
@@ -923,6 +950,8 @@ async def main():
             trailing_stop_activation_pct=cfg.get('trail_act', 0.10),
             spy_hedge_enabled=cfg.get('spy_hedge', False),
             spy_allocation_pct=cfg.get('spy_alloc', 0.0),
+            tp_as_trail=cfg.get('tp_as_trail', False),
+            tp_trail_atr_mult=cfg.get('tp_trail_atr', 2.0),
         )
 
         report = sim.run_simulation(filtered, end_prices=end_prices,
@@ -934,7 +963,7 @@ async def main():
 
     # Print comparison table
     print("\n\n" + "=" * 120)
-    print("V1 / V2 / V3–V6 / V6X / V7 / V8 / V8X  vs  SPY  vs  Minervini Screen")
+    print("V1 / V2 / V3–V6 / V6X / V7 / V8 / V8X / V9  vs  SPY  vs  Minervini Screen")
     print("=" * 120)
 
     spy_ret = spy_report['total_return'] if spy_report else 0
