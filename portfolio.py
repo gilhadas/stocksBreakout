@@ -279,7 +279,7 @@ class Portfolio:
             'positions_count': len(self._data['positions']),
         }
 
-        snap_file = SNAPSHOTS_DIR / f"snap_{snap['date']}.json"
+        snap_file = f"{SNAPSHOTS_DIR}/snap_{snap['date']}.json"
         _atomic_write(snap_file, snap)
         logger.info(f"Portfolio snapshot saved: ${snap['total_value']:,.2f}")
         return snap
@@ -333,22 +333,22 @@ class Portfolio:
 
         for i in range(10):
             check = target_date - timedelta(days=i)
-            snap_file = SNAPSHOTS_DIR / f"snap_{check.strftime('%Y-%m-%d')}.json"
-            if snap_file.exists():
+            snap_file = f"{SNAPSHOTS_DIR}/snap_{check.strftime('%Y-%m-%d')}.json"
+            snap = load_json(snap_file)
+            if snap is not None:
                 # Skip snapshots from on or before this portfolio was created
                 # (same-day snapshot is from the prior portfolio instance)
                 if created_date and check <= created_date:
                     logger.debug(f"Skipping pre-creation snapshot {check} (portfolio created {created_date})")
                     continue
-                snap = json.loads(snap_file.read_text())
                 return snap['total_value']
         return None
 
     def ensure_today_snapshot(self):
         """Save today's snapshot if one doesn't exist yet. Idempotent."""
         today_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
-        snap_file = SNAPSHOTS_DIR / f"snap_{today_str}.json"
-        if not snap_file.exists():
+        snap_file = f"{SNAPSHOTS_DIR}/snap_{today_str}.json"
+        if load_json(snap_file) is None:
             self.daily_snapshot()
             return True
         return False
@@ -386,9 +386,9 @@ class Portfolio:
                 break
             if created_date and check < created_date:
                 continue  # skip pre-creation snapshots
-            snap_file = SNAPSHOTS_DIR / f"snap_{check.strftime('%Y-%m-%d')}.json"
-            if snap_file.exists():
-                snap = json.loads(snap_file.read_text())
+            snap_file = f"{SNAPSHOTS_DIR}/snap_{check.strftime('%Y-%m-%d')}.json"
+            snap = load_json(snap_file)
+            if snap is not None:
                 return round(self._current_portfolio_value() - snap['total_value'], 2)
         return None
 
@@ -399,9 +399,11 @@ class Portfolio:
         """
         # Load all snapshots sorted by date
         snaps = []
-        for f in sorted(SNAPSHOTS_DIR.glob('snap_*.json')):
+        for fname in sorted(list_files(SNAPSHOTS_DIR, 'snap_*.json')):
             try:
-                snaps.append(json.loads(f.read_text()))
+                snap = load_json(f"{SNAPSHOTS_DIR}/{fname}")
+                if snap is not None:
+                    snaps.append(snap)
             except Exception:
                 continue
 

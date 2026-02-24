@@ -32,6 +32,25 @@ logger = logging.getLogger(__name__)
 # S3 bucket name (must match .streamlit/secrets.toml)
 S3_BUCKET = "stocks-breakout-scanner-s3-bucket"
 
+# Project root — used to convert absolute local paths to relative S3 keys
+_PROJECT_ROOT = str(Path(__file__).parent)
+
+
+def _to_s3_key(local_path: str) -> str:
+    """Convert an absolute local path to an S3 key: bucket/relative_path.
+
+    Example:
+        /Users/gil/.../stocksBreakout/scanner_output/signals/file.csv
+        → stocks-breakout-scanner-s3-bucket/scanner_output/signals/file.csv
+    """
+    abs_path = os.path.abspath(local_path)
+    if abs_path.startswith(_PROJECT_ROOT):
+        rel = abs_path[len(_PROJECT_ROOT):].lstrip(os.sep)
+    else:
+        # Fallback: use the path as-is (already relative)
+        rel = local_path.lstrip(os.sep)
+    return f"{S3_BUCKET}/{rel}"
+
 
 # ─── Hybrid I/O helpers (local + S3) ───────────────────────────────────────
 
@@ -62,8 +81,7 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
                     Auto-generated from local_path if None.
     """
     if s3_path is None:
-        s3_path = f"{S3_BUCKET}/{local_path}"
-        logger.info(f"CHECK: Accessing S3 now... {s3_path}")
+        s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
@@ -88,7 +106,7 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
         s3_path:    S3 key (auto-generated if None)
     """
     if s3_path is None:
-        s3_path = f"{S3_BUCKET}/{local_path}"
+        s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
@@ -108,7 +126,7 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
 def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
     """Load text file — tries S3 first, falls back to local."""
     if s3_path is None:
-        s3_path = f"{S3_BUCKET}/{local_path}"
+        s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
@@ -127,7 +145,7 @@ def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
 def save_text(content: str, local_path: str, s3_path: str = None):
     """Save text file — writes to S3 if cloud, else local."""
     if s3_path is None:
-        s3_path = f"{S3_BUCKET}/{local_path}"
+        s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
@@ -147,7 +165,7 @@ def save_text(content: str, local_path: str, s3_path: str = None):
 def load_json(local_path: str, s3_path: str = None):
     """Load JSON file — tries S3 first, falls back to local."""
     if s3_path is None:
-        s3_path = f"{S3_BUCKET}/{local_path}"
+        s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
@@ -168,7 +186,7 @@ def load_json(local_path: str, s3_path: str = None):
 def save_json(data, local_path: str, s3_path: str = None):
     """Save JSON file — writes to S3 if cloud, else local."""
     if s3_path is None:
-        s3_path = f"{S3_BUCKET}/{local_path}"
+        s3_path = _to_s3_key(local_path)
 
     content = json.dumps(data, indent=2, default=str)
 
@@ -195,7 +213,7 @@ def list_files(local_dir: str, pattern: str = "*",
     Returns list of filenames (not full paths) sorted newest-first.
     """
     if s3_prefix is None:
-        s3_prefix = f"{S3_BUCKET}/{local_dir}"
+        s3_prefix = _to_s3_key(local_dir)
 
     if _is_cloud():
         try:

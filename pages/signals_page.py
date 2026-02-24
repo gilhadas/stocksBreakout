@@ -283,11 +283,11 @@ def render_signals_page():
         date_label = str(start_date) if start_date == end_date else f"{start_date} to {end_date}"
         st.warning(f"No signals found for **{date_label}** / **{trade_type}**.")
         # Show available dates hint
-        all_files = sorted(SIGNALS_DIR.glob('signals_*.csv'), reverse=True)
+        all_files = list_files(SIGNALS_DIR, 'signals_*.csv')
         if all_files:
             hint_dates = set()
-            for f in all_files[:30]:
-                parts = f.stem.split('_')
+            for fname in all_files[:30]:
+                parts = fname.replace('.csv', '').split('_')
                 for p in parts:
                     if len(p) == 8 and p.isdigit():
                         try:
@@ -453,12 +453,12 @@ def render_signals_page():
     st.subheader(f"Trade Details — {scan_label}")
 
     selected_file_name = sel_row['_file']
-    report_path = REPORTS_DIR / selected_file_name.replace('signals_', 'report_')
+    report_name = _get_report_name(selected_file_name)
+    report_local = f"{REPORTS_DIR}/{report_name}"
 
-    try:
-        detail_df = pd.read_csv(report_path)
-    except Exception:
-        st.error(f"Could not load report: {report_path.name}")
+    detail_df = load_data(report_local)
+    if detail_df is None:
+        st.error(f"Could not load report: {report_name}")
         return
 
     if detail_df.empty:
