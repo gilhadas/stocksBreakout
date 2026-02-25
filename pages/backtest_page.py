@@ -2,8 +2,8 @@
 import streamlit as st
 import pandas as pd
 
-from utils import load_json, list_files, PROJECT_ROOT
-BACKTESTS_DIR = str(PROJECT_ROOT / 'scanner_output' / 'backtests')
+from utils import load_json, list_files
+BACKTESTS_DIR = 'scanner_output/backtests'
 
 
 def _list_backtest_files() -> list[str]:

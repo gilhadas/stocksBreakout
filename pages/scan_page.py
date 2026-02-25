@@ -5,7 +5,7 @@ import yfinance as yf
 import asyncio
 from streamlit_lightweight_charts import renderLightweightCharts
 
-from utils import load_data, list_files, PROJECT_ROOT
+from utils import load_data, list_files, _to_local_abs
 
 
 # ──────────────────────────────────────
@@ -14,15 +14,14 @@ from utils import load_data, list_files, PROJECT_ROOT
 
 def _get_watchlist_files():
     """Get available watchlist files from input/ directory."""
-    input_dir = str(PROJECT_ROOT / 'input')
-    names = list_files(input_dir, '*.txt')
-    return {n.replace('.txt', ''): f"{input_dir}/{n}"
+    names = list_files('input', '*.txt')
+    return {n.replace('.txt', ''): _to_local_abs(f"input/{n}")
             for n in names if n != 'email_recipients.txt'}
 
 
 def _load_latest_signals():
     """Load the most recent signals CSV."""
-    signals_dir = str(PROJECT_ROOT / 'scanner_output' / 'signals')
+    signals_dir = 'scanner_output/signals'
     csvs = list_files(signals_dir, 'signals_*.csv')
     if not csvs:
         return None

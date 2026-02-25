@@ -9,9 +9,9 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 
-from utils import load_data, save_data, list_files, PROJECT_ROOT
-SIGNALS_DIR = str(PROJECT_ROOT / 'scanner_output' / 'signals')
-REPORTS_DIR = str(PROJECT_ROOT / 'scanner_output' / 'signal_reports')
+from utils import load_data, save_data, list_files
+SIGNALS_DIR = 'scanner_output/signals'
+REPORTS_DIR = 'scanner_output/signal_reports'
 
 QUALITY_FILTERS = {
     'Gold Only': ['GOLD'],

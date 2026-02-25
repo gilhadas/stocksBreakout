@@ -20,9 +20,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from turtle import st
 from typing import List, Dict, Optional
-import streamlit as st
 
 import pandas as pd
 from zoneinfo import ZoneInfo
@@ -39,6 +37,16 @@ S3_BUCKET = "stocks-breakout-scanner-s3-bucket"
 # Project root — used to convert absolute local paths to relative S3 keys
 _PROJECT_ROOT = str(Path(__file__).parent)
 PROJECT_ROOT = Path(_PROJECT_ROOT)  # exported for pages (single source of truth)
+
+
+def _to_local_abs(path: str) -> str:
+    """Resolve a path to absolute, anchored to project root if relative.
+
+    Ensures local fallback works regardless of CWD.
+    """
+    if os.path.isabs(path):
+        return path
+    return str(PROJECT_ROOT / path)
 
 
 def _to_s3_key(local_path: str) -> str:
@@ -92,16 +100,9 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
         s3_path:    S3 key (e.g. "bucket/scanner_output/signals/file.csv")
                     Auto-generated from local_path if None.
     """
-    from streamlit.logger import get_logger
-    logger = get_logger(__name__)
-
-    logger.info(f"Loading data: trying S3 {s3_path} then local {local_path} first")
-    st.toast(f'Loading data: trying S3 {s3_path} then local {local_path} first')
-
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
-        logger.info(f"Loading data: trying S3 key {s3_path} first")
-        st.toast(f'Loading data: trying S3 key {s3_path} first')
+
     if _is_cloud():
         try:
             conn = _s3_conn()
@@ -109,10 +110,11 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
         except Exception as e:
             logger.warning(f"S3 read failed for {s3_path}, falling back to local: {e}")
 
-    if os.path.exists(local_path):
-        return pd.read_csv(local_path)
+    abs_path = _to_local_abs(local_path)
+    if os.path.exists(abs_path):
+        return pd.read_csv(abs_path)
 
-    logger.warning(f"File not found: {local_path}")
+    logger.warning(f"File not found: {abs_path}")
     return None
 
 
@@ -136,8 +138,9 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
         except Exception as e:
             logger.warning(f"S3 write failed for {s3_path}, falling back to local: {e}")
 
-    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
-    df.to_csv(local_path, index=False)
+    abs_path = _to_local_abs(local_path)
+    os.makedirs(os.path.dirname(abs_path) or '.', exist_ok=True)
+    df.to_csv(abs_path, index=False)
 
 
 # ─── Text (TXT, watchlists) ────────────────────────────────────────────────
@@ -154,10 +157,11 @@ def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
         except Exception as e:
             logger.warning(f"S3 text read failed for {s3_path}: {e}")
 
-    if os.path.exists(local_path):
-        return Path(local_path).read_text().strip()
+    abs_path = _to_local_abs(local_path)
+    if os.path.exists(abs_path):
+        return Path(abs_path).read_text().strip()
 
-    logger.warning(f"Text file not found: {local_path}")
+    logger.warning(f"Text file not found: {abs_path}")
     return None
 
 
@@ -175,8 +179,9 @@ def save_text(content: str, local_path: str, s3_path: str = None):
         except Exception as e:
             logger.warning(f"S3 text write failed for {s3_path}: {e}")
 
-    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
-    Path(local_path).write_text(content)
+    abs_path = _to_local_abs(local_path)
+    os.makedirs(os.path.dirname(abs_path) or '.', exist_ok=True)
+    Path(abs_path).write_text(content)
 
 
 # ─── JSON ───────────────────────────────────────────────────────────────────
@@ -194,11 +199,12 @@ def load_json(local_path: str, s3_path: str = None):
         except Exception as e:
             logger.warning(f"S3 JSON read failed for {s3_path}: {e}")
 
-    if os.path.exists(local_path):
-        with open(local_path) as f:
+    abs_path = _to_local_abs(local_path)
+    if os.path.exists(abs_path):
+        with open(abs_path) as f:
             return json.load(f)
 
-    logger.warning(f"JSON file not found: {local_path}")
+    logger.warning(f"JSON file not found: {abs_path}")
     return None
 
 
@@ -218,8 +224,9 @@ def save_json(data, local_path: str, s3_path: str = None):
         except Exception as e:
             logger.warning(f"S3 JSON write failed for {s3_path}: {e}")
 
-    os.makedirs(os.path.dirname(local_path) or '.', exist_ok=True)
-    with open(local_path, 'w') as f:
+    abs_path = _to_local_abs(local_path)
+    os.makedirs(os.path.dirname(abs_path) or '.', exist_ok=True)
+    with open(abs_path, 'w') as f:
         f.write(content)
 
 
@@ -237,7 +244,6 @@ def list_files(local_dir: str, pattern: str = "*",
     if _is_cloud():
         try:
             conn = _s3_conn()
-            # S3 list returns full keys; filter by pattern
             import fnmatch
             all_keys = conn.fs.ls(s3_prefix, detail=False)
             names = [os.path.basename(k) for k in all_keys]
@@ -246,7 +252,7 @@ def list_files(local_dir: str, pattern: str = "*",
         except Exception as e:
             logger.warning(f"S3 list failed for {s3_prefix}: {e}")
 
-    local = Path(local_dir)
+    local = Path(_to_local_abs(local_dir))
     if local.exists():
         files = sorted(local.glob(pattern), reverse=True)
         return [f.name for f in files]

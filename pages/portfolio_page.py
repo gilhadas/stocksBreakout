@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-from utils import load_data, list_files, PROJECT_ROOT
+from utils import load_data, list_files
 
 
 def _get_portfolio():
@@ -219,7 +219,7 @@ def render_portfolio_page():
 
         if scan_results is None:
             # Try to load latest signals from CSV
-            signals_dir = str(PROJECT_ROOT / 'scanner_output' / 'signals')
+            signals_dir = 'scanner_output/signals'
             scan_results = []
 
             csvs = list_files(signals_dir, 'signals_*.csv')
