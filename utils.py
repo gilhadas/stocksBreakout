@@ -99,38 +99,11 @@ def _is_cloud() -> bool:
     return bool(os.environ.get("AWS_ACCESS_KEY_ID"))
 
 
-def _s3_fs():
-    """Return an s3fs.S3FileSystem using credentials from st.secrets or environment.
-
-    Supports three secret layouts:
-      1. [connections.s3]  aws_access_key_id / aws_secret_access_key
-      2. Flat keys:        AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
-      3. No explicit keys: boto3 falls back to instance profile / env vars
-    """
-    import s3fs
-    key, secret, region = None, None, 'us-east-1'
-    try:
-        import streamlit as st
-        s = st.secrets
-        # Layout 1: Streamlit Connections format
-        if "connections" in s and "s3" in s.connections:
-            c = s.connections.s3
-            key    = c.get('aws_access_key_id') or c.get('key')
-            secret = c.get('aws_secret_access_key') or c.get('secret')
-            region = c.get('region_name') or c.get('region', 'us-east-1')
-        # Layout 2: flat AWS keys in secrets
-        elif any(k in s for k in ("AWS_ACCESS_KEY_ID", "aws_access_key_id")):
-            key    = s.get('AWS_ACCESS_KEY_ID') or s.get('aws_access_key_id')
-            secret = s.get('AWS_SECRET_ACCESS_KEY') or s.get('aws_secret_access_key')
-            region = s.get('AWS_DEFAULT_REGION', 'us-east-1')
-    except Exception:
-        pass
-
-    if key and secret:
-        return s3fs.S3FileSystem(key=key, secret=secret,
-                                  client_kwargs={'region_name': region})
-    # Layout 3: let boto3 pick up credentials from environment / instance role
-    return s3fs.S3FileSystem()
+def _s3_conn():
+    """Get Streamlit S3 connection (official recommended approach)."""
+    import streamlit as st
+    from st_files_connection import FilesConnection
+    return st.connection('s3', type=FilesConnection)
 
 
 # ─── CSV ────────────────────────────────────────────────────────────────────
@@ -148,9 +121,8 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'rb') as f:
-                return pd.read_csv(f)
+            conn = _s3_conn()
+            return conn.read(s3_path, input_format="csv", ttl=600)
         except Exception as e:
             logger.warning(f"S3 read failed for {s3_path}, falling back to local: {e}")
 
@@ -175,8 +147,8 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'w') as f:
+            conn = _s3_conn()
+            with conn.open(s3_path, mode="w") as f:
                 df.to_csv(f, index=False)
             return
         except Exception as e:
@@ -196,9 +168,8 @@ def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'r') as f:
-                return f.read().strip()
+            conn = _s3_conn()
+            return conn.read(s3_path, input_format="text", ttl=600)
         except Exception as e:
             logger.warning(f"S3 text read failed for {s3_path}: {e}")
 
@@ -217,8 +188,8 @@ def save_text(content: str, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'w') as f:
+            conn = _s3_conn()
+            with conn.open(s3_path, mode="w") as f:
                 f.write(content)
             return
         except Exception as e:
@@ -238,9 +209,9 @@ def load_json(local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'r') as f:
-                return json.load(f)
+            conn = _s3_conn()
+            text = conn.read(s3_path, input_format="text", ttl=600)
+            return json.loads(text)
         except Exception as e:
             logger.warning(f"S3 JSON read failed for {s3_path}: {e}")
 
@@ -262,8 +233,8 @@ def save_json(data, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'w') as f:
+            conn = _s3_conn()
+            with conn.open(s3_path, mode="w") as f:
                 f.write(content)
             return
         except Exception as e:
@@ -289,8 +260,8 @@ def list_files(local_dir: str, pattern: str = "*",
     if _is_cloud():
         try:
             import fnmatch
-            fs = _s3_fs()
-            all_keys = fs.ls(s3_prefix, detail=False)
+            conn = _s3_conn()
+            all_keys = conn.fs.ls(s3_prefix, detail=False)
             names = [os.path.basename(k) for k in all_keys]
             matched = [n for n in names if fnmatch.fnmatch(n, pattern)]
             return sorted(matched, reverse=True)
