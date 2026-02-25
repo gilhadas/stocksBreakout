@@ -268,7 +268,8 @@ def render_signals_page():
         matching_files = _find_signal_files_range(start_date, end_date, trade_type)
 
     # Check which have reports and which don't
-    files_without_reports = [f for f in matching_files if not _get_report_path(f).exists()]
+    existing_reports = set(list_files(REPORTS_DIR, 'report_*.csv'))
+    files_without_reports = [f for f in matching_files if _get_report_name(f) not in existing_reports]
 
     with col_refresh:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -303,16 +304,16 @@ def render_signals_page():
         from signal_tracker import track_signal_file
         from yfinance_adapter import YFinanceAdapter
         yf = YFinanceAdapter()
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        import os; os.makedirs(REPORTS_DIR, exist_ok=True)
 
         progress = st.progress(0, text="Processing signal files...")
         for i, sig_file in enumerate(files_without_reports):
             progress.progress((i + 1) / len(files_without_reports),
-                              text=f"Processing {sig_file.name}...")
-            df = track_signal_file(sig_file, yf)
+                              text=f"Processing {sig_file}...")
+            df = track_signal_file(Path(f"{SIGNALS_DIR}/{sig_file}"), yf)
             if not df.empty:
-                report_path = _get_report_path(sig_file)
-                df.to_csv(report_path, index=False)
+                report_local = f"{REPORTS_DIR}/{_get_report_name(sig_file)}"
+                save_data(df, report_local)
         progress.empty()
         st.toast(f"Processed {len(files_without_reports)} signal files")
         st.rerun()
@@ -321,9 +322,9 @@ def render_signals_page():
     summary_rows = []
     files_with_reports = []
     for sig_file in matching_files:
-        report_path = _get_report_path(sig_file)
-        if report_path.exists():
-            row = _build_quality_filtered_summary(report_path, sig_file, allowed_tiers)
+        report_name = _get_report_name(sig_file)
+        if report_name in existing_reports:
+            row = _build_quality_filtered_summary(report_name, sig_file, allowed_tiers)
             if row:
                 summary_rows.append(row)
                 files_with_reports.append(sig_file)
