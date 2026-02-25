@@ -12,7 +12,8 @@ import logging
 # Ensure project root is on Python path
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
-logging.basicConfig(level=logging.INFO) 
+logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(logging.INFO)  # force override Streamlit's pre-config
 
 
 # Load .env
