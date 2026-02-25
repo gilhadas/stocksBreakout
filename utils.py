@@ -25,6 +25,8 @@ from typing import List, Dict, Optional
 import pandas as pd
 from zoneinfo import ZoneInfo
 
+from streamlit.logger import get_logger
+
 _NY_TZ = ZoneInfo('America/New_York')
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,9 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
         s3_path:    S3 key (e.g. "bucket/scanner_output/signals/file.csv")
                     Auto-generated from local_path if None.
     """
+    from streamlit.logger import get_logger
+    logger = get_logger(__name__)
+
     logger.info(f"Loading data: trying S3 {s3_path} then local {local_path} first")
 
     if s3_path is None:
