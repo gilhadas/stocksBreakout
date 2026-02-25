@@ -852,7 +852,8 @@ Examples:
         """
     )
     
-    parser.add_argument('file', help='Path to watchlist file')
+    parser.add_argument('file', nargs='?', default='input/1_26_Setups.txt',
+                        help='Path to watchlist file (default: input/1_26_Setups.txt)')
     parser.add_argument(
         '--mode',
         choices=['longterm', 'swing', 'daytrade', 'scalping'],

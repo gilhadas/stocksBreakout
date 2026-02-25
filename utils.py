@@ -87,6 +87,8 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
         s3_path:    S3 key (e.g. "bucket/scanner_output/signals/file.csv")
                     Auto-generated from local_path if None.
     """
+    logger.debug(f"Loading data: trying S3 {s3_path} then local {local_path} first")
+
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
         logger.debug(f"Loading data: trying S3 key {s3_path} first")
