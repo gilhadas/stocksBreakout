@@ -78,29 +78,59 @@ def _is_cloud() -> bool:
     """Return True when S3 storage should be used.
 
     Detects any of:
-      - Streamlit Connections config: [connections.s3] in secrets.toml
-      - AWS keys stored directly in Streamlit secrets
-      - AWS_ACCESS_KEY_ID in environment (EC2/ECS/Lambda instance roles)
+      - Streamlit Cloud deployment path (/mount/src/)
+      - [connections.s3] in Streamlit secrets
+      - Flat AWS keys in Streamlit secrets (AWS_ACCESS_KEY_ID, etc.)
+      - AWS_ACCESS_KEY_ID in environment (EC2/ECS/Lambda/CI)
     """
+    # Streamlit Cloud: apps always deploy under /mount/src/
+    if _PROJECT_ROOT.startswith('/mount/src/'):
+        return True
     try:
         import streamlit as st
         secrets = st.secrets
         if "connections" in secrets:
             return True
-        # AWS credentials stored directly as flat secrets
-        if any(k in secrets for k in ("AWS_ACCESS_KEY_ID", "aws_access_key_id")):
+        if any(k in secrets for k in ("AWS_ACCESS_KEY_ID", "aws_access_key_id",
+                                       "AWS_S3_BUCKET", "S3_BUCKET")):
             return True
     except Exception:
         pass
-    # Environment-based credentials (instance profile, task role, CI/CD, etc.)
     return bool(os.environ.get("AWS_ACCESS_KEY_ID"))
 
 
-def _s3_conn():
-    """Get Streamlit S3 connection (lazy import)."""
-    import streamlit as st
-    from st_files_connection import FilesConnection
-    return st.connection('s3', type=FilesConnection)
+def _s3_fs():
+    """Return an s3fs.S3FileSystem using credentials from st.secrets or environment.
+
+    Supports three secret layouts:
+      1. [connections.s3]  aws_access_key_id / aws_secret_access_key
+      2. Flat keys:        AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+      3. No explicit keys: boto3 falls back to instance profile / env vars
+    """
+    import s3fs
+    key, secret, region = None, None, 'us-east-1'
+    try:
+        import streamlit as st
+        s = st.secrets
+        # Layout 1: Streamlit Connections format
+        if "connections" in s and "s3" in s.connections:
+            c = s.connections.s3
+            key    = c.get('aws_access_key_id') or c.get('key')
+            secret = c.get('aws_secret_access_key') or c.get('secret')
+            region = c.get('region_name') or c.get('region', 'us-east-1')
+        # Layout 2: flat AWS keys in secrets
+        elif any(k in s for k in ("AWS_ACCESS_KEY_ID", "aws_access_key_id")):
+            key    = s.get('AWS_ACCESS_KEY_ID') or s.get('aws_access_key_id')
+            secret = s.get('AWS_SECRET_ACCESS_KEY') or s.get('aws_secret_access_key')
+            region = s.get('AWS_DEFAULT_REGION', 'us-east-1')
+    except Exception:
+        pass
+
+    if key and secret:
+        return s3fs.S3FileSystem(key=key, secret=secret,
+                                  client_kwargs={'region_name': region})
+    # Layout 3: let boto3 pick up credentials from environment / instance role
+    return s3fs.S3FileSystem()
 
 
 # ─── CSV ────────────────────────────────────────────────────────────────────
@@ -118,8 +148,9 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            return conn.read(s3_path, input_format="csv", ttl=600)
+            fs = _s3_fs()
+            with fs.open(s3_path, 'rb') as f:
+                return pd.read_csv(f)
         except Exception as e:
             logger.warning(f"S3 read failed for {s3_path}, falling back to local: {e}")
 
@@ -144,8 +175,8 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            with conn.open(s3_path, mode="w") as f:
+            fs = _s3_fs()
+            with fs.open(s3_path, 'w') as f:
                 df.to_csv(f, index=False)
             return
         except Exception as e:
@@ -165,8 +196,9 @@ def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            return conn.read(s3_path, input_format="text", ttl=600)
+            fs = _s3_fs()
+            with fs.open(s3_path, 'r') as f:
+                return f.read().strip()
         except Exception as e:
             logger.warning(f"S3 text read failed for {s3_path}: {e}")
 
@@ -185,8 +217,8 @@ def save_text(content: str, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            with conn.open(s3_path, mode="w") as f:
+            fs = _s3_fs()
+            with fs.open(s3_path, 'w') as f:
                 f.write(content)
             return
         except Exception as e:
@@ -206,9 +238,9 @@ def load_json(local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            text = conn.read(s3_path, input_format="text", ttl=600)
-            return json.loads(text)
+            fs = _s3_fs()
+            with fs.open(s3_path, 'r') as f:
+                return json.load(f)
         except Exception as e:
             logger.warning(f"S3 JSON read failed for {s3_path}: {e}")
 
@@ -230,8 +262,8 @@ def save_json(data, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            with conn.open(s3_path, mode="w") as f:
+            fs = _s3_fs()
+            with fs.open(s3_path, 'w') as f:
                 f.write(content)
             return
         except Exception as e:
@@ -256,9 +288,9 @@ def list_files(local_dir: str, pattern: str = "*",
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
             import fnmatch
-            all_keys = conn.fs.ls(s3_prefix, detail=False)
+            fs = _s3_fs()
+            all_keys = fs.ls(s3_prefix, detail=False)
             names = [os.path.basename(k) for k in all_keys]
             matched = [n for n in names if fnmatch.fnmatch(n, pattern)]
             return sorted(matched, reverse=True)
