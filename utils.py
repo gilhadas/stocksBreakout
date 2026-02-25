@@ -20,7 +20,9 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from turtle import st
 from typing import List, Dict, Optional
+import streamlit as st
 
 import pandas as pd
 from zoneinfo import ZoneInfo
@@ -93,11 +95,12 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
     logger = get_logger(__name__)
 
     logger.info(f"Loading data: trying S3 {s3_path} then local {local_path} first")
+    st.toast(f'Loading data: trying S3 {s3_path} then local {local_path} first')
 
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
         logger.info(f"Loading data: trying S3 key {s3_path} first")
-
+        st.toast(f'Loading data: trying S3 key {s3_path} first')
     if _is_cloud():
         try:
             conn = _s3_conn()
