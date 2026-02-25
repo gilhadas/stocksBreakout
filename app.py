@@ -12,7 +12,7 @@ import logging
 # Ensure project root is on Python path
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
-logging.basicConfig(level=logging.DEBUG) 
+logging.basicConfig(level=logging.INFO) 
 
 
 # Load .env
