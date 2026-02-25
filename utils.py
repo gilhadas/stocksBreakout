@@ -75,12 +75,25 @@ def _to_s3_key(local_path: str) -> str:
 # ─── Hybrid I/O helpers (local + S3) ───────────────────────────────────────
 
 def _is_cloud() -> bool:
-    """Check if running in Streamlit Cloud with S3 secrets configured."""
+    """Return True when S3 storage should be used.
+
+    Detects any of:
+      - Streamlit Connections config: [connections.s3] in secrets.toml
+      - AWS keys stored directly in Streamlit secrets
+      - AWS_ACCESS_KEY_ID in environment (EC2/ECS/Lambda instance roles)
+    """
     try:
         import streamlit as st
-        return "connections" in st.secrets
+        secrets = st.secrets
+        if "connections" in secrets:
+            return True
+        # AWS credentials stored directly as flat secrets
+        if any(k in secrets for k in ("AWS_ACCESS_KEY_ID", "aws_access_key_id")):
+            return True
     except Exception:
-        return False
+        pass
+    # Environment-based credentials (instance profile, task role, CI/CD, etc.)
+    return bool(os.environ.get("AWS_ACCESS_KEY_ID"))
 
 
 def _s3_conn():

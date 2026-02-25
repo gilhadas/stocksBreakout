@@ -18,7 +18,7 @@ _NY_TZ = ZoneInfo('America/New_York')
 import numpy as np
 
 from config import OUTPUT_DIR, PORTFOLIO, QUALITY_SIZING
-from utils import load_json, save_json, list_files
+from utils import load_json, save_json, list_files, _is_cloud
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +45,9 @@ class Portfolio:
     """
 
     def __init__(self, capital: float = None):
-        os.makedirs(PORTFOLIO_DIR, exist_ok=True)
-        os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
+        if not _is_cloud():
+            os.makedirs(PORTFOLIO_DIR, exist_ok=True)
+            os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
 
         loaded = load_json(PORTFOLIO_FILE)
         if loaded is not None:
