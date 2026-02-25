@@ -92,11 +92,11 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
     from streamlit.logger import get_logger
     logger = get_logger(__name__)
 
-    logger.info(f"Loading data: trying S3 {s3_path} then local {local_path} first")
+    logger.warning(f"Loading data: trying S3 {s3_path} then local {local_path} first")
 
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
-        logger.info(f"Loading data: trying S3 key {s3_path} first")
+        logger.warning(f"Loading data: trying S3 key {s3_path} first")
 
     if _is_cloud():
         try:
