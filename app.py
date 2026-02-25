@@ -6,11 +6,14 @@ import streamlit as st
 import sys
 import os
 from pathlib import Path
+import logging
 
 
 # Ensure project root is on Python path
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
+logger = logging.getLogger(__name__)
+logger.basicConfig(level=logging.DEBUG) # or logging.DEBUG
 
 # Load .env
 _env_file = PROJECT_ROOT / '.env'
