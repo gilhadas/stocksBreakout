@@ -468,7 +468,8 @@ def render_scan_page():
             watchlist_name = st.selectbox("Watchlist", wl_keys, index=default_idx)
         else:
             watchlist_name = None
-            st.warning("No watchlists in input/")
+            import utils
+            st.warning(f"No watchlists in input is_cloud: {utils.is_cloud()} ")
 
     with col_filter:
         quality_filter = st.selectbox("Filter", ["GOLD", "PREMIUM+", "HIGH+", "ALL"], index=2)
