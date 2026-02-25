@@ -1,10 +1,7 @@
 """Watchlist Manager — add, edit, delete watchlists."""
 import streamlit as st
-from pathlib import Path
 
-from utils import load_text, save_text, list_files
-
-PROJECT_ROOT = Path(__file__).parent.parent
+from utils import load_text, save_text, list_files, PROJECT_ROOT
 INPUT_DIR = str(PROJECT_ROOT / 'input')
 
 

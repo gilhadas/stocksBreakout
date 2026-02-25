@@ -3,12 +3,9 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import asyncio
-from pathlib import Path
 from streamlit_lightweight_charts import renderLightweightCharts
 
-from utils import load_data, list_files
-
-PROJECT_ROOT = Path(__file__).parent.parent
+from utils import load_data, list_files, PROJECT_ROOT
 
 
 # ──────────────────────────────────────

@@ -38,6 +38,7 @@ S3_BUCKET = "stocks-breakout-scanner-s3-bucket"
 
 # Project root — used to convert absolute local paths to relative S3 keys
 _PROJECT_ROOT = str(Path(__file__).parent)
+PROJECT_ROOT = Path(_PROJECT_ROOT)  # exported for pages (single source of truth)
 
 
 def _to_s3_key(local_path: str) -> str:

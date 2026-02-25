@@ -1,11 +1,8 @@
 """Backtest Viewer — display backtest comparison results."""
 import streamlit as st
 import pandas as pd
-from pathlib import Path
 
-from utils import load_json, list_files
-
-PROJECT_ROOT = Path(__file__).parent.parent
+from utils import load_json, list_files, PROJECT_ROOT
 BACKTESTS_DIR = str(PROJECT_ROOT / 'scanner_output' / 'backtests')
 
 
