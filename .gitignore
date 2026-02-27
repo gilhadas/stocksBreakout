@@ -15,3 +15,4 @@ __pycache__/
 !CLAUDE_BUILD_SUMMARY.txt
 !COMPLETE_BUILDOUT.txt
 !requirements.txt
+/credentials/

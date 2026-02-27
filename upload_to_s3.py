@@ -32,7 +32,7 @@ if _env_file.exists():
                 if _line.startswith('export '):
                     _line = _line[7:]
                 _key, _, _val = _line.partition('=')
-                _val = _val.strip().strip('"').strip("'")
+                _val = _val.split('#')[0].strip().strip('"').strip("'")  # strip inline comments
                 os.environ.setdefault(_key.strip(), _val)
 
 import boto3
@@ -63,7 +63,9 @@ def _s3_client():
     return boto3.client('s3')
 
 
-def upload_dir(s3, bucket: str, local_dir: str, since_seconds: float | None = None) -> int:
+def upload_dir(s3, bucket: str, local_dir: str,
+               since_seconds: float | None = None,
+               since_epoch: float | None = None) -> int:
     """Upload all files in local_dir to S3, preserving relative path structure.
 
     Args:
@@ -71,7 +73,8 @@ def upload_dir(s3, bucket: str, local_dir: str, since_seconds: float | None = No
         bucket:         S3 bucket name
         local_dir:      Directory relative to PROJECT_ROOT
         since_seconds:  Only upload files modified within this many seconds
-                        (None = upload everything)
+        since_epoch:    Only upload files with mtime > this Unix timestamp.
+                        Use in cron: START=$(date +%s) before scanner run.
 
     Returns:
         Number of files uploaded.
@@ -87,7 +90,10 @@ def upload_dir(s3, bucket: str, local_dir: str, since_seconds: float | None = No
     for f in sorted(local_path.rglob('*')):
         if not f.is_file():
             continue
-        if since_seconds is not None and (now - f.stat().st_mtime) > since_seconds:
+        mtime = f.stat().st_mtime
+        if since_seconds is not None and (now - mtime) > since_seconds:
+            continue
+        if since_epoch is not None and mtime < since_epoch:
             continue
 
         # S3 key = path relative to project root (forward slashes for Windows compat)
@@ -118,12 +124,18 @@ def main():
         help='Only upload files modified in the last N hours (default: all files)'
     )
     parser.add_argument(
+        '--since-epoch', type=float, default=None, metavar='TIMESTAMP',
+        help='Only upload files with mtime > TIMESTAMP (Unix epoch seconds). '
+             'Use in cron: START=$(date +%%s) before scanner, pass as --since-epoch $START'
+    )
+    parser.add_argument(
         '--bucket', default=S3_BUCKET,
         help=f'S3 bucket name (default: {S3_BUCKET})'
     )
     args = parser.parse_args()
 
     since_seconds = args.hours * 3600 if args.hours else None
+    since_epoch = args.since_epoch
 
     try:
         s3 = _s3_client()
@@ -135,12 +147,14 @@ def main():
         sys.exit(1)
 
     logger.info(f"Uploading to s3://{args.bucket} ...")
-    if since_seconds:
+    if since_epoch:
+        logger.info(f"  (only files with mtime > epoch {since_epoch:.0f} — current run only)")
+    elif since_seconds:
         logger.info(f"  (only files modified in last {args.hours:.1f} h)")
 
     total = 0
     for d in args.dirs:
-        n = upload_dir(s3, args.bucket, d, since_seconds)
+        n = upload_dir(s3, args.bucket, d, since_seconds, since_epoch)
         total += n
         if n:
             logger.info(f"  {d}: {n} file(s)")
