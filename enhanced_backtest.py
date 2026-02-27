@@ -179,6 +179,8 @@ def run_all_scans(historical, start_date, end_date, modes=None):
             'quality': sig['Quality'], 'mode': mode_name, 'type': sig_type,
             'minervini_score': sig.get('MinerviniScore', 0),   # V8: 0-8
             'is_momentum': sig.get('Type') == 'Momentum',      # V7
+            'is_vcp': bool(sig.get('VCP', False)),              # V10: VCP detected
+            'vcp_quality': sig.get('VCP_Quality', 0) or 0,     # V10: 0.0-1.0
         }
         if sig_type == 'BREAKOUT':
             base.update({
@@ -473,6 +475,79 @@ def calculate_minervini_benchmark(historical, start_date, end_date,
     }
 
 
+def calculate_vcp_benchmark(historical, start_date, end_date,
+                             initial_capital=100000, mode='swing'):
+    """Equal-weight buy-and-hold of all stocks showing a VCP pattern at start_date.
+
+    Answers: 'if I had bought all VCP stocks at start, how would they have performed?'
+    Complement to calculate_minervini_benchmark() — VCP is the entry timing layer.
+    """
+    from pattern_recognition import detect_vcp
+
+    sd = pd.to_datetime(start_date)
+    ed = pd.to_datetime(end_date)
+
+    qualifying = []
+    for symbol, df in historical.items():
+        if symbol == 'SPY':
+            continue
+        df_pre = df[df.index <= sd]
+        if len(df_pre) < 60:
+            continue
+        try:
+            result = detect_vcp(df_pre, symbol, mode=mode)
+            if result and result.get('vcp_quality', 0) > 0:
+                qualifying.append((symbol, result['vcp_quality']))
+        except Exception:
+            pass
+
+    if not qualifying:
+        return None
+
+    # Equal-weight allocation
+    per_stock = initial_capital / len(qualifying)
+    portfolio_series = None
+
+    for symbol, vcp_q in qualifying:
+        df = historical[symbol]
+        period = df[(df.index >= sd) & (df.index <= ed)]
+        if len(period) < 2:
+            continue
+        start_price = float(period.iloc[0]['close'])
+        if start_price == 0:
+            continue
+        shares = per_stock / start_price
+        stock_values = period['close'].astype(float) * shares
+        if portfolio_series is None:
+            portfolio_series = stock_values.copy()
+        else:
+            portfolio_series = portfolio_series.add(stock_values, fill_value=0)
+
+    if portfolio_series is None or len(portfolio_series) < 2:
+        return None
+
+    end_value = float(portfolio_series.iloc[-1])
+    total_return = ((end_value - initial_capital) / initial_capital) * 100
+
+    daily_rets = portfolio_series.pct_change().dropna()
+    mean_ret = daily_rets.mean()
+    std_ret = daily_rets.std()
+    sharpe = (mean_ret / std_ret) * np.sqrt(252) if std_ret > 0 else 0
+
+    cummax = portfolio_series.cummax()
+    dd = (portfolio_series / cummax - 1) * 100
+    max_dd = float(dd.min())
+
+    return {
+        'total_return': total_return,
+        'sharpe_ratio': sharpe,
+        'max_drawdown': max_dd,
+        'num_stocks': len(qualifying),
+        'end_value': end_value,
+        'stocks': [s for s, _ in qualifying],
+    }
+
+
 def print_comparison(strategy, spy, initial_capital, start_date, end_date):
     """Print side-by-side comparison"""
     if not strategy or not spy:
@@ -591,10 +666,17 @@ async def main():
     v8_signals  = [s for s in v2_signals  if s.get('minervini_score', 0) >= m_thresh]
     # V8X = V8 + overextension filter (V5X base)
     v8x_signals = [s for s in v5x_signals if s.get('minervini_score', 0) >= m_thresh]
+    # V10 = VCP-detected signals (from V2 base + from Minervini-filtered base)
+    v10_signals     = [s for s in v2_signals  if s.get('is_vcp')]
+    v10m_signals    = [s for s in v8_signals  if s.get('is_vcp')]   # VCP + Minervini
+    v10mx_signals   = [s for s in v8x_signals if s.get('is_vcp')]   # VCP + Minervini + overext
 
     print(f"\n  [V7]  Momentum surge signals: {len(v7_signals)}")
     print(f"  [V8]  Minervini≥{m_thresh} signals (V2 base): {len(v8_signals)}")
     print(f"  [V8X] Minervini≥{m_thresh}+overextension:     {len(v8x_signals)}")
+    print(f"  [V10] VCP signals (V2 base):                  {len(v10_signals)}")
+    print(f"  [V10M] VCP + Minervini≥{m_thresh}:            {len(v10m_signals)}")
+    print(f"  [V10MX] VCP + Minervini≥{m_thresh}+overext:   {len(v10mx_signals)}")
 
     if not v1_signals and not v2_signals:
         print("\nNo signals generated. Exiting.")
@@ -613,6 +695,18 @@ async def main():
               f"return {minervini_bench['total_return']:+.2f}%")
     else:
         print(f"  Minervini Screen: no qualifying stocks at {start_date}")
+
+    # VCP Screen benchmark: buy-and-hold all stocks with VCP pattern at start_date
+    print(f"\n  Computing VCP Screen benchmark (detect_vcp at {start_date})...")
+    vcp_bench = calculate_vcp_benchmark(historical, start_date, end_date,
+                                        initial_capital, mode=scan_modes[0])
+    if vcp_bench:
+        print(f"  VCP Screen: {vcp_bench['num_stocks']} qualifying stocks, "
+              f"return {vcp_bench['total_return']:+.2f}%")
+        if vcp_bench['num_stocks'] <= 20:
+            print(f"  VCP stocks: {', '.join(vcp_bench['stocks'])}")
+    else:
+        print(f"  VCP Screen: no qualifying stocks at {start_date}")
 
     # Define configurations to test — V1 and V2 side by side
     configs = [
@@ -911,6 +1005,56 @@ async def main():
             'trailing': False,
             'tp_as_trail': True,
         },
+        # V10 configs: VCP (Volatility Contraction Pattern) — entry timing layer
+        {
+            'name': 'V10-A) VCP signals, HIGH+',
+            'signals': v10_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V10-B) VCP signals, PREMIUM+',
+            'signals': v10_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V10M-A) VCP+Minervini≥{m_thresh}, HIGH+',
+            'signals': v10m_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V10M-B) VCP+Minervini≥{m_thresh}, PREMIUM+',
+            'signals': v10m_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V10M-C) VCP+Minervini≥{m_thresh}, aggressive',
+            'signals': v10m_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.15, 'risk_pct': 0.025,
+            'trailing': False,
+        },
+        {
+            'name': f'V10MX-A) VCP+Minervini+overext, HIGH+',
+            'signals': v10mx_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': f'V10MX-B) VCP+Minervini+overext, PREMIUM+',
+            'signals': v10mx_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
     ]
 
     # ── Filter by --versions (e.g. "v1,v6x,v8,v8x") ──────────────────────────
@@ -963,7 +1107,7 @@ async def main():
 
     # Print comparison table
     print("\n\n" + "=" * 120)
-    print("V1 / V2 / V3–V6 / V6X / V7 / V8 / V8X / V9  vs  SPY  vs  Minervini Screen")
+    print("V1 / V2 / V3–V6 / V6X / V7 / V8 / V8X / V9 / V10  vs  SPY  vs  Minervini  vs  VCP Screen")
     print("=" * 120)
 
     spy_ret = spy_report['total_return'] if spy_report else 0
@@ -986,6 +1130,17 @@ async def main():
         mb_label  = f"Minervini Screen (≥{m_thresh}, {mb_n} stocks)"
         mb_diff   = mb_ret - spy_ret
         print(f"{mb_label:<42} {mb_n:>7} {mb_n:>7} {mb_ret:>+9.2f}% {'N/A':>8} {mb_sharpe:>7.2f} {mb_dd:>+7.2f}% {'N/A':>6} {mb_diff:>+9.2f}%")
+
+    # VCP Screen benchmark row
+    if vcp_bench:
+        vb_ret    = vcp_bench['total_return']
+        vb_sharpe = vcp_bench['sharpe_ratio']
+        vb_dd     = vcp_bench['max_drawdown']
+        vb_n      = vcp_bench['num_stocks']
+        vb_label  = f"VCP Screen ({vb_n} stocks at {start_date[:7]})"
+        vb_diff   = vb_ret - spy_ret
+        print(f"{vb_label:<42} {vb_n:>7} {vb_n:>7} {vb_ret:>+9.2f}% {'N/A':>8} {vb_sharpe:>7.2f} {vb_dd:>+7.2f}% {'N/A':>6} {vb_diff:>+9.2f}%")
+
     print("-" * 120)
 
     best_return = -999

@@ -149,9 +149,10 @@ class BreakoutDetector:
             if bb_trend == 'bearish':
                 return None
 
-        # --- PATTERN DETECTION (V3) ---
-        has_bullish_pattern, has_bearish_pattern, pattern_target, pattern_names, pattern_vol_confirmed = \
-            get_pattern_score(df.tail(30), symbol)
+        # --- PATTERN DETECTION (V3) + VCP (V10) ---
+        has_bullish_pattern, has_bearish_pattern, pattern_target, pattern_names, \
+            pattern_vol_confirmed, vcp_quality, vcp_data = \
+            get_pattern_score(df.tail(90), symbol, mode=mode_name)
 
         # --- FILTERS ---
         # 1. Relative Strength
@@ -211,7 +212,8 @@ class BreakoutDetector:
         use_structural = not kwargs.get('use_legacy_momentum', False)
         sl, tp, rr = self._calculate_rr(latest, cfg, mode_name, spread_pct,
                                          df=df, use_structural=use_structural,
-                                         pattern_target=pattern_target)
+                                         pattern_target=pattern_target,
+                                         vcp_data=vcp_data)
         rr_ok = rr >= cfg['min_rr']
 
         # --- R:R GRADE + GRADE D REJECTION (V3) ---
@@ -316,7 +318,7 @@ class BreakoutDetector:
                     'trend_ok': trend_ok,
                     'dist_confirm': dist_confirm,
                     'candle_ok': candle_ok,
-                    'rr_ok': rr_ok,
+                    'rr_ok': {'A': 0.7, 'B': 1.0, 'C': 0.5, 'D': 0.0}.get(rr_grade, 0.0),  # V9: graded (B=sweet spot)
                     'no_vol_divergence': not vol_divergence,
                     'vwap_ok': vwap_ok,
                     'rsi_favorable': rsi_favorable,
@@ -331,7 +333,7 @@ class BreakoutDetector:
                     'momentum_strong': momentum_strong,
                     'dist_confirm': dist_confirm,
                     'candle_ok': candle_ok,
-                    'rr_ok': rr_ok,
+                    'rr_ok': {'A': 0.7, 'B': 1.0, 'C': 0.5, 'D': 0.0}.get(rr_grade, 0.0),  # V9: graded (B=sweet spot)
                     'no_vol_divergence': not vol_divergence,
                     'conviction_strong': conviction_strong,
                     'has_bullish_pattern': has_bullish_pattern,
@@ -351,10 +353,14 @@ class BreakoutDetector:
             # V8: Minervini Stage 2 Trend Template — proportional (0/8–8/8 → 0–15 pts)
             checks['minervini_template'] = minervini_score / 8.0
 
+            # V10: VCP quality (proportional 0.0-1.0, only added when detected)
+            if vcp_quality > 0:
+                checks['vcp_quality'] = vcp_quality
+
             if mode_name != 'scalping':
                 checks['rs_ok'] = rs_ok
-                # Momentum surge plays don't require prior consolidation
-                checks['consolidation'] = was_consolidating or momentum_surge
+                # Momentum surge / VCP plays don't require basic BB consolidation
+                checks['consolidation'] = was_consolidating or momentum_surge or (vcp_quality > 0.3)
 
             # V4: Over-extension check (swing/longterm only)
             use_v4 = kwargs.get('use_v4_overextension', True)
@@ -425,6 +431,12 @@ class BreakoutDetector:
                     elif not price_above_sma20:
                         quality = 'HIGH'
                         logger.debug(f"{symbol}: PREMIUM→HIGH (price below daily SMA 20)")
+                    # V9: Stop-distance gate — stops < 1% away trigger on normal intraday noise
+                    if quality == 'PREMIUM':
+                        stop_dist_pct = (latest['close'] - sl) / latest['close'] * 100
+                        if stop_dist_pct < 1.0:
+                            quality = 'HIGH'
+                            logger.debug(f"{symbol}: PREMIUM→HIGH (stop too tight {stop_dist_pct:.2f}% < 1%)")
         else:
             # Original all-or-nothing logic
             conditions = [
@@ -469,6 +481,10 @@ class BreakoutDetector:
             'Type': 'Momentum' if momentum_surge else '',
             'RSI': round(float(rsi_val), 1) if not pd.isna(rsi_val) else '',
             'MinerviniScore': minervini_score,   # V8: 0-8 conditions met
+            'VCP': vcp_quality > 0,                # V10: VCP pattern detected
+            'VCP_Quality': round(vcp_quality, 2) if vcp_quality > 0 else '',
+            'VCP_Pivot': round(vcp_data['pivot_point'], 2) if vcp_data else '',
+            'VCP_Contractions': vcp_data.get('num_contractions', '') if vcp_data else '',
         }
         
         if mode_name == 'scalping' and spread_pct is not None:
@@ -542,7 +558,8 @@ class BreakoutDetector:
     
     def _calculate_rr(self, latest, cfg, mode_name: str, spread_pct: Optional[float],
                       df: pd.DataFrame = None, use_structural: bool = True,
-                      pattern_target: float = 0.0) -> tuple:
+                      pattern_target: float = 0.0,
+                      vcp_data: dict = None) -> tuple:
         """Calculate stop loss, target, and risk/reward ratio"""
         atr_stop = latest['close'] - (cfg['sl_mult'] * latest['ATR'])
 
@@ -552,6 +569,14 @@ class BreakoutDetector:
             sl = max(swing_low, atr_stop)  # Tighter stop = less risk
         else:
             sl = atr_stop
+
+        # V10: VCP stop override — low of final contraction is more precise
+        if vcp_data and vcp_data.get('vcp_stop'):
+            sl = max(sl, vcp_data['vcp_stop'])  # Use tighter (higher) stop
+
+        # V10: VCP target override — measured move from pivot
+        if vcp_data and vcp_data.get('breakout_target', 0) > 0:
+            pattern_target = max(pattern_target, vcp_data['breakout_target'])
 
         atr_target = latest['close'] + (cfg['tp_mult'] * latest['ATR'])
         # Use the higher of ATR target and pattern-derived target
@@ -639,9 +664,10 @@ class BreakoutDetector:
         'near_52w_high': 8,        # V5: Within 5% of 52-week high
         'rsi_divergence': 5,       # V5: RSI bullish divergence
         'sector_momentum': 6,      # V5: Sector ETF momentum
-        'pattern_vol_confirmed': 6, # V6: Pattern confirmed by volume
+        'pattern_vol_confirmed': 2, # V6: Pattern confirmed by volume (reduced V9 — False signals win more often)
         'momentum_surge': 12,      # V7: Explosive gap/intraday move + high volume (no consolidation needed)
         'minervini_template': 15,  # V8: Minervini Stage 2 Trend Template (7+ of 8 conditions)
+        'vcp_quality': 14,         # V10: VCP proportional score (0.0-1.0 → up to 14 pts)
         # V1 legacy weights (used when use_legacy_momentum=True)
         'vwap_ok': 8,
         'rsi_favorable': 8,

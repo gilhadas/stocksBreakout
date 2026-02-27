@@ -53,7 +53,10 @@ SCORING_WEIGHTS = {
     'near_52w_high': 8,         # V5: Within 5% of 52-week high
     'rsi_divergence': 5,        # V5: RSI bullish divergence
     'sector_momentum': 6,       # V5: Sector ETF momentum
-    'pattern_vol_confirmed': 6, # V6: Pattern confirmed by volume
+    'pattern_vol_confirmed': 2, # V6: Pattern confirmed by volume (reduced V9 — False signals win more often)
+    'momentum_surge': 12,      # V7: Explosive gap/intraday move + high volume
+    'minervini_template': 15,  # V8: Minervini Stage 2 Trend Template
+    'vcp_quality': 14,         # V10: VCP proportional score (0.0-1.0)
 }
 
 SCORE_THRESHOLDS = {
@@ -109,6 +112,38 @@ V4_OVEREXTENSION_FILTER = {
         'longterm': {'mild': 15, 'heavy': 25, 'reject': 35},
     },
     # daytrade/scalping use different trend lines (EMA9/VWAP), not applicable
+}
+
+# --- V10: VCP (Volatility Contraction Pattern) Configuration ---
+# Detects Minervini-style progressively shallower pullbacks + volume dry-up before breakout
+VCP_CONFIG = {
+    'enabled': True,
+    'min_contractions': 2,           # Min pullback count (textbook 3-4, but 2+ is practical)
+    'first_pullback_max_pct': 35.0,  # First pullback can be up to 35%
+    'first_pullback_min_pct': 5.0,   # At least 5% to be meaningful
+    'final_tight_range_pct': 5.0,    # Final area quality scoring (tighter = higher quality)
+    'vol_dryup_threshold': 0.75,     # Volume in later contractions <= 75% of earlier
+    'pivot_proximity_pct': 8.0,      # Quality scoring: closer to pivot = higher score
+    'max_chase_pct': 5.0,            # Don't chase if > 5% above pivot
+    'stop_buffer_pct': 1.0,          # Stop = low of final contraction - 1% buffer
+    'bar_windows': {
+        'longterm': 90,              # ~4.5 months daily bars
+        'swing': 60,                 # ~3 months daily bars
+        'daytrade': 120,             # ~2 days of 15-min bars
+        'scalping': 60,
+    },
+    'mode_overrides': {
+        'daytrade': {
+            'first_pullback_max_pct': 15.0,
+            'first_pullback_min_pct': 2.0,
+            'final_tight_range_pct': 1.5,
+        },
+        'scalping': {
+            'first_pullback_max_pct': 8.0,
+            'first_pullback_min_pct': 1.0,
+            'final_tight_range_pct': 0.8,
+        },
+    },
 }
 
 # --- Win Probability Estimation ---

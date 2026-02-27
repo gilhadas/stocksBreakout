@@ -926,6 +926,246 @@ def detect_rectangle(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
 
 
 # ------------------------------------------------------------------
+# VCP (Volatility Contraction Pattern) Detection — V10
+# ------------------------------------------------------------------
+
+def _find_swing_points(highs, lows, order: int = 3):
+    """Find local swing highs and swing lows using N-bar lookback/lookahead.
+
+    Returns:
+        swing_highs: list of (index, price) for local maxima
+        swing_lows:  list of (index, price) for local minima
+    """
+    n = len(highs)
+    swing_highs = []
+    swing_lows = []
+    for i in range(order, n - order):
+        # Swing high: higher than all neighbours within `order` bars
+        if highs[i] == max(highs[i - order:i + order + 1]):
+            swing_highs.append((i, float(highs[i])))
+        # Swing low: lower than all neighbours within `order` bars
+        if lows[i] == min(lows[i - order:i + order + 1]):
+            swing_lows.append((i, float(lows[i])))
+    return swing_highs, swing_lows
+
+
+def detect_vcp(df: pd.DataFrame, ticker: str = "", mode: str = "swing") -> Optional[Dict]:
+    """Detect Minervini Volatility Contraction Pattern (VCP).
+
+    Looks for 2+ progressively shallower pullbacks with volume dry-up,
+    forming a tight pivot point before a breakout.
+
+    Args:
+        df: DataFrame with lowercase OHLCV columns
+        ticker: Stock ticker (for logging)
+        mode: Trading mode — determines lookback window and thresholds
+
+    Returns:
+        Pattern dict with VCP-specific fields, or None if not detected.
+    """
+    try:
+        from config import VCP_CONFIG
+    except ImportError:
+        return None
+
+    if not VCP_CONFIG.get('enabled', True):
+        return None
+
+    # --- Merge mode-specific overrides ---
+    cfg = dict(VCP_CONFIG)
+    overrides = VCP_CONFIG.get('mode_overrides', {}).get(mode, {})
+    cfg.update(overrides)
+
+    min_bars = cfg['bar_windows'].get(mode, 60)
+    if len(df) < min_bars:
+        return None
+
+    window = df.iloc[-min_bars:]
+    highs = window['high'].values
+    lows = window['low'].values
+    closes = window['close'].values
+    volumes = window['volume'].values
+    n = len(window)
+
+    # --- Step 1: Find swing highs and swing lows ---
+    # Use order=3 for daily bars, order=5 for intraday (more noise)
+    swing_order = 5 if mode in ('daytrade', 'scalping') else 3
+    swing_highs, swing_lows = _find_swing_points(highs, lows, order=swing_order)
+
+    if len(swing_highs) < 2 or len(swing_lows) < 1:
+        return None
+
+    # --- Step 2: Find the base high (left side of VCP) ---
+    # Take the highest swing high as the anchor / pivot resistance
+    base_idx, base_high = max(swing_highs, key=lambda x: x[1])
+
+    # Need at least 1 swing low AFTER the base high
+    lows_after_base = [(i, p) for i, p in swing_lows if i > base_idx]
+    highs_after_base = [(i, p) for i, p in swing_highs if i > base_idx]
+
+    if not lows_after_base:
+        return None
+
+    # --- Step 3: Identify contractions ---
+    # A contraction = pullback from a high to a low, then recovery back toward resistance
+    contractions = []
+    prev_high_price = base_high
+    prev_high_idx = base_idx
+
+    # Alternate between swing lows and swing highs after the base
+    all_swings = sorted(
+        [(i, p, 'low') for i, p in lows_after_base] +
+        [(i, p, 'high') for i, p in highs_after_base],
+        key=lambda x: x[0]
+    )
+
+    expecting = 'low'  # First we expect a pullback (swing low)
+    current_contraction = {'high': base_high, 'high_idx': base_idx}
+
+    for idx, price, swing_type in all_swings:
+        if expecting == 'low' and swing_type == 'low':
+            pullback_pct = (current_contraction['high'] - price) / current_contraction['high'] * 100
+            if pullback_pct > 0:
+                current_contraction['low'] = price
+                current_contraction['low_idx'] = idx
+                current_contraction['pullback_pct'] = pullback_pct
+                # Calculate average volume during this contraction
+                vol_slice = volumes[current_contraction['high_idx']:idx + 1]
+                current_contraction['avg_volume'] = float(np.mean(vol_slice)) if len(vol_slice) > 0 else 0
+                expecting = 'high'
+
+        elif expecting == 'high' and swing_type == 'high':
+            current_contraction['recovery_high'] = price
+            current_contraction['recovery_idx'] = idx
+            contractions.append(dict(current_contraction))
+            # Set up next contraction from this recovery high
+            current_contraction = {'high': price, 'high_idx': idx}
+            expecting = 'low'
+
+    # Handle incomplete final contraction (pullback with no recovery yet = tight area)
+    if 'low' in current_contraction and 'pullback_pct' in current_contraction:
+        # Use current price as the "recovery" — the breakout attempt
+        current_contraction['recovery_high'] = float(closes[-1])
+        current_contraction['recovery_idx'] = n - 1
+        contractions.append(dict(current_contraction))
+
+    if len(contractions) < cfg['min_contractions']:
+        return None
+
+    # --- Step 4: Validate progressive tightening ---
+    pullback_pcts = [c['pullback_pct'] for c in contractions]
+
+    # First pullback must be within bounds
+    first_pb = pullback_pcts[0]
+    if first_pb < cfg['first_pullback_min_pct'] or first_pb > cfg['first_pullback_max_pct']:
+        return None
+
+    # Each subsequent pullback must be shallower (allow some tolerance)
+    for i in range(1, len(pullback_pcts)):
+        ratio = pullback_pcts[i] / pullback_pcts[i - 1]
+        if ratio > 0.95:  # Not contracting enough (must shrink by at least 5%)
+            return None
+
+    # --- Step 5: Higher lows ---
+    contraction_lows = [c['low'] for c in contractions]
+    for i in range(1, len(contraction_lows)):
+        if contraction_lows[i] < contraction_lows[i - 1] * 0.99:  # 1% tolerance
+            return None
+
+    # --- Step 6: Volume dry-up ---
+    contraction_vols = [c['avg_volume'] for c in contractions if c['avg_volume'] > 0]
+    vol_dryup = True
+    if len(contraction_vols) >= 2:
+        for i in range(1, len(contraction_vols)):
+            if contraction_vols[i] > contraction_vols[i - 1] * cfg['vol_dryup_threshold']:
+                # Volume didn't decrease enough in one transition — not a deal breaker
+                # but reduces quality
+                pass
+        # Overall: final contraction volume vs first
+        vol_dryup = contraction_vols[-1] < contraction_vols[0] * cfg['vol_dryup_threshold']
+
+    # --- Step 7: Pivot point and tight area ---
+    # Pivot = highest swing high from the contractions (resistance)
+    recovery_highs = [base_high] + [c.get('recovery_high', 0) for c in contractions]
+    pivot = max(recovery_highs)
+
+    # Tight area: range of last 5 bars (or fewer)
+    tail_bars = min(5, n)
+    tail_high = float(np.max(highs[-tail_bars:]))
+    tail_low = float(np.min(lows[-tail_bars:]))
+    tight_range_pct = (tail_high - tail_low) / tail_low * 100 if tail_low > 0 else 999
+
+    # --- Step 8: Proximity check ---
+    current_price = float(closes[-1])
+    dist_to_pivot_pct = (pivot - current_price) / pivot * 100  # positive = below pivot
+    above_pivot_pct = (current_price - pivot) / pivot * 100  # positive = above pivot
+
+    # Must be within proximity or have broken above (but not chasing)
+    if dist_to_pivot_pct > cfg['pivot_proximity_pct'] and above_pivot_pct < 0:
+        return None  # Too far below pivot
+    if above_pivot_pct > cfg['max_chase_pct']:
+        return None  # Already ran too far above pivot — don't chase
+
+    # --- Step 9: Quality score (0.0 - 1.0) ---
+    quality = 0.0
+    num_contractions = len(contractions)
+
+    # Number of contractions (2=base, 3=good, 4+=excellent)
+    quality += min(0.25, (num_contractions - 1) * 0.083)
+
+    # Decay quality: how much each pullback shrinks relative to prior
+    decay_ratios = [pullback_pcts[i] / pullback_pcts[i - 1] for i in range(1, len(pullback_pcts))]
+    avg_decay = float(np.mean(decay_ratios)) if decay_ratios else 1.0
+    quality += 0.25 * (1.0 - avg_decay)  # Lower decay ratio = better quality
+
+    # Volume dry-up quality
+    if len(contraction_vols) >= 2 and contraction_vols[0] > 0:
+        vol_decline = 1.0 - (contraction_vols[-1] / contraction_vols[0])
+        quality += 0.20 * max(0.0, vol_decline)
+
+    # Tight area quality (tighter = better)
+    if tight_range_pct <= cfg['final_tight_range_pct']:
+        quality += 0.15 * max(0.0, 1.0 - tight_range_pct / cfg['final_tight_range_pct'])
+
+    # Proximity to pivot (closer = better, above pivot = best)
+    if above_pivot_pct >= 0:
+        quality += 0.15  # Already breaking out — full proximity score
+    else:
+        quality += 0.15 * max(0.0, 1.0 - abs(dist_to_pivot_pct) / cfg['pivot_proximity_pct'])
+
+    quality = min(1.0, quality)
+
+    # Minimum quality gate
+    if quality < 0.15:
+        return None
+
+    # --- Stop and target ---
+    final_low = contraction_lows[-1]
+    vcp_stop = final_low * (1 - cfg['stop_buffer_pct'] / 100)
+    # Measured move: pivot + depth of first contraction
+    first_contraction_depth = base_high - contraction_lows[0]
+    breakout_target = pivot + first_contraction_depth
+
+    return {
+        'name': 'VCP',
+        'type': 'consolidation',
+        'bullish': True,
+        'bearish': False,
+        'confidence': min(0.95, 0.65 + quality * 0.30),
+        'volume_confirmed': vol_dryup,
+        'vcp_quality': round(quality, 3),
+        'num_contractions': num_contractions,
+        'pullback_depths': [round(p, 1) for p in pullback_pcts],
+        'pivot_point': round(pivot, 2),
+        'vcp_stop': round(vcp_stop, 2),
+        'breakout_target': round(breakout_target, 2),
+        'tight_range_pct': round(tight_range_pct, 2),
+        'current_price': round(current_price, 2),
+        'risk_level': 'low',
+    }
+
+
+# ------------------------------------------------------------------
 # Candlestick Pattern Detection
 # ------------------------------------------------------------------
 
@@ -1177,13 +1417,14 @@ def detect_candle_patterns(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
     return results
 
 
-def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
+def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "", mode: str = "swing") -> List[Dict]:
     """
     Run all pattern detectors on a pre-fetched DataFrame.
 
     Args:
         df: DataFrame with lowercase OHLCV columns (open, high, low, close, volume)
         ticker: Stock ticker (for display)
+        mode: Trading mode (for VCP bar window sizing)
 
     Returns:
         List of detected patterns
@@ -1209,6 +1450,11 @@ def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
         if result:
             patterns.append(result)
 
+    # VCP detector (needs mode parameter for bar window sizing)
+    vcp_result = detect_vcp(df, ticker, mode=mode)
+    if vcp_result:
+        patterns.append(vcp_result)
+
     # Candlestick patterns (single & multi-candle)
     candle_patterns = detect_candle_patterns(df, ticker)
     patterns.extend(candle_patterns)
@@ -1216,29 +1462,35 @@ def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "") -> List[Dict]:
     return patterns
 
 
-def get_pattern_score(df: pd.DataFrame, ticker: str = "") -> Tuple[bool, bool, float, List[str], bool]:
+def get_pattern_score(df: pd.DataFrame, ticker: str = "", mode: str = "swing") -> tuple:
     """
     Get pattern scoring summary for integration with breakout scanner.
 
     Args:
         df: DataFrame with lowercase OHLCV columns
         ticker: Stock ticker
+        mode: Trading mode (for VCP detection)
 
     Returns:
-        Tuple of (has_bullish, has_bearish, best_target, pattern_names, volume_confirmed)
+        Tuple of (has_bullish, has_bearish, best_target, pattern_names, volume_confirmed,
+                  vcp_quality, vcp_data)
         - has_bullish: True if any bullish pattern detected
         - has_bearish: True if any bearish pattern detected
         - best_target: Highest breakout target price from patterns (0.0 if none)
         - pattern_names: List of detected pattern names
         - volume_confirmed: True if any pattern has volume confirmation
+        - vcp_quality: VCP quality score 0.0-1.0 (0.0 if no VCP detected)
+        - vcp_data: VCP pattern dict or None
     """
-    patterns = detect_patterns_from_df(df, ticker)
+    patterns = detect_patterns_from_df(df, ticker, mode)
 
     has_bullish = False
     has_bearish = False
     best_target = 0.0
     pattern_names = []
     any_vol_confirmed = False
+    vcp_quality = 0.0
+    vcp_data = None
 
     for p in patterns:
         pattern_names.append(p['name'])
@@ -1254,4 +1506,9 @@ def get_pattern_score(df: pd.DataFrame, ticker: str = "") -> Tuple[bool, bool, f
         if target and target > best_target:
             best_target = target
 
-    return has_bullish, has_bearish, best_target, pattern_names, any_vol_confirmed
+        # Extract VCP-specific data
+        if p.get('name') == 'VCP':
+            vcp_quality = p.get('vcp_quality', 0.0)
+            vcp_data = p
+
+    return has_bullish, has_bearish, best_target, pattern_names, any_vol_confirmed, vcp_quality, vcp_data

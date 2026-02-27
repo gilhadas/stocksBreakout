@@ -26,7 +26,7 @@ if _env_file.exists():
                 if line.startswith('export '):
                     line = line[7:]
                 key, _, value = line.partition('=')
-                value = value.strip().strip('"').strip("'")
+                value = value.split('#')[0].strip().strip('"').strip("'")  # strip inline comments
                 os.environ.setdefault(key.strip(), value)
 
 st.set_page_config(

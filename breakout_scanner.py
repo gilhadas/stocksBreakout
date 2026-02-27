@@ -28,7 +28,7 @@ if _env_file.exists():
                 if _line.startswith('export '):
                     _line = _line[7:]
                 _key, _, _val = _line.partition('=')
-                _val = _val.strip().strip('"').strip("'")
+                _val = _val.split('#')[0].strip().strip('"').strip("'")  # strip inline comments
                 os.environ.setdefault(_key.strip(), _val)
 
 # Python 3.14 compatibility: Create event loop before importing ib_insync
