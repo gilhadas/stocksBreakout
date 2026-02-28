@@ -2,7 +2,47 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import streamlit.components.v1 as components
 from streamlit_lightweight_charts import renderLightweightCharts
+
+
+def _tv_advanced_chart(symbol: str, interval: str = 'D', height: int = 520) -> None:
+    """Embed TradingView Advanced Chart widget (free public widget, no API key needed).
+
+    If the user is logged into TradingView in their browser (any plan), the chart
+    uses their session — Pro users get real-time data automatically.
+    interval: 'D' daily, 'W' weekly, '60' hourly, '15' 15-min, '5' 5-min, '1' 1-min
+    """
+    tv_html = f"""
+    <style>
+      body {{ margin: 0; padding: 0; overflow: hidden; }}
+    </style>
+    <div class="tradingview-widget-container" style="height:{height}px;width:100%">
+      <div class="tradingview-widget-container__widget" style="height:{height}px;width:100%"></div>
+      <script type="text/javascript"
+        src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
+        async>
+      {{
+        "autosize": false,
+        "width": "100%",
+        "height": {height},
+        "symbol": "{symbol.upper()}",
+        "interval": "{interval}",
+        "timezone": "America/New_York",
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "allow_symbol_change": false,
+        "hide_top_toolbar": false,
+        "hide_legend": false,
+        "save_image": true,
+        "calendar": false,
+        "support_host": "https://www.tradingview.com"
+      }}
+      </script>
+    </div>
+    """
+    components.html(tv_html, height=height + 10, scrolling=False)
 
 
 def _fetch_chart_data(symbol, period='1y'):
@@ -25,7 +65,7 @@ def _build_chart_config(df, symbol, signal=None):
 
     # Volume data
     volume_data = []
-    for i, row in df.iterrows():
+    for _, row in df.iterrows():
         color = 'rgba(38,166,154,0.5)' if row['Close'] >= row['Open'] else 'rgba(239,83,80,0.5)'
         volume_data.append({
             'time': row['time'],
@@ -180,17 +220,38 @@ def render_chart_page():
             f"**Pattern:** {signal.get('Patterns', 'N/A')}"
         )
 
-    # Build and render chart
-    chart_config = _build_chart_config(df, symbol, signal if signal and signal.get('Symbol', '').upper() == symbol.upper() else None)
+    # ── Two chart tabs: scanner overlay vs full TradingView ──
+    tab_scanner, tab_tv = st.tabs(["📊 Scanner Overlay (SMA + Signal)", "📈 TradingView (Full)"])
 
-    renderLightweightCharts([chart_config], key=f"chart_{symbol}_{period}")
-
-    # Price stats
-    latest = df.iloc[-1]
-    sma150_val = df['Close'].rolling(150).mean().iloc[-1]
-    if pd.notna(sma150_val):
-        dist = ((latest['Close'] - sma150_val) / sma150_val) * 100
-        st.caption(
-            f"{symbol} | Close: ${latest['Close']:.2f} | "
-            f"SMA 150: ${sma150_val:.2f} | Distance: {dist:+.1f}%"
+    with tab_scanner:
+        chart_config = _build_chart_config(
+            df, symbol,
+            signal if signal and signal.get('Symbol', '').upper() == symbol.upper() else None
         )
+        renderLightweightCharts([chart_config], key=f"chart_{symbol}_{period}")
+
+        # Price stats
+        latest = df.iloc[-1]
+        sma150_val = df['Close'].rolling(150).mean().iloc[-1]
+        if pd.notna(sma150_val):
+            dist = ((latest['Close'] - sma150_val) / sma150_val) * 100
+            st.caption(
+                f"{symbol} | Close: ${latest['Close']:.2f} | "
+                f"SMA 150: ${sma150_val:.2f} | Distance: {dist:+.1f}%"
+            )
+
+    with tab_tv:
+        st.caption(
+            "Full TradingView chart — all built-in indicators & drawing tools. "
+            "If you're logged into TradingView in this browser, your Pro session "
+            "provides real-time data automatically."
+        )
+        tv_interval_map = {
+            'Daily': 'D', 'Weekly': 'W', '1 Hour': '60',
+            '15 Min': '15', '5 Min': '5', '1 Min': '1',
+        }
+        tv_interval_label = st.selectbox(
+            "Interval", list(tv_interval_map.keys()),
+            index=0, key='tv_chart_interval'
+        )
+        _tv_advanced_chart(symbol, interval=tv_interval_map[tv_interval_label], height=520)

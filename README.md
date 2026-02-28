@@ -217,6 +217,27 @@ V9  — TP→Trail: when target hit, activate 2.0 ATR trailing stop
 V10 — VCP detection (14 pts proportional)
 ```
 
+### Live Scanner vs Backtest Configs
+
+**The version labels (V1–V10) are backtest experiment names only** — they live in
+`enhanced_backtest.py` and are never selected at scan time.
+
+When a live scan runs today, it always uses the full V10 engine for detection. The
+"V9-C" label you see in notifications and Streamlit is a **filter applied at output
+time**, not a detection mode:
+
+| Layer | What runs | Where |
+|-------|-----------|--------|
+| Detection | V10 full engine (all scoring weights active) | `scanner.py` |
+| Signal saved | ALL passing signals (STANDARD 60+ through GOLD 90+) | CSV in `scanner_output/signals/` |
+| Discord notify | V9-C filter: GOLD/PREMIUM **AND** MinerviniScore ≥ 7 | `breakout_scanner.py:216` |
+| Streamlit default | Same V9-C filter (switchable via dropdown) | `pages/signals_page.py` |
+
+**Why V9-C as the output filter?** It is the only backtest config that beat SPY over
+2024–2025 (+89.52% vs +87.67%) with the lowest drawdown (−5.23%). Restricting
+notifications and the default Streamlit view to this tier reduces noise without losing
+the scanner's ability to detect and save all signal quality levels.
+
 ---
 
 ## CLI Reference
