@@ -208,17 +208,27 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 f"(PREMIUM/GOLD + HIGH-momentum + near-miss high-vol)"
             )
 
-        # Send notifications with CSV attachment
+        # Send notifications with CSV attachment — V9-C filter (PREMIUM/GOLD + Minervini≥7)
         mode_desc = MODES[args.mode]['description']
         watchlist_name = Path(args.file).stem  # Get filename without extension
         subject_prefix = "⚠️ " if market_warning else "🚨 "
         warning_line = f"\n\n⚠️ {market_warning}" if market_warning else ""
-        notifier.send_all(
-            subject=f"{subject_prefix}{args.mode.upper()} Breakout Signals [{watchlist_name}]",
-            message=f"{len(results)} {mode_desc} breakout signals detected from {watchlist_name}{warning_line}",
-            signals=results,
-            csv_path=output_file
-        )
+        notify_signals = [
+            s for s in results
+            if s.get('Quality') in ('GOLD', 'PREMIUM')
+            and (s.get('MinerviniScore') or 0) >= 7
+        ]
+        if notify_signals:
+            notifier.send_all(
+                subject=f"{subject_prefix}{args.mode.upper()} Breakout Signals [{watchlist_name}]"
+                        f" ({len(notify_signals)} V9-C of {len(results)} total)",
+                message=f"{len(notify_signals)} V9-C breakout signals (PREMIUM + Minervini≥7)"
+                        f" from {len(results)} total — {watchlist_name}{warning_line}",
+                signals=notify_signals,
+                csv_path=output_file
+            )
+        else:
+            logger.info(f"No V9-C signals to notify ({len(results)} total signals below threshold)")
         
         # Scalping warnings
         if args.mode == 'scalping':

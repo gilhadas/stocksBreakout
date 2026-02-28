@@ -14,11 +14,13 @@ SIGNALS_DIR = 'scanner_output/signals'
 REPORTS_DIR = 'scanner_output/signal_reports'
 
 QUALITY_FILTERS = {
+    'V9-C Only (Premium + Minervini≥7)': ['GOLD', 'PREMIUM'],  # default — beats SPY
     'Gold Only': ['GOLD'],
     'Premium and Above': ['GOLD', 'PREMIUM'],
     'High and Above': ['GOLD', 'PREMIUM', 'HIGH'],
     'Standard and Above': ['GOLD', 'PREMIUM', 'HIGH', 'STANDARD'],
 }
+V9C_FILTER_KEY = 'V9-C Only (Premium + Minervini≥7)'
 TRADE_TYPES = ['All', 'swing', 'daytrade', 'longterm']
 
 
@@ -156,7 +158,7 @@ def _get_report_name(signal_filename):
     return signal_filename.replace('signals_', 'report_')
 
 
-def _build_quality_filtered_summary(report_name, signal_filename, allowed_tiers):
+def _build_quality_filtered_summary(report_name, signal_filename, allowed_tiers, minervini_min=0):
     """Load a report CSV, filter by quality tiers, compute summary stats."""
     report_local = f"{REPORTS_DIR}/{report_name}"
     df = load_data(report_local)
@@ -165,6 +167,11 @@ def _build_quality_filtered_summary(report_name, signal_filename, allowed_tiers)
 
     # Filter by quality
     filtered = df[df['Quality'].isin(allowed_tiers)].copy()
+    # V9-C: additionally filter by Minervini score
+    if minervini_min > 0 and 'MinerviniScore' in filtered.columns:
+        filtered = filtered[
+            pd.to_numeric(filtered['MinerviniScore'], errors='coerce').fillna(0) >= minervini_min
+        ]
     filtered = _compute_realized_gain(filtered)
     valid = filtered.dropna(subset=['Gain%']) if 'Gain%' in filtered.columns else filtered
 
@@ -254,10 +261,11 @@ def render_signals_page():
     with col_quality:
         quality_filter = st.selectbox(
             "Quality Filter", list(QUALITY_FILTERS.keys()),
-            index=2, key="sig_quality_filter",
+            index=0, key="sig_quality_filter",
         )
 
     allowed_tiers = QUALITY_FILTERS[quality_filter]
+    minervini_min = 7 if quality_filter == V9C_FILTER_KEY else 0
 
     # Find matching signal files for date range + type
     if start_date == end_date:
@@ -322,7 +330,7 @@ def render_signals_page():
     for sig_file in matching_files:
         report_name = _get_report_name(sig_file)
         if report_name in existing_reports:
-            row = _build_quality_filtered_summary(report_name, sig_file, allowed_tiers)
+            row = _build_quality_filtered_summary(report_name, sig_file, allowed_tiers, minervini_min)
             if row:
                 summary_rows.append(row)
                 files_with_reports.append(sig_file)
@@ -467,6 +475,11 @@ def render_signals_page():
     # Apply quality filter and recompute gain from stop/target
     if 'Quality' in detail_df.columns:
         detail_df = detail_df[detail_df['Quality'].isin(allowed_tiers)].copy()
+    # V9-C: additionally filter by Minervini score
+    if minervini_min > 0 and 'MinerviniScore' in detail_df.columns:
+        detail_df = detail_df[
+            pd.to_numeric(detail_df['MinerviniScore'], errors='coerce').fillna(0) >= minervini_min
+        ]
 
     if detail_df.empty:
         st.info("No signals match the selected quality filter in this scan.")
@@ -554,7 +567,8 @@ def render_signals_page():
     # Signal table with full row coloring (green = winner, red = loser)
     detail_cols = ['Symbol', 'Quality', 'Price', 'Current', 'Gain%',
                    'Stop', 'Target', 'R:R', 'HitTarget', 'HitStop',
-                   'Patterns', 'Sector', 'DaysSince']
+                   'Patterns', 'VCP_Quality', 'VCP_Pivot', 'VCP_Contractions',
+                   'Sector', 'DaysSince']
     # Insert Price@Date columns after Current
     if col_label and col_label in filtered.columns:
         cur_idx = detail_cols.index('Current') + 1 if 'Current' in detail_cols else 4
@@ -602,6 +616,8 @@ def render_signals_page():
         'Stop': '${:.2f}',
         'Target': '${:.2f}',
         'R:R': '{:.1f}',
+        'VCP_Quality': '{:.2f}',
+        'VCP_Pivot': '${:.2f}',
     }
     if col_label:
         fmt[col_label] = '${:.2f}'
