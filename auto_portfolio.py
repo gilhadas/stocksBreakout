@@ -13,15 +13,13 @@ Rules
 - Re-entry: a symbol that was closed CAN be re-added from a newer signal file
 - File tracking: each signal file is processed only once (via 'processed_files' set)
 """
-import json
 import re
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-_NY_TZ        = ZoneInfo('America/New_York')
-_SIGNALS_DIR  = Path('scanner_output/signals')
-_PORTFOLIO_PATH = Path('scanner_output/portfolio/auto_portfolio.json')
+_NY_TZ          = ZoneInfo('America/New_York')
+_SIGNALS_DIR    = 'scanner_output/signals'
+_PORTFOLIO_PATH = 'scanner_output/portfolio/auto_portfolio.json'
 
 INITIAL_CAPITAL    = 100_000
 POSITION_SIZE_PCT  = 0.10      # 10% of capital per trade
@@ -43,22 +41,18 @@ def _empty() -> dict:
 
 
 def load() -> dict:
-    if _PORTFOLIO_PATH.exists():
-        try:
-            data = json.loads(_PORTFOLIO_PATH.read_text())
-            data.setdefault('skipped_cash', [])   # backfill for older saved files
-            return data
-        except Exception:
-            pass
+    from utils import load_json
+    data = load_json(_PORTFOLIO_PATH)
+    if data is not None:
+        data.setdefault('skipped_cash', [])   # backfill for older saved files
+        return data
     return _empty()
 
 
 def _save(data: dict):
-    _PORTFOLIO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    from utils import save_json
     data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-    tmp = _PORTFOLIO_PATH.with_suffix('.tmp')
-    tmp.write_text(json.dumps(data, indent=2, default=str))
-    tmp.replace(_PORTFOLIO_PATH)
+    save_json(data, _PORTFOLIO_PATH)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -107,6 +101,7 @@ def scan_and_add(min_date: str | None = None,
     Returns summary dict with counts.
     """
     import pandas as pd
+    from utils import list_files, load_data
 
     pos_pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
     data      = load()
@@ -119,15 +114,15 @@ def scan_and_add(min_date: str | None = None,
     skipped_no_v9c = 0
     files_scanned  = 0
 
-    if not _SIGNALS_DIR.exists():
+    # Sort oldest-first so chronological order is respected.
+    # list_files() returns newest-first; alphabetical sort gives oldest-first
+    # for timestamped filenames and works for both local and S3.
+    all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    if not all_fnames:
         return _build_result(added_syms, skipped_dup, skipped_cash, skipped_no_v9c, 0, data)
 
-    # Sort oldest-first so chronological order is respected
-    all_files = sorted(_SIGNALS_DIR.glob('signals_*.csv'),
-                       key=lambda f: f.name)
-
-    for fpath in all_files:
-        date_str = _date_from_filename(fpath.name)
+    for fname in all_fnames:
+        date_str = _date_from_filename(fname)
 
         if min_date:
             # Date-filtered scan: re-process any file on or after min_date,
@@ -136,20 +131,15 @@ def scan_and_add(min_date: str | None = None,
                 continue
         else:
             # Normal scan: skip already-processed files
-            if fpath.name in processed:
+            if fname in processed:
                 continue
 
         files_scanned += 1
-        file_mode = _mode_from_filename(fpath.name)
+        file_mode = _mode_from_filename(fname)
 
-        try:
-            df = pd.read_csv(fpath)
-        except Exception:
-            processed.add(fpath.name)
-            continue
-
-        if df.empty:
-            processed.add(fpath.name)
+        df = load_data(f"{_SIGNALS_DIR}/{fname}")
+        if df is None or df.empty:
+            processed.add(fname)
             continue
 
         # Normalise column names (strip whitespace, handle 'symbol' vs 'Symbol')
@@ -158,7 +148,7 @@ def scan_and_add(min_date: str | None = None,
             df = df.rename(columns={'symbol': 'Symbol'})
 
         if 'Quality' not in df.columns or 'Symbol' not in df.columns:
-            processed.add(fpath.name)
+            processed.add(fname)
             continue
 
         # V9-C filter: GOLD or PREMIUM + MinerviniScore >= 7
@@ -170,7 +160,7 @@ def scan_and_add(min_date: str | None = None,
 
         if v9c.empty:
             skipped_no_v9c += len(df)
-            processed.add(fpath.name)
+            processed.add(fname)
             continue
 
         for _, row in v9c.iterrows():
@@ -243,7 +233,7 @@ def scan_and_add(min_date: str | None = None,
             open_syms.add(sym)
             added_syms.append(sym)
 
-        processed.add(fpath.name)
+        processed.add(fname)
 
     data['processed_files'] = sorted(processed)
     _save(data)
@@ -516,6 +506,7 @@ def rebuild_skipped_cash() -> dict:
     Returns {'found': count, 'data': data}
     """
     import pandas as pd
+    from utils import list_files, load_data
 
     data      = load()
     taken_syms = ({p['symbol'] for p in data['positions']} |
@@ -524,22 +515,17 @@ def rebuild_skipped_cash() -> dict:
     data['skipped_cash'] = []   # rebuild from scratch
     seen_syms = set()
 
-    if not _SIGNALS_DIR.exists():
+    all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    if not all_fnames:
         _save(data)
         return {'found': 0, 'data': data}
 
-    all_files = sorted(_SIGNALS_DIR.glob('signals_*.csv'), key=lambda f: f.name)
+    for fname in all_fnames:
+        date_str  = _date_from_filename(fname)
+        file_mode = _mode_from_filename(fname)
 
-    for fpath in all_files:
-        date_str  = _date_from_filename(fpath.name)
-        file_mode = _mode_from_filename(fpath.name)
-
-        try:
-            df = pd.read_csv(fpath)
-        except Exception:
-            continue
-
-        if df.empty:
+        df = load_data(f"{_SIGNALS_DIR}/{fname}")
+        if df is None or df.empty:
             continue
 
         df.columns = [c.strip() for c in df.columns]
