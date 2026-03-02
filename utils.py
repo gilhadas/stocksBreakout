@@ -106,10 +106,18 @@ def _s3_conn():
     return st.connection('s3', type=FilesConnection)
 
 
+def _s3_fs():
+    """Return the raw s3fs filesystem (bypasses Streamlit's @st.cache_data layer)."""
+    return _s3_conn().fs
+
+
 # ─── CSV ────────────────────────────────────────────────────────────────────
 
 def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
-    """Load CSV as DataFrame — tries S3 first, falls back to local.
+    """Load CSV as DataFrame — tries S3 first (via raw s3fs), falls back to local.
+
+    Uses conn.fs directly to bypass Streamlit's @st.cache_data layer so reads
+    always reflect the latest S3 state after a write.
 
     Args:
         local_path: Local filesystem path (relative or absolute)
@@ -121,10 +129,11 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            return conn.read(s3_path, input_format="csv", ttl=600)
+            fs = _s3_fs()
+            with fs.open(s3_path, 'r') as f:
+                return pd.read_csv(f)
         except Exception as e:
-            logger.warning(f"S3 read failed for {s3_path}, falling back to local: {e}")
+            logger.warning(f"S3 CSV read failed for {s3_path}, falling back to local: {e}")
 
     abs_path = _to_local_abs(local_path)
     if os.path.exists(abs_path):
@@ -135,7 +144,9 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
 
 
 def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
-    """Save DataFrame as CSV — writes to S3 if cloud, else local.
+    """Save DataFrame as CSV — writes to S3 (via raw s3fs) if cloud, else local.
+
+    After writing, invalidates the s3fs cache so subsequent reads are fresh.
 
     Args:
         df:         DataFrame to save
@@ -147,12 +158,13 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            with conn.open(s3_path, mode="w") as f:
+            fs = _s3_fs()
+            with fs.open(s3_path, 'w') as f:
                 df.to_csv(f, index=False)
+            fs.invalidate_cache(s3_path)
             return
         except Exception as e:
-            logger.warning(f"S3 write failed for {s3_path}, falling back to local: {e}")
+            logger.warning(f"S3 CSV write failed for {s3_path}, falling back to local: {e}")
 
     abs_path = _to_local_abs(local_path)
     os.makedirs(os.path.dirname(abs_path) or '.', exist_ok=True)
@@ -162,14 +174,15 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
 # ─── Text (TXT, watchlists) ────────────────────────────────────────────────
 
 def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
-    """Load text file — tries S3 first, falls back to local."""
+    """Load text file — tries S3 first (via raw s3fs), falls back to local."""
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            return conn.read(s3_path, input_format="text", ttl=600)
+            fs = _s3_fs()
+            with fs.open(s3_path, 'r') as f:
+                return f.read().strip()
         except Exception as e:
             logger.warning(f"S3 text read failed for {s3_path}: {e}")
 
@@ -182,15 +195,19 @@ def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
 
 
 def save_text(content: str, local_path: str, s3_path: str = None):
-    """Save text file — writes to S3 if cloud, else local."""
+    """Save text file — writes to S3 (via raw s3fs) if cloud, else local.
+
+    After writing, invalidates the s3fs cache so subsequent reads are fresh.
+    """
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            with conn.open(s3_path, mode="w") as f:
+            fs = _s3_fs()
+            with fs.open(s3_path, 'w') as f:
                 f.write(content)
+            fs.invalidate_cache(s3_path)
             return
         except Exception as e:
             logger.warning(f"S3 text write failed for {s3_path}: {e}")
@@ -203,15 +220,19 @@ def save_text(content: str, local_path: str, s3_path: str = None):
 # ─── JSON ───────────────────────────────────────────────────────────────────
 
 def load_json(local_path: str, s3_path: str = None):
-    """Load JSON file — tries S3 first, falls back to local."""
+    """Load JSON file — tries S3 first (via raw s3fs), falls back to local.
+
+    Uses conn.fs directly to bypass Streamlit's @st.cache_data layer, ensuring
+    reads always reflect the latest S3 state (critical for mutable portfolio data).
+    """
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            text = conn.read(s3_path, input_format="text", ttl=600)
-            return json.loads(text)
+            fs = _s3_fs()
+            with fs.open(s3_path, 'r') as f:
+                return json.loads(f.read())
         except Exception as e:
             logger.warning(f"S3 JSON read failed for {s3_path}: {e}")
 
@@ -225,7 +246,11 @@ def load_json(local_path: str, s3_path: str = None):
 
 
 def save_json(data, local_path: str, s3_path: str = None):
-    """Save JSON file — writes to S3 if cloud, else local."""
+    """Save JSON file — writes to S3 (via raw s3fs) if cloud, else local.
+
+    After writing, invalidates the s3fs cache so subsequent reads are fresh.
+    This ensures Reset / Scan buttons take effect immediately without any TTL delay.
+    """
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
 
@@ -233,9 +258,10 @@ def save_json(data, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            conn = _s3_conn()
-            with conn.open(s3_path, mode="w") as f:
+            fs = _s3_fs()
+            with fs.open(s3_path, 'w') as f:
                 f.write(content)
+            fs.invalidate_cache(s3_path)
             return
         except Exception as e:
             logger.warning(f"S3 JSON write failed for {s3_path}: {e}")
