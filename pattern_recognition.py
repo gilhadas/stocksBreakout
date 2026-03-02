@@ -926,6 +926,348 @@ def detect_rectangle(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
 
 
 # ------------------------------------------------------------------
+# Wedge Patterns — V12
+# ------------------------------------------------------------------
+
+def detect_falling_wedge(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect falling wedge pattern (bullish continuation/reversal).
+
+    Both resistance and support trendlines slope downward, but support falls
+    faster so the lines converge.  Price breaking above resistance = bullish.
+    """
+    try:
+        if len(df) < 30:
+            return None
+
+        window = df.tail(40).copy().reset_index(drop=True)
+        highs  = window['high'].values
+        lows   = window['low'].values
+        closes = window['close'].values
+        n = len(window)
+
+        swing_highs, swing_lows = _find_swing_points(highs, lows, order=3)
+        filt_highs = _filter_swing_spacing(swing_highs, min_bars=5, keep_higher=True)
+        filt_lows  = _filter_swing_spacing(swing_lows,  min_bars=5, keep_higher=False)
+
+        if len(filt_highs) < 3 or len(filt_lows) < 3:
+            return None
+
+        x_h = np.array([p[0] for p in filt_highs], dtype=float)
+        y_h = np.array([p[1] for p in filt_highs], dtype=float)
+        x_l = np.array([p[0] for p in filt_lows],  dtype=float)
+        y_l = np.array([p[1] for p in filt_lows],  dtype=float)
+
+        res_slope, res_intercept = np.polyfit(x_h, y_h, 1)
+        sup_slope, sup_intercept = np.polyfit(x_l, y_l, 1)
+
+        # Both trendlines must slope downward
+        if res_slope >= 0 or sup_slope >= 0:
+            return None
+        # Support must fall faster than resistance (this is what makes them converge)
+        if sup_slope >= res_slope:
+            return None
+
+        current_bar = n - 1
+        projected_res = res_slope * current_bar + res_intercept
+        projected_sup = sup_slope * current_bar + sup_intercept
+
+        if projected_res <= projected_sup:
+            return None  # lines crossed — invalid shape
+
+        # Convergence: width at left edge > width at right edge
+        width_left  = (res_intercept) - (sup_intercept)      # at bar 0
+        width_right = projected_res - projected_sup
+        if width_right >= width_left or width_right <= 0:
+            return None
+
+        # Wedge must have meaningful width at current bar (≥2%)
+        current_price = closes[-1]
+        if (width_right / current_price * 100) < 2:
+            return None
+
+        # Breakout: current price near or above projected resistance
+        if current_price < projected_res * 0.97:
+            return None
+
+        target = round(projected_res + (projected_res - projected_sup), 2)
+
+        avg_vol      = _avg_volume(df)
+        wedge_vol    = window['volume'].iloc[:-1].mean()
+        breakout_vol = window['volume'].iloc[-1]
+        vol_confirmed = wedge_vol < avg_vol * 0.9 and breakout_vol > avg_vol
+        conf = 0.80 if vol_confirmed else 0.70
+
+        return {
+            'name': 'Falling Wedge',
+            'type': 'reversal',
+            'bullish': True,
+            'bearish': False,
+            'confidence': conf,
+            'volume_confirmed': vol_confirmed,
+            'wedge_width_pct': round(width_right / current_price * 100, 2),
+            'res_slope_pct': round(res_slope / current_price * 100, 4),
+            'breakout_target': target,
+            'current_price': round(current_price, 2),
+            'risk_level': 'low',
+        }
+
+    except Exception:
+        return None
+
+
+def detect_rising_wedge(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect rising wedge pattern (bearish).
+
+    Both resistance and support trendlines slope upward, but support rises
+    faster so the lines converge.  Price breaking below support = bearish.
+    """
+    try:
+        if len(df) < 30:
+            return None
+
+        window = df.tail(40).copy().reset_index(drop=True)
+        highs  = window['high'].values
+        lows   = window['low'].values
+        closes = window['close'].values
+        n = len(window)
+
+        swing_highs, swing_lows = _find_swing_points(highs, lows, order=3)
+        filt_highs = _filter_swing_spacing(swing_highs, min_bars=5, keep_higher=True)
+        filt_lows  = _filter_swing_spacing(swing_lows,  min_bars=5, keep_higher=False)
+
+        if len(filt_highs) < 3 or len(filt_lows) < 3:
+            return None
+
+        x_h = np.array([p[0] for p in filt_highs], dtype=float)
+        y_h = np.array([p[1] for p in filt_highs], dtype=float)
+        x_l = np.array([p[0] for p in filt_lows],  dtype=float)
+        y_l = np.array([p[1] for p in filt_lows],  dtype=float)
+
+        res_slope, res_intercept = np.polyfit(x_h, y_h, 1)
+        sup_slope, sup_intercept = np.polyfit(x_l, y_l, 1)
+
+        # Both trendlines must slope upward
+        if res_slope <= 0 or sup_slope <= 0:
+            return None
+        # Support must rise faster than resistance (convergence)
+        if sup_slope <= res_slope:
+            return None
+
+        current_bar = n - 1
+        projected_res = res_slope * current_bar + res_intercept
+        projected_sup = sup_slope * current_bar + sup_intercept
+
+        if projected_res <= projected_sup:
+            return None
+
+        # Convergence: width narrows toward right
+        width_left  = res_intercept - sup_intercept       # at bar 0
+        width_right = projected_res - projected_sup
+        if width_right >= width_left or width_right <= 0:
+            return None
+
+        current_price = closes[-1]
+        if (width_right / current_price * 100) < 2:
+            return None
+
+        # Breakdown: price near or below projected support
+        if current_price > projected_sup * 1.03:
+            return None
+
+        wedge_height = projected_res - projected_sup
+        target = round(projected_sup - wedge_height, 2)
+
+        avg_vol      = _avg_volume(df)
+        wedge_vol    = window['volume'].iloc[:-1].mean()
+        breakdown_vol = window['volume'].iloc[-1]
+        vol_confirmed = wedge_vol < avg_vol * 0.9 and breakdown_vol > avg_vol
+        conf = 0.80 if vol_confirmed else 0.70
+
+        return {
+            'name': 'Rising Wedge',
+            'type': 'reversal',
+            'bullish': False,
+            'bearish': True,
+            'confidence': conf,
+            'volume_confirmed': vol_confirmed,
+            'wedge_width_pct': round(width_right / current_price * 100, 2),
+            'sup_slope_pct': round(sup_slope / current_price * 100, 4),
+            'breakdown_target': target,
+            'current_price': round(current_price, 2),
+            'risk_level': 'high',
+        }
+
+    except Exception:
+        return None
+
+
+# ------------------------------------------------------------------
+# Rounding Bottom & Inverted Cup and Handle — V12
+# ------------------------------------------------------------------
+
+def detect_rounding_bottom(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect rounding bottom (saucer) pattern (bullish reversal).
+
+    Price declines gradually, forms a rounded trough (quadratic U-shape),
+    then rises back toward the prior high.  Volume lower at the trough.
+    """
+    try:
+        if len(df) < 50:
+            return None
+
+        window = df.tail(60).copy().reset_index(drop=True)
+        lows   = window['low'].values
+        closes = window['close'].values
+        n = len(window)
+        x = np.arange(n, dtype=float)
+
+        # Fit quadratic to lows — must open upward (U-shape)
+        a, b, c = np.polyfit(x, lows, 2)
+        if a <= 0:
+            return None
+
+        # Vertex must be in the middle 20–80% of the window
+        x_vertex = -b / (2 * a)
+        if not (0.20 * n <= x_vertex <= 0.80 * n):
+            return None
+
+        # Right half must average higher than left half (recovery)
+        mid = n // 2
+        if closes[mid:].mean() <= closes[:mid].mean():
+            return None
+
+        current_price = closes[-1]
+        v_bar = max(0, min(int(x_vertex), n - 1))
+
+        # Left-side high = resistance to break
+        left_high = window['high'].values[:v_bar + 1].max() if v_bar > 0 else window['high'].values.max()
+
+        # Price must be within 7% below or above that level (breakout zone)
+        if current_price < left_high * 0.93:
+            return None
+
+        saucer_depth_pct = (left_high - lows.min()) / left_high * 100
+        if saucer_depth_pct < 5 or saucer_depth_pct > 35:
+            return None
+
+        # Volume lower at trough than at the early part (accumulation)
+        trough_vol = window['volume'].iloc[max(0, v_bar - 3):v_bar + 4].mean()
+        early_vol  = window['volume'].iloc[:max(1, n // 4)].mean()
+        vol_confirmed = trough_vol < early_vol * 0.90
+
+        target = round(left_high + (left_high - lows.min()), 2)
+        conf = 0.80 if vol_confirmed else 0.70
+
+        return {
+            'name': 'Rounding Bottom',
+            'type': 'reversal',
+            'bullish': True,
+            'bearish': False,
+            'confidence': conf,
+            'volume_confirmed': vol_confirmed,
+            'saucer_depth_pct': round(saucer_depth_pct, 2),
+            'resistance': round(left_high, 2),
+            'breakout_target': target,
+            'current_price': round(current_price, 2),
+            'risk_level': 'low',
+        }
+
+    except Exception:
+        return None
+
+
+def detect_inverted_cup_and_handle(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect inverted cup and handle pattern (bearish reversal).
+
+    Mirror of cup and handle: upside-down U-shape, followed by a small
+    handle rally, then breakdown below the lip level.
+    """
+    try:
+        if len(df) < 40:
+            return None
+
+        window = df.tail(50).copy()
+        closes = window['close'].values
+        highs  = window['high'].values
+        lows   = window['low'].values
+
+        first_third = len(closes) // 3
+
+        # Left lip: lowest point in the first third
+        left_lip_idx = np.argmin(lows[:first_third])
+        left_lip = lows[left_lip_idx]
+
+        # Cup top (peak): highest point in the middle third
+        mid_start = first_third
+        mid_end   = 2 * first_third
+        cup_top_idx = mid_start + np.argmax(highs[mid_start:mid_end])
+        cup_top = highs[cup_top_idx]
+
+        # Cup must be ≥12% above the lip level
+        cup_height_pct = (cup_top - left_lip) / left_lip * 100
+        if cup_height_pct < 12 or cup_height_pct > 50:
+            return None
+
+        # Right lip: lowest in the last third (before final handle bars)
+        right_section = lows[mid_end:-5] if len(lows) > mid_end + 5 else lows[mid_end:]
+        if len(right_section) < 3:
+            return None
+        right_lip = right_section.min()
+
+        # Right lip symmetric to left (within 8%)
+        if abs(right_lip - left_lip) / left_lip * 100 > 8:
+            return None
+
+        # Cup top must be clearly above both lips
+        lip_level = min(left_lip, right_lip)
+        if cup_top <= lip_level * 1.10:
+            return None
+
+        # Handle: last 8 bars — a small rally (2–12%) before breakdown
+        handle = closes[-8:]
+        handle_rally_pct = (handle.max() - handle.min()) / handle.min() * 100
+        if handle_rally_pct < 2 or handle_rally_pct > 12:
+            return None
+
+        current_price = closes[-1]
+
+        # Price must be near or below the lip (breakdown zone)
+        if current_price > lip_level * 1.05:
+            return None
+
+        target = round(lip_level - (cup_top - lip_level), 2)
+
+        volumes = window['volume'].values
+        avg_vol      = _avg_volume(df)
+        cup_top_vol  = volumes[cup_top_idx] if cup_top_idx < len(volumes) else avg_vol
+        breakdown_vol = volumes[-1]
+        vol_confirmed = cup_top_vol > avg_vol and breakdown_vol > avg_vol * 1.1
+        conf = 0.80 if vol_confirmed else 0.70
+
+        return {
+            'name': 'Inv. Cup and Handle',
+            'type': 'reversal',
+            'bullish': False,
+            'bearish': True,
+            'confidence': conf,
+            'volume_confirmed': vol_confirmed,
+            'cup_height_pct': round(cup_height_pct, 2),
+            'handle_rally_pct': round(handle_rally_pct, 2),
+            'support': round(lip_level, 2),
+            'breakdown_target': target,
+            'current_price': round(current_price, 2),
+            'risk_level': 'high',
+        }
+
+    except Exception:
+        return None
+
+
+# ------------------------------------------------------------------
 # VCP (Volatility Contraction Pattern) Detection — V10
 # ------------------------------------------------------------------
 
@@ -947,6 +1289,212 @@ def _find_swing_points(highs, lows, order: int = 3):
         if lows[i] == min(lows[i - order:i + order + 1]):
             swing_lows.append((i, float(lows[i])))
     return swing_highs, swing_lows
+
+
+# ------------------------------------------------------------------
+# Support & Resistance Level Detection — V11
+# ------------------------------------------------------------------
+
+def _filter_swing_spacing(
+    points: List[Tuple[int, float]], min_bars: int = 10, keep_higher: bool = True
+) -> List[Tuple[int, float]]:
+    """Remove swing points within min_bars of each other, keeping the more extreme price.
+
+    Prevents counting rapid retests of the same level as separate touches.
+    keep_higher=True  → used for swing highs (resistance): keep the highest price in the window
+    keep_higher=False → used for swing lows  (support):    keep the lowest  price in the window
+    """
+    if not points:
+        return []
+    sorted_pts = sorted(points, key=lambda x: x[0])
+    result = [sorted_pts[0]]
+    for idx, price in sorted_pts[1:]:
+        prev_idx, prev_price = result[-1]
+        if idx - prev_idx < min_bars:
+            if (keep_higher and price > prev_price) or (not keep_higher and price < prev_price):
+                result[-1] = (idx, price)
+        else:
+            result.append((idx, price))
+    return result
+
+
+def _fit_trendline(
+    points: List[Tuple[int, float]], n_points: int = 4
+) -> Optional[Tuple[float, float]]:
+    """Linear regression through the last n_points swing highs or lows.
+
+    Returns (slope, intercept) where projected_price = slope * bar_idx + intercept.
+    Returns None if fewer than 3 points are available (not enough for a meaningful line).
+    """
+    pts = points[-n_points:] if len(points) >= n_points else points
+    if len(pts) < 3:
+        return None
+    xs = np.array([p[0] for p in pts], dtype=float)
+    ys = np.array([p[1] for p in pts], dtype=float)
+    slope, intercept = np.polyfit(xs, ys, 1)
+    return float(slope), float(intercept)
+
+
+def _cluster_levels(prices: List[float], tolerance_pct: float = 0.015) -> List[Tuple[float, int]]:
+    """Cluster nearby price levels into zones.
+
+    Groups prices within tolerance_pct of each other (rolling average).
+    Returns list of (center_price, touch_count) sorted by strength (touches desc).
+    """
+    if not prices:
+        return []
+    clusters: List[Tuple[float, int]] = []
+    for price in sorted(prices):
+        merged = False
+        for i, (center, count) in enumerate(clusters):
+            if center > 0 and abs(price - center) / center <= tolerance_pct:
+                clusters[i] = ((center * count + price) / (count + 1), count + 1)
+                merged = True
+                break
+        if not merged:
+            clusters.append((price, 1))
+    return sorted(clusters, key=lambda x: -x[1])
+
+
+def detect_sr_levels(
+    df: pd.DataFrame,
+    current_price: float,
+    atr: float,
+    lookback: int = 200,
+    tolerance_pct: float = 0.015,
+    min_touches: int = 2,
+    min_bar_spacing: int = 10,
+) -> Dict:
+    """Detect key support and resistance levels from historical swing points.
+
+    Uses the already-loaded OHLCV DataFrame — no extra data fetch, cache-friendly.
+
+    Horizontal levels: clusters swing highs/lows within tolerance_pct.
+    Angled trendlines: linear regression through last 4 filtered swing highs/lows.
+    Channel detection: if resistance and support trendlines are parallel (within 20%).
+
+    Args:
+        df:               OHLCV DataFrame with 'high' and 'low' columns (lowercase)
+        current_price:    Latest close price
+        atr:              Current ATR value (used for proximity thresholds)
+        lookback:         How many bars to look back (default 200 ≈ 10 months daily)
+        tolerance_pct:    Price levels within this % merged into one zone (default 1.5%)
+        min_touches:      Minimum touches for a confirmed level (default 2)
+        min_bar_spacing:  Minimum bars between touches at the same level (default 10)
+                          Daily: 2 weeks; 15-min: 2.5 hrs — prevents counting rapid retests
+
+    Returns dict with:
+        Horizontal S/R:
+          nearest_resistance, nearest_support, resistance_strength, support_strength
+          breaking_resistance, at_key_support, all_resistances, all_supports
+        Angled trendlines:
+          trendline_resistance, trendline_support  (projected price at current bar)
+          trendline_res_slope_pct, trendline_sup_slope_pct  (% per bar, +ve = rising)
+          breaking_trendline  (price within 0.5 ATR above angled resistance)
+        Channel:
+          in_channel, channel_direction ('ascending'/'descending'/'horizontal')
+          channel_width_pct
+    """
+    data = df.iloc[-lookback:] if len(df) > lookback else df
+    swing_highs, swing_lows = _find_swing_points(
+        data['high'].values, data['low'].values, order=3
+    )
+
+    # Filter spacing before clustering — prevents inflated touch counts from rapid retests
+    filtered_highs = _filter_swing_spacing(swing_highs, min_bar_spacing, keep_higher=True)
+    filtered_lows  = _filter_swing_spacing(swing_lows,  min_bar_spacing, keep_higher=False)
+
+    res_clusters = _cluster_levels([p for _, p in filtered_highs], tolerance_pct)
+    sup_clusters = _cluster_levels([p for _, p in filtered_lows],  tolerance_pct)
+
+    # Keep only levels within ±20% of current price
+    price_band = current_price * 0.20
+    res_near = sorted(
+        [(p, c) for p, c in res_clusters if current_price <= p <= current_price + price_band],
+        key=lambda x: x[0],      # ascending — nearest resistance first
+    )
+    sup_near = sorted(
+        [(p, c) for p, c in sup_clusters if current_price - price_band <= p <= current_price],
+        key=lambda x: -x[0],     # descending — nearest support first
+    )
+
+    nearest_res = res_near[0][0] if res_near else None
+    nearest_sup = sup_near[0][0] if sup_near else None
+    res_strength = res_near[0][1] if res_near else 0
+    sup_strength = sup_near[0][1] if sup_near else 0
+
+    # Breaking resistance: price just cleared a tested level (within 0.5 ATR above it)
+    breaking_resistance = bool(
+        nearest_res is not None
+        and atr > 0
+        and 0 <= (current_price - nearest_res) <= atr * 0.5
+        and res_strength >= min_touches
+    )
+
+    # At key support: price is hugging a tested support zone (within 1 ATR above it)
+    at_key_support = bool(
+        nearest_sup is not None
+        and atr > 0
+        and 0 <= (current_price - nearest_sup) <= atr * 1.0
+        and sup_strength >= min_touches
+    )
+
+    # ── Angled trendlines (linear regression through last 4 filtered swing points) ──
+    current_bar = len(data) - 1
+    res_tl = _fit_trendline(filtered_highs)
+    sup_tl = _fit_trendline(filtered_lows)
+
+    projected_res = round(res_tl[0] * current_bar + res_tl[1], 2) if res_tl else None
+    projected_sup = round(sup_tl[0] * current_bar + sup_tl[1], 2) if sup_tl else None
+    res_slope_pct = round(res_tl[0] / current_price * 100, 4) if (res_tl and current_price) else None
+    sup_slope_pct = round(sup_tl[0] / current_price * 100, 4) if (sup_tl and current_price) else None
+
+    # Breaking trendline: price just cleared the angled resistance (within 0.5 ATR above it)
+    breaking_trendline = bool(
+        projected_res is not None
+        and projected_res > current_price * 0.80   # sanity: must be within 20% of price
+        and atr > 0
+        and 0 <= (current_price - projected_res) <= atr * 0.5
+    )
+
+    # ── Channel detection: are the two trendlines parallel? ──
+    in_channel = False
+    channel_direction = None
+    channel_width_pct = None
+    if res_tl and sup_tl and projected_res and projected_sup and projected_res > projected_sup:
+        slope_avg = (abs(res_tl[0]) + abs(sup_tl[0])) / 2
+        slope_diff = abs(res_tl[0] - sup_tl[0])
+        if slope_avg < 1e-5 or (slope_diff / slope_avg) < 0.20:   # parallel within 20%
+            in_channel = True
+            avg_slope_pct = ((res_slope_pct or 0) + (sup_slope_pct or 0)) / 2
+            channel_direction = (
+                'ascending'  if avg_slope_pct >  0.01 else
+                'descending' if avg_slope_pct < -0.01 else
+                'horizontal'
+            )
+            channel_width_pct = round((projected_res - projected_sup) / current_price * 100, 2)
+
+    return {
+        # Horizontal S/R
+        'nearest_resistance':  round(nearest_res, 2) if nearest_res else None,
+        'nearest_support':     round(nearest_sup, 2) if nearest_sup else None,
+        'resistance_strength': res_strength,
+        'support_strength':    sup_strength,
+        'breaking_resistance': breaking_resistance,
+        'at_key_support':      at_key_support,
+        'all_resistances': [(round(p, 2), c) for p, c in res_near[:5]],
+        'all_supports':    [(round(p, 2), c) for p, c in sup_near[:5]],
+        # Angled trendlines
+        'trendline_resistance':    projected_res,
+        'trendline_support':       projected_sup,
+        'trendline_res_slope_pct': res_slope_pct,
+        'trendline_sup_slope_pct': sup_slope_pct,
+        'breaking_trendline':      breaking_trendline,
+        # Channel
+        'in_channel':        in_channel,
+        'channel_direction':  channel_direction,
+        'channel_width_pct':  channel_width_pct,
+    }
 
 
 def detect_vcp(df: pd.DataFrame, ticker: str = "", mode: str = "swing") -> Optional[Dict]:
@@ -1443,6 +1991,10 @@ def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "", mode: str = "swi
         detect_double_bottom,
         detect_double_top,
         detect_rectangle,
+        detect_falling_wedge,           # V12
+        detect_rising_wedge,            # V12
+        detect_rounding_bottom,         # V12
+        detect_inverted_cup_and_handle, # V12
     ]
 
     for detector in detectors:

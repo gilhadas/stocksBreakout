@@ -48,6 +48,18 @@ def _color_pnl(val):
 
 
 def render_portfolio_page():
+    # Two tabs: Auto Portfolio is first — it is ALWAYS the active tab on load
+    tab_auto, tab_manual = st.tabs(["📊 Auto Portfolio (V9-C)", "📋 Manual Portfolio"])
+
+    with tab_auto:
+        _render_auto_portfolio()
+
+    with tab_manual:
+        _render_manual_portfolio()
+
+
+def _render_manual_portfolio():
+    """Manual portfolio section (buy/sell, edit, performance)."""
     portfolio = _get_portfolio()
 
     # Auto-fetch prices once per session (on first load) if positions exist
@@ -379,3 +391,318 @@ def render_portfolio_page():
                 'Date': t['exit_date'],
             })
         st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+
+
+def _render_auto_portfolio():
+    """Auto Virtual Portfolio section — tracks all V9-C signals automatically."""
+    import auto_portfolio as ap
+
+    st.subheader("Auto Virtual Portfolio (V9-C Signals)")
+    st.caption(
+        "Automatically tracks every GOLD/PREMIUM signal with Minervini≥7. "
+        "Position size is configurable below. Stops auto-close positions. "
+        "No duplicates — each ticker enters once while open."
+    )
+
+    data    = ap.load()
+    summary = ap.get_summary(data)
+    cash    = summary['cash']
+    cap     = summary['capital']
+
+    # ── Capital-depleted warning ──
+    if cash < cap * 0.10 and summary['open_count'] > 0:
+        st.warning(
+            f"⚠️ Capital nearly fully deployed — "
+            f"${cash:,.0f} remaining. New signals will be skipped until positions close."
+        )
+
+    # ── Summary metrics ──
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Capital",      f"${cap:,.0f}")
+    m2.metric("Cash",         f"${cash:,.0f}",
+              delta=f"{cash/cap*100:.0f}% free")
+    m3.metric("Market Value", f"${summary['market_value']:,.0f}")
+    m4.metric("Unrealized",   f"${summary['unrealized']:+,.0f}")
+    m5.metric("Realized P&L", f"${summary['realized']:+,.0f}")
+    m6.metric("Open / Closed",
+              f"{summary['open_count']} / {summary['closed_count']}")
+
+    # ── Action controls ──
+    from datetime import date as _date
+
+    # Row 1: position size + date filter (settings)
+    cfg_col1, cfg_col2, cfg_col3 = st.columns([1, 1.5, 3])
+    with cfg_col1:
+        pos_pct_label = st.selectbox(
+            "Position size",
+            options=["10% ($10K)", "5% ($5K)"],
+            key="ap_pos_pct",
+            help="Percentage of $100K capital allocated per trade",
+        )
+        pos_pct = 0.05 if pos_pct_label.startswith("5%") else 0.10
+
+    with cfg_col2:
+        use_filter = st.checkbox("Filter by date", value=False, key="ap_use_date_filter")
+        scan_min_date = None
+        if use_filter:
+            scan_from = st.date_input(
+                "From date",
+                value=_date.today().replace(day=1),
+                min_value=_date(2023, 1, 1),
+                max_value=_date.today(),
+                key="ap_scan_from",
+            )
+            scan_min_date = scan_from.strftime('%Y-%m-%d')
+
+    # Row 2: action buttons
+    col_scan, col_recalc, col_refresh, col_trail, col_missed, col_reset = st.columns(
+        [1.2, 1.5, 1.3, 1.5, 1.4, 0.8]
+    )
+
+    with col_scan:
+        if st.button("📥 Scan Signals", key="ap_scan",
+                     help="Add new V9-C signals not yet in portfolio (from date if filter set)"):
+            with st.spinner("Scanning signal files..."):
+                result = ap.scan_and_add(min_date=scan_min_date, position_pct=pos_pct)
+            data    = result['data']
+            summary = ap.get_summary(data)
+            if result['added']:
+                st.toast(f"Added: {', '.join(result['added_symbols'])}")
+            else:
+                st.toast("No new signals found.")
+            msgs = []
+            if result['skipped_dup']:
+                msgs.append(f"{result['skipped_dup']} already open")
+            if result['skipped_cash']:
+                msgs.append(f"{result['skipped_cash']} skipped (no cash): {', '.join(result['skipped_cash_syms'])}")
+            if msgs:
+                st.info(" | ".join(msgs))
+            st.rerun()
+
+    with col_recalc:
+        if st.button("♻️ Recalculate", key="ap_recalc",
+                     help="Reset portfolio and rescan ALL signals with selected position size & date filter"):
+            with st.spinner(f"Recalculating with {pos_pct_label}..."):
+                result = ap.recalculate(position_pct=pos_pct, min_date=scan_min_date)
+            data    = result['data']
+            summary = ap.get_summary(data)
+            st.toast(
+                f"Recalculated: {result['added']} positions added "
+                f"({pos_pct_label}, "
+                f"{result['files_scanned']} files scanned)"
+            )
+            if result['skipped_cash']:
+                st.info(f"{result['skipped_cash']} signals skipped (no cash)")
+            st.rerun()
+
+    with col_refresh:
+        if st.button("🔄 Refresh & Check Stops", key="ap_refresh",
+                     help="Fetch current prices; auto-close if initial stop hit"):
+            with st.spinner("Fetching prices..."):
+                result = ap.refresh_prices()
+            data    = result['data']
+            summary = ap.get_summary(data)
+            if result['closed']:
+                st.toast(f"Stop hit — closed: {', '.join(result['closed'])}")
+            else:
+                st.toast(f"Prices updated ({result['updated']} symbols). No stops hit.")
+            st.rerun()
+
+    with col_trail:
+        if st.button("📈 Simulate Trailing Stops", key="ap_trail",
+                     help=f"Walk every day since entry; close on trailing stop hit ({int(ap.TRAIL_PCT*100)}% from high)"):
+            with st.spinner("Simulating trailing stops..."):
+                result = ap.simulate_trailing_stops()
+            data    = result['data']
+            summary = ap.get_summary(data)
+            if result['closed']:
+                st.toast(f"Trailing stop triggered — closed: {', '.join(result['closed'])}")
+            else:
+                st.toast(f"No trailing stops hit ({result['checked']} positions checked).")
+            st.rerun()
+
+    with col_missed:
+        if st.button("🔍 Find Missed Trades", key="ap_missed",
+                     help="Re-scan all signal files for V9-C signals never taken (missed opportunities)"):
+            with st.spinner("Scanning all signal files for missed trades..."):
+                result = ap.rebuild_skipped_cash()
+            data    = result['data']
+            summary = ap.get_summary(data)
+            st.toast(f"Found {result['found']} missed trade(s).")
+            st.rerun()
+
+    with col_reset:
+        if st.button("🗑️ Reset", key="ap_reset",
+                     help="Clear all auto-portfolio positions and history"):
+            ap.reset()
+            st.toast("Auto portfolio reset.")
+            st.rerun()
+
+    st.divider()
+
+    # ── Open Positions ──
+    positions = data.get('positions', [])
+    if positions:
+        st.markdown(f"**Open Positions ({len(positions)})**")
+        rows = []
+        for p in positions:
+            ep  = p['entry_price']
+            cur = p.get('current_price', ep)
+            chg = round((cur - ep) / ep * 100, 1) if ep else 0
+            unr = round((cur - ep) * p['shares'], 0)
+            dist_stop   = round((cur - p['stop'])   / ep * 100, 1) if ep else 0
+            dist_target = round((p['target'] - cur) / ep * 100, 1) if ep else 0
+            trail_stop = p.get('trail_stop')
+            rows.append({
+                'Symbol':       p['symbol'],
+                'Added':        p['date_added'],
+                'Type':         p['mode'],
+                'Quality':      p['quality'],
+                'Minervini':    p.get('minervini_score', ''),
+                'Entry $':      f"${ep:.2f}",
+                'Current $':    f"${cur:.2f}",
+                'Chg%':         chg,
+                'Unr. P&L':     unr,
+                'Stop $':       f"${p['stop']:.2f}",
+                'Trail Stop $': f"${trail_stop:.2f}" if trail_stop else '—',
+                'To Stop%':     dist_stop,
+                'Target $':     f"${p['target']:.2f}",
+                'To Tgt%':      dist_target,
+                'Shares':       p['shares'],
+                'Cost $':       f"${p['cost']:,.0f}",
+            })
+        # ── TOTAL row ──
+        total_cost   = sum(p['cost'] for p in positions)
+        total_mktval = sum(p.get('current_price', p['entry_price']) * p['shares']
+                          for p in positions)
+        total_unr    = round(total_mktval - total_cost, 0)
+        total_chg    = round((total_mktval - total_cost) / total_cost * 100, 1) if total_cost else 0
+        rows.append({
+            'Symbol':       'TOTAL',
+            'Added':        '',
+            'Type':         '',
+            'Quality':      '',
+            'Minervini':    '',
+            'Entry $':      f"${total_cost:,.0f}",
+            'Current $':    f"${total_mktval:,.0f}",
+            'Chg%':         total_chg,
+            'Unr. P&L':     total_unr,
+            'Stop $':       '',
+            'Trail Stop $': '',
+            'To Stop%':     '',
+            'Target $':     '',
+            'To Tgt%':      '',
+            'Shares':       '',
+            'Cost $':       f"${total_cost:,.0f}",
+        })
+
+        df_open = pd.DataFrame(rows)
+        styled_open = df_open.style.applymap(
+            _color_pnl, subset=[c for c in ['Chg%', 'Unr. P&L', 'To Stop%'] if c in df_open.columns]
+        )
+        st.dataframe(styled_open, use_container_width=True, hide_index=True)
+
+        # Manual close for individual positions
+        with st.expander("Close a Position Manually"):
+            sym_to_close = st.selectbox(
+                "Symbol", [p['symbol'] for p in positions], key="ap_close_sym"
+            )
+            pos_data = next(p for p in positions if p['symbol'] == sym_to_close)
+            exit_px  = st.number_input(
+                "Exit Price", value=float(pos_data.get('current_price', pos_data['entry_price'])),
+                min_value=0.01, key="ap_close_price"
+            )
+            est = round((exit_px - pos_data['entry_price']) * pos_data['shares'], 2)
+            st.caption(f"Entry: ${pos_data['entry_price']:.2f} | Shares: {pos_data['shares']} | Est P&L: ${est:+,.0f}")
+            if st.button("Close Position", key="ap_close_btn"):
+                ap.close_position(sym_to_close, exit_px, reason='manual')
+                st.toast(f"Closed {sym_to_close}: ${est:+,.0f}")
+                st.rerun()
+    else:
+        st.info("No open positions. Click **Scan Signals** to add V9-C signals.")
+
+    # ── Closed Positions ──
+    closed = data.get('closed', [])
+    if closed:
+        st.markdown(f"**Closed Positions ({len(closed)})**")
+        win_count = sum(1 for t in closed if t.get('pnl', 0) > 0)
+        total_pnl = sum(t.get('pnl', 0) for t in closed)
+        win_rate  = win_count / len(closed) * 100 if closed else 0
+        st.caption(
+            f"Realized P&L: **${total_pnl:+,.0f}** | "
+            f"Win rate: **{win_rate:.0f}%** ({win_count}/{len(closed)})"
+        )
+        hist_rows = []
+        for t in reversed(closed):
+            reason = t.get('close_reason', '')
+            if reason == 'trailing_stop' and t.get('trail_pct'):
+                reason = f"trailing {int(t['trail_pct']*100)}%"
+            hist_rows.append({
+                'Symbol':    t['symbol'],
+                'Added':     t['date_added'],
+                'Closed':    t.get('date_closed', ''),
+                'Type':      t.get('mode', ''),
+                'Quality':   t.get('quality', ''),
+                'Entry $':   f"${t['entry_price']:.2f}",
+                'Stop $':    f"${t['stop']:.2f}" if t.get('stop') else '—',
+                'High $':    f"${t['highest_close']:.2f}" if t.get('highest_close') else '—',
+                'Exit $':    f"${t['exit_price']:.2f}",
+                'P&L $':     round(t.get('pnl', 0), 0),
+                'P&L%':      round(t.get('pnl_pct', 0), 1),
+                'Reason':    reason,
+                'Shares':    t.get('shares', ''),
+            })
+        df_hist = pd.DataFrame(hist_rows)
+        styled_hist = df_hist.style.applymap(
+            _color_pnl, subset=[c for c in ['P&L $', 'P&L%'] if c in df_hist.columns]
+        )
+        st.dataframe(styled_hist, use_container_width=True, hide_index=True)
+
+    # ── Missed Trades (skipped due to insufficient cash) ─────────────────────
+    skipped = data.get('skipped_cash', [])
+    if skipped:
+        st.markdown(f"**Missed Trades — Insufficient Cash ({len(skipped)})**")
+        st.caption(
+            "Signals that were not taken because available cash was below the required position size. "
+            "P&L shown is hypothetical (entry price on signal date → today's price)."
+        )
+        missed_rows = []
+        total_hyp_pnl = 0.0
+        for s in reversed(skipped):
+            ep  = s.get('entry_price', 0)
+            cur = s.get('current_price', ep)
+            shares = s.get('shares', 0)
+            hyp_pnl     = round((cur - ep) * shares, 0) if ep else 0
+            hyp_pnl_pct = round((cur - ep) / ep * 100, 1) if ep else 0
+            total_hyp_pnl += hyp_pnl
+            dist_stop   = round((cur - s['stop'])   / ep * 100, 1) if ep else 0
+            dist_target = round((s['target'] - cur) / ep * 100, 1) if ep else 0
+            missed_rows.append({
+                'Symbol':    s['symbol'],
+                'Date':      s['date_added'],
+                'Type':      s.get('mode', ''),
+                'Quality':   s.get('quality', ''),
+                'Minervini': s.get('minervini_score', ''),
+                'Entry $':   f"${ep:.2f}",
+                'Current $': f"${cur:.2f}",
+                'Chg%':      hyp_pnl_pct,
+                'Hyp. P&L':  hyp_pnl,
+                'Stop $':    f"${s['stop']:.2f}",
+                'To Stop%':  dist_stop,
+                'Target $':  f"${s['target']:.2f}",
+                'To Tgt%':   dist_target,
+                'Cost $':    f"${s.get('cost', 0):,.0f}",
+            })
+        total_hyp_wins = sum(1 for s in skipped
+                             if s.get('current_price', 0) > s.get('entry_price', 0))
+        st.caption(
+            f"Hypothetical total P&L if all had been taken: "
+            f"**${total_hyp_pnl:+,.0f}** | "
+            f"Would-be winners: {total_hyp_wins}/{len(skipped)}"
+        )
+        df_missed = pd.DataFrame(missed_rows)
+        styled_missed = df_missed.style.applymap(
+            _color_pnl,
+            subset=[c for c in ['Chg%', 'Hyp. P&L'] if c in df_missed.columns]
+        )
+        st.dataframe(styled_missed, use_container_width=True, hide_index=True)

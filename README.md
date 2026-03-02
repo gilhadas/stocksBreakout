@@ -3,8 +3,8 @@
 Professional-grade algorithmic breakout scanner with Minervini Stage 2 scoring, VCP detection,
 backtesting, and automated cron + Discord notifications.
 
-> **Current version: V10** (VCP + Minervini Stage 2 scoring)
-> Last updated: Feb 2026
+> **Current version: V12** (28 patterns + S/R trendlines + Optuna weight optimizer)
+> Last updated: Mar 2026
 
 ---
 
@@ -31,18 +31,21 @@ backtesting, and automated cron + Discord notifications.
 ```
 breakout_scanner.py    # CLI entry point — IB connection, async loop
 orchestrator.py        # Scan coordination, market data, exit routing
-scanner.py             # Core breakout detection & scoring (V10)
+scanner.py             # Core breakout detection & scoring (V12)
 config.py              # Single source of truth for ALL parameters
 market_data.py         # IB data fetching, caching, rate limiting
 indicators.py          # ATR, VWAP, BB, RSI, MACD, ADX
 exit_evaluator.py      # Position exit signal generation
-pattern_recognition.py # 24 patterns: 12 chart + 11 candle + VCP
+pattern_recognition.py # 28 patterns: 16 chart + 11 candle + VCP (V12)
 notifier.py            # Discord / Email / Telegram notifications
 portfolio.py           # Position tracking, P&L, snapshots
 monitor_watch.py       # 15-min momentum-watch monitor script
-enhanced_backtest.py   # Multi-config A/B backtest (V1–V10 vs SPY)
+enhanced_backtest.py   # Multi-config A/B backtest (V1–V12 vs SPY)
+weight_optimizer.py    # Optuna walk-forward weight optimizer (V12)
 upload_to_s3.py        # Sync scanner_output to S3 for Streamlit Cloud
 app.py                 # Streamlit dashboard entry point
+input/
+  optimizer_watch.txt  # 78 diverse symbols for weight optimization
 pages/
   signals_page.py      # Signal viewer (V9-C default filter)
   portfolio_page.py    # Portfolio P&L dashboard
@@ -114,8 +117,8 @@ Every signal passes through these steps in order:
 4. **Consolidation check** — BB squeeze + volume < 80% avg (bypassed for VCP or momentum surge)
 5. **Breakout candle** — Volume spike, body structure, ATR threshold
 6. **Trend alignment** — SMA/EMA/VWAP per mode
-7. **24 pattern detectors** — 12 chart + 11 candle + VCP
-8. **V10 scoring** — Weighted sum → GOLD / PREMIUM / HIGH / STANDARD
+7. **28 pattern detectors** — 16 chart + 11 candle + VCP (V12 adds Falling Wedge, Rising Wedge, Rounding Bottom, Inv. Cup & Handle)
+8. **V12 scoring** — Weighted sum → GOLD / PREMIUM / HIGH / STANDARD
 9. **Risk:Reward** — Reject if R:R < min_rr (graded: A=0.7, B=1.0, C=0.5, D=0.0)
 10. **Overextension filter** — Reject if > 25% above SMA (V4)
 11. **PREMIUM stop-distance gate** — Downgrade PREMIUM → HIGH if stop < 1% away (daytrade)
@@ -141,35 +144,47 @@ SPY performance auto-adjusts thresholds:
 
 ---
 
-## Signal Scoring (V10)
+## Signal Scoring (V12 — Optuna-optimized weights)
 
-Max possible score: ~177 pts (denominator only includes VCP if detected).
+Weights below are **Optuna walk-forward optimized** (Mar 2026, 300 trials, 78 symbols, 4 folds 2023–2024).
+Max possible score: ~230 pts (denominator only includes VCP if detected).
 
-| Weight | Check | Notes |
-|--------|-------|-------|
-| 16 pts | `vol_confirm` | Volume ratio ≥ threshold |
-| 16 pts | `trend_ok` | Price above SMA/EMA/VWAP |
-| 15 pts | `minervini_template` | 8 Stage 2 conditions (0–15 pts proportional) |
-| 14 pts | `vcp_quality` | VCP quality 0.0–1.0 (only added when detected) |
-| 13 pts | `composite_momentum` | RSI + MACD + ADX + ROC blended |
-| 12 pts | `momentum_surge` | Gap/intraday/daily ≥ 5% + vol ≥ 3× |
-| 10 pts | `rr_ok` | Graded: A=0.7, B=1.0, C=0.5, D=0.0 |
-| 10 pts | `dist_ok` | Distance from breakout in ATR units |
-| 10 pts | `bullish_pattern` | 23 pattern detectors |
-| 8 pts | `conviction` | Candle structure quality |
-| 8 pts | `near_52w_high` | Within 5% of 52-week high |
-| 6 pts | `sector_momentum` | Sector ETF in uptrend |
-| 5 pts | `rsi_bull_div` | RSI bullish divergence |
-| 2 pts | `pattern_vol_confirmed` | Volume confirmed during pattern |
+| Weight | Check | Optimizer note |
+|--------|-------|----------------|
+| 24 pts | `dist_confirm` | Distance from MA — top predictor ↑↑ |
+| 24 pts | `at_key_support` | V11: Key support level — top predictor ↑↑ |
+| 19 pts | `candle_ok` | Candle body structure ↑ |
+| 17 pts | `near_52w_high` | Within 5% of 52-week high ↑↑ |
+| 16 pts | `vol_confirm` | Volume ratio ≥ threshold (unchanged) |
+| 16 pts | `rs_ok` | Relative strength vs SPY ↑↑ |
+| 15 pts | `vcp_quality` | VCP quality 0.0–1.0 (only added when detected) |
+| 14 pts | `rsi_divergence` | RSI bullish divergence ↑↑ |
+| 13 pts | `has_bullish_pattern` | 28 pattern detectors ↑ |
+| 12 pts | `consolidation` | Tightness before breakout ↑ |
+| 12 pts | `pattern_vol_confirmed` | V6: Volume confirmed during pattern ↑↑ |
+| 11 pts | `sr_breakout` | V11: Breaking above tested resistance (≥2 touches) ↑ |
+| 9 pts | `trendline_break` | V11: Breaking above angled resistance trendline ↑ |
+| 8 pts | `sector_momentum` | Sector ETF in uptrend |
+| 6 pts | `no_vol_divergence` | No distribution during breakout |
+| 4 pts | `conviction_strong` | Breakout conviction score ≥ 40 |
+| 3 pts | `momentum_strong` | RSI+MACD+ADX+ROC composite ↓ |
+| 2 pts | `trend_ok` | Price above SMA/EMA/VWAP ↓↓ |
+| 2 pts | `momentum_surge` | Gap/intraday/daily ≥ 5% + vol ≥ 3× ↓ |
+| 2 pts | `rr_ok` | R:R grade (A=0.7, B=1.0, C=0.5, D=0.0) ↓↓ |
+| 0 pts | `minervini_template` | Eliminated — use as screener not scorer |
 
-### Quality tiers
+> **Key optimizer insights:** `dist_confirm` and `at_key_support` emerged as top predictors.
+> `trend_ok` and `rr_ok` weight dropped sharply — the Minervini screener handles trend better.
+> `minervini_template` weight set to 0 (redundant with V8 screener filter).
 
-| Tier | Score | Description |
-|------|-------|-------------|
-| GOLD | ≥ 90% | Elite — passes 5 extra hard gates |
-| PREMIUM | ≥ 80% | High conviction — Minervini + volume + trend |
-| HIGH | ≥ 65% | Good — moderate confluence |
-| STANDARD | ≥ 60% | Marginal — basic criteria met |
+### Quality tiers (Optuna-optimized thresholds)
+
+| Tier | Score | Change | Description |
+|------|-------|--------|-------------|
+| GOLD | ≥ 99 | was 90 | Elite — tighter, fewer but ultra-high conviction |
+| PREMIUM | ≥ 69 | was 80 | High conviction — more signals qualify |
+| HIGH | ≥ 65 | unchanged | Good — moderate confluence |
+| STANDARD | ≥ 50 | was 60 | Wider funnel |
 
 ### Minervini Stage 2 Template (V8, 8 conditions)
 
@@ -215,6 +230,15 @@ V8  — Minervini Stage 2 template (proportional 0–15 pts)
 V8X — V8 + overextension filter
 V9  — TP→Trail: when target hit, activate 2.0 ATR trailing stop
 V10 — VCP detection (14 pts proportional)
+V11 — Support & Resistance levels: sr_breakout (11pts), at_key_support (24pts), trendline_break (9pts)
+      trendlines fitted to swing-point clusters; S/R zones from price memory
+V12 — 4 new chart patterns: Falling Wedge (bullish), Rising Wedge (bearish),
+      Rounding Bottom (bullish), Inverted Cup & Handle (bearish) → 28 total patterns
+      has_bullish_pattern now properly included in V1 legacy checks
+V12-Opt — Optuna walk-forward weight optimizer (weight_optimizer.py):
+      300 trials, 4 folds × 6 months, TPE sampler
+      Best Sharpe on held-out fold 4: 0.771 (no catastrophic overfitting)
+      Optimizer improved simulation Sharpe 2.38 → 3.09 (+40.5% vs +25.9% return in 2024)
 ```
 
 ### Live Scanner vs Backtest Configs
@@ -267,6 +291,24 @@ python breakout_scanner.py <watchlist_file> [options]
 | `--vol` | Override volume threshold (e.g. `--vol 1.5`) |
 | `--atr` | Override ATR multiplier |
 | `--lookback` | Override lookback bars |
+
+### Weight optimizer (`weight_optimizer.py`)
+
+```bash
+# Run with 300 Optuna trials on diverse watchlist
+python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt
+
+# Print config.py patch after finding best weights
+python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt --apply
+
+# Faster smoke test
+python weight_optimizer.py --trials 10 --symbols input/MAGS.txt
+```
+
+Options: `--trials N`, `--symbols <file>`, `--limit N`, `--quality [HIGH|PREMIUM]`, `--apply`
+
+Output: `scanner_output/optimizer/best_weights_YYYYMMDD_HHMMSS.json` + Optuna study pickle.
+`--apply` prints a ready-to-paste config.py block but **does not auto-edit config.py** — review first.
 
 ### Cron-critical: `%` must be escaped in crontab
 
@@ -364,20 +406,79 @@ Standalone 15-min script — tracks HOLDING/RECOVERING/FADING/FAILED status per 
 
 ## Backtest Results
 
-Backtest script: `enhanced_backtest.py` — compares V1 through V10 vs SPY and Minervini buy-and-hold.
+Backtest script: `enhanced_backtest.py` — compares V1 through V12 vs SPY and Minervini buy-and-hold.
 
-### Full run (Jan 2024 – Dec 2025, ALL.txt)
+### Full run (Jan 2024 – Dec 2025, ALL.txt) — pre-optimizer baseline
 
 | Config | Return | Sharpe | MaxDD | Win Rate | vs SPY |
 |--------|--------|--------|-------|----------|--------|
 | **SPY Buy & Hold** | +87.67% | 1.45 | -18.76% | — | baseline |
 | Minervini Screen (25 stocks) | +76.32% | — | -17.95% | — | -11.35% |
-| **V9-C** V8+TP→Trail PREMIUM+ | **+89.52%** | 1.50 | -5.23% | 60.4% | **+1.85%** ← only config to beat SPY |
+| **V9-C** V8+TP→Trail PREMIUM+ | **+89.52%** | 1.50 | **-5.23%** | 60.4% | **+1.85%** ← only config to beat SPY |
 | V8-B Minervini PREMIUM+ | +62.16% | 1.84 | -7.55% | 62.5% | -25.51% |
 | V1-A HIGH+ baseline | +48.54% | 2.59 | -9.29% | 53.7% | -39.13% |
 | V8-A Minervini HIGH+ | +46.79% | 1.99 | -11.00% | 51.9% | -40.88% |
-| V10-A VCP HIGH+ | +25.28% | 1.48 | **-6.26%** | **60.4%** | -62.40% |
-| V10MX-A VCP+Miner+overext HIGH+ | +20.70% | **1.66** | **-4.42%** | **63.2%** | -66.97% |
+| V10-A VCP HIGH+ | +25.28% | 1.48 | -6.26% | 60.4% | -62.40% |
+| V10MX-A VCP+Miner+overext HIGH+ | +20.70% | 1.66 | -4.42% | 63.2% | -66.97% |
+
+### V12 comparison (Jan 2024, 30 symbols from optimizer_watch.txt)
+
+2024 was a strong bull market (SPY +58.82%) dominated by mega-cap momentum. Results:
+
+| Config | Signals | Return | Sharpe | MaxDD | vs SPY |
+|--------|---------|--------|--------|-------|--------|
+| SPY Buy & Hold | 1 | +58.82% | 1.88 | -9.97% | — |
+| Minervini Screen (20 stocks) | 20 | +67.06% | 2.07 | -17.17% | +8.24% |
+| **V8-C** Minervini HIGH+ aggressive | 90 | **+52.09%** | **2.50** | **-9.66%** | -6.73% |
+| V1-A HIGH+ baseline | 96 | +42.21% | 2.24 | -9.53% | -16.61% |
+| V1-B ALL quality | 179 | +46.04% | 2.47 | -8.61% | -12.78% |
+
+> Note: V6X-A (overextension filter) degraded to +12.71% in 2024 — the overextension filter
+> excluded the biggest winners (NVDA, TSLA, COIN) which ran 100-300% continuously.
+
+### V11/V12 feature isolation (Mar 2026, 2024, 30 symbols)
+
+| Config | Signals | Return | Sharpe | MaxDD | Finding |
+|--------|---------|--------|--------|-------|---------|
+| V1-A HIGH+ (baseline) | 96 | +42.21% | 2.24 | -9.53% | — |
+| **V11-Z** WITHOUT S/R feature | 77 | +39.51% | **2.35** | **-7.68%** | Better risk-adjusted |
+| V11-A WITH S/R feature | 19 | +19.71% | 1.27 | -8.16% | Underperforms in 2024 |
+| V12-A Pattern confirmed | 96 | +42.21% | 2.24 | -9.53% | 100% pattern rate — not discriminating |
+
+**V11 insight:** S/R-confirmed signals underperformed in 2024 (pure momentum market). In choppier markets, S/R confirmation adds value. Signals *without* S/R features had slightly better risk-adjusted returns.
+
+**V12 insight:** `has_bullish_pattern` fires on ~100% of breakout signals (by design — breakouts are patterns). Pattern scoring boosts signal scores (+13 pts) but the boolean alone is not a useful gate.
+
+### Optuna Weight Optimizer (Mar 2026, 78 symbols)
+
+```bash
+python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt --apply
+```
+
+Walk-forward: 4 folds × 6 months (optimize on folds 1–3, validate on fold 4).
+
+| Fold | Period | Role | Sharpe | Return |
+|------|--------|------|--------|--------|
+| 1 | 2023-01 → 2023-06 | optimize | 3.201 | +79.15% |
+| 2 | 2023-07 → 2023-12 | optimize | 0.445 | +27.52% |
+| 3 | 2024-01 → 2024-06 | optimize | 3.309 | +52.84% |
+| **4** | **2024-07 → 2024-12** | **held-out** | **0.771** | **+4.69%** |
+
+Optimizer comparison (2024 full year): current weights +25.9% → optimized +40.5%, Sharpe 2.38 → 3.09.
+Fold 4 validation positive (no catastrophic overfitting).
+
+### Best combination recommendation
+
+| Use case | Config | Why |
+|----------|--------|-----|
+| **Live notifications** | V9-C (Minervini PREMIUM+ + TP→Trail) | Only config to beat SPY 2024-2025; -5.23% max DD |
+| **High signal volume** | V8-C (Minervini HIGH+ aggressive) | Best Sharpe in pure momentum markets (2024) |
+| **Risk-minimized** | V10MX-A (VCP + Minervini + overext) | -4.42% max DD, 63.2% win rate |
+| **Research/scan all** | V1-B ALL quality | Maximum signal visibility; best for discovery |
+
+**Bottom line:** V9-C is the live trading standard. Use V8-C for 2024-style bull markets.
+The optimizer-tuned weights improve signal scoring but the primary alpha driver is the
+**Minervini PREMIUM filter**, not the individual scoring weight values.
 
 ### V9-C: the recommended live config
 
@@ -402,11 +503,15 @@ python enhanced_backtest.py --watchlist input/ALL.txt --start 2025-01-01 --end 2
 # Full: all symbols, 2-year reference
 python enhanced_backtest.py --watchlist input/ALL.txt --start 2024-01-01 --end 2025-12-31
 
-# Unbuffered output (see progress)
-python -u enhanced_backtest.py ...
+# V11/V12 isolation only
+python enhanced_backtest.py --watchlist input/optimizer_watch.txt --start 2024-01-01 --end 2024-12-31 --versions v1,v11,v12 --limit 30
+
+# Run weight optimizer (300 trials, ~45 min)
+python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt --apply
 ```
 
 Results saved to `scanner_output/backtests/multi_config_vs_spy_YYYY-MM-DD_YYYY-MM-DD.json`.
+Optimizer results: `scanner_output/optimizer/best_weights_YYYYMMDD_HHMMSS.json`.
 
 ### Intraday optimization findings (daytrade mode)
 

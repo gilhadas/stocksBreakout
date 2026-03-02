@@ -304,6 +304,7 @@ class BreakoutDetector:
 
         # --- SIGNAL SCORING SYSTEM ---
         use_scoring = kwargs.get('use_scoring', True)
+        sr_data: dict = {}   # V11: populated inside use_scoring block
 
         if use_scoring:
             # Mandatory gate: price must break above previous high.
@@ -324,6 +325,7 @@ class BreakoutDetector:
                     'rsi_favorable': rsi_favorable,
                     'macd_favorable': macd_favorable,
                     'adx_trending': adx_trending,
+                    'has_bullish_pattern': has_bullish_pattern,  # V12: pattern checks for all variants
                 }
             else:
                 # V2/V3: Composite momentum + conviction + pattern scores
@@ -356,6 +358,17 @@ class BreakoutDetector:
             # V10: VCP quality (proportional 0.0-1.0, only added when detected)
             if vcp_quality > 0:
                 checks['vcp_quality'] = vcp_quality
+
+            # V11: Support & Resistance levels (uses cached df — no extra fetch)
+            from pattern_recognition import detect_sr_levels
+            sr_data = detect_sr_levels(
+                df,
+                current_price=float(latest['close']),
+                atr=float(latest['ATR']) if not pd.isna(latest.get('ATR', float('nan'))) else 1.0,
+            )
+            checks['sr_breakout'] = sr_data['breaking_resistance']
+            checks['at_key_support'] = sr_data['at_key_support']
+            checks['trendline_break'] = sr_data['breaking_trendline']
 
             if mode_name != 'scalping':
                 checks['rs_ok'] = rs_ok
@@ -485,6 +498,21 @@ class BreakoutDetector:
             'VCP_Quality': round(vcp_quality, 2) if vcp_quality > 0 else '',
             'VCP_Pivot': round(vcp_data['pivot_point'], 2) if vcp_data else '',
             'VCP_Contractions': vcp_data.get('num_contractions', '') if vcp_data else '',
+            # V11: S/R levels
+            'SR_Resistance':     sr_data.get('nearest_resistance', '') if use_scoring else '',
+            'SR_Res_Strength':   sr_data.get('resistance_strength', '') if use_scoring else '',
+            'SR_Support':        sr_data.get('nearest_support', '') if use_scoring else '',
+            'SR_Sup_Strength':   sr_data.get('support_strength', '') if use_scoring else '',
+            'SR_Break':          sr_data.get('breaking_resistance', False) if use_scoring else False,
+            # V11b: Angled trendlines + channel
+            'SR_TL_Resistance':  sr_data.get('trendline_resistance',   '') if use_scoring else '',
+            'SR_TL_Support':     sr_data.get('trendline_support',      '') if use_scoring else '',
+            'SR_InChannel':      sr_data.get('in_channel',             False) if use_scoring else False,
+            'SR_Channel_Dir':    sr_data.get('channel_direction',      '') if use_scoring else '',
+            'SR_Channel_Width%': sr_data.get('channel_width_pct',      '') if use_scoring else '',
+            'SR_TL_Break':       sr_data.get('breaking_trendline',     False) if use_scoring else False,
+            # V12: Raw check booleans for weight optimizer re-scoring
+            'Checks':            {k: bool(v) for k, v in checks.items()} if use_scoring else {},
         }
         
         if mode_name == 'scalping' and spread_pct is not None:

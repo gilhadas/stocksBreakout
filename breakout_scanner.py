@@ -148,8 +148,6 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
 
     # Display and save results
     if results:
-        import pandas as pd
-
         logger.info(f"\n{'='*70}")
         logger.info(f" {args.mode.upper()} SIGNALS FOUND: {len(results)}")
         logger.info(f"{'='*70}\n")
@@ -300,7 +298,6 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     
     # Display and save results
     if exit_results:
-        import pandas as pd
 
         # Deduplicate: skip exits already notified today
         exit_history_file = Path('scanner_output/.exit_history.json')

@@ -181,6 +181,7 @@ def run_all_scans(historical, start_date, end_date, modes=None):
             'is_momentum': sig.get('Type') == 'Momentum',      # V7
             'is_vcp': bool(sig.get('VCP', False)),              # V10: VCP detected
             'vcp_quality': sig.get('VCP_Quality', 0) or 0,     # V10: 0.0-1.0
+            'checks': sig.get('Checks', {}),                    # V12: raw feature booleans for optimizer
         }
         if sig_type == 'BREAKOUT':
             base.update({
@@ -349,6 +350,100 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
     print(f"    PREMIUM: {premiums} | HIGH: {highs} | STANDARD: {standards}")
 
     return all_signals
+
+
+def run_prescan(historical, start_date, end_date, modes=None, date_step: int = 5) -> list:
+    """
+    Fast pre-scan for weight optimizer.
+
+    Scans every date_step-th trading day (default=5, i.e. weekly) with
+    threshold=0 so all candidates pass.  Only runs the v1 variant to
+    minimise compute.  Returns candidate dicts with raw 'checks' booleans
+    for Optuna re-scoring without re-running the detector.
+
+    ~15x faster than calling run_all_scans() (weekly cadence + single variant).
+    """
+    import config
+
+    if modes is None:
+        modes = ['swing', 'longterm']
+
+    orig = dict(config.SCORE_THRESHOLDS)
+    config.SCORE_THRESHOLDS.update({'GOLD': 0, 'PREMIUM': 0, 'HIGH': 0, 'STANDARD': 0})
+
+    try:
+        detector   = BreakoutDetector()
+        spy_df     = historical.get('SPY')
+        symbols    = [s for s in historical if s != 'SPY']
+
+        all_dates  = pd.date_range(start=start_date, end=end_date, freq='B')
+        sim_dates  = all_dates[::date_step]           # every Nth trading day
+
+        print(f"\n  [Prescan] {len(symbols)} symbols x {len(modes)} modes "
+              f"x {len(sim_dates)} dates (step={date_step})...")
+
+        candidates = []
+        cooldowns  = {}
+
+        for sim_date in sim_dates:
+            spy_perf = 0.0
+            if spy_df is not None:
+                spy_perf = calculate_spy_perf_on_date(spy_df, sim_date, lookback=15)
+
+            for symbol in symbols:
+                df       = historical[symbol]
+                df_slice = df[df.index <= sim_date]
+
+                if len(df_slice) < 150:
+                    continue
+                # Skip if latest data is more than 1 week stale
+                if df_slice.index[-1].date() < (sim_date - pd.Timedelta(days=7)).date():
+                    continue
+
+                last_sig = cooldowns.get(symbol)
+                if last_sig and (sim_date - last_sig).days < 10:
+                    continue
+
+                for mode_name in modes:
+                    try:
+                        sig = detector.detect(
+                            df_slice, symbol, mode_name, '1 day', spy_perf,
+                            use_scoring=True,
+                            use_legacy_momentum=True,
+                            use_v4_overextension=False,
+                        )
+                    except Exception:
+                        sig = None
+
+                    if sig and sig.get('Checks'):
+                        candidates.append({
+                            'date':           sim_date,
+                            'symbol':         symbol,
+                            'action':         'BUY',
+                            'price':          sig['Price'],
+                            'entry_price':    sig['Price'],
+                            'stop_loss':      sig['Stop'],
+                            'take_profit':    sig['Target'],
+                            'quality':        sig['Quality'],
+                            'mode':           mode_name,
+                            'type':           'BREAKOUT',
+                            'win_probability': sig.get('WinProb', 0.50),
+                            'rr_grade':       sig.get('RR_Grade', ''),
+                            'patterns':       sig.get('Patterns', ''),
+                            'minervini_score': sig.get('MinerviniScore', 0),
+                            'is_momentum':    sig.get('Type') == 'Momentum',
+                            'is_vcp':         bool(sig.get('VCP', False)),
+                            'vcp_quality':    sig.get('VCP_Quality', 0) or 0,
+                            'checks':         sig.get('Checks', {}),
+                        })
+                        cooldowns[symbol] = sim_date
+                        break   # one signal per symbol per scan date
+
+        print(f"    → {len(candidates)} candidates collected")
+        return candidates
+
+    finally:
+        config.SCORE_THRESHOLDS.update(orig)
 
 
 def run_simulation(signals, start_date, end_date, end_prices, historical,
@@ -677,6 +772,28 @@ async def main():
     print(f"  [V10] VCP signals (V2 base):                  {len(v10_signals)}")
     print(f"  [V10M] VCP + Minervini≥{m_thresh}:            {len(v10m_signals)}")
     print(f"  [V10MX] VCP + Minervini≥{m_thresh}+overext:   {len(v10mx_signals)}")
+
+    # V11 = V1 signals with at least one S/R feature (sr_breakout, at_key_support, trendline_break)
+    v11_signals = [s for s in v1_signals if any([
+        s.get('checks', {}).get('sr_breakout'),
+        s.get('checks', {}).get('at_key_support'),
+        s.get('checks', {}).get('trendline_break'),
+    ])]
+    # V11-none = V1 signals without ANY V11 S/R feature (comparison baseline)
+    v11_none_signals = [s for s in v1_signals if not any([
+        s.get('checks', {}).get('sr_breakout'),
+        s.get('checks', {}).get('at_key_support'),
+        s.get('checks', {}).get('trendline_break'),
+    ])]
+    # V12 = V1 signals with bullish chart/candle pattern confirmed
+    v12_signals = [s for s in v1_signals if s.get('checks', {}).get('has_bullish_pattern')]
+    # V12-none = V1 signals without any pattern confirmation
+    v12_none_signals = [s for s in v1_signals if not s.get('checks', {}).get('has_bullish_pattern')]
+
+    print(f"  [V11]  WITH S/R feature (sr_breakout/at_key_support/trendline_break): {len(v11_signals)}")
+    print(f"  [V11-Z] WITHOUT S/R feature:                                          {len(v11_none_signals)}")
+    print(f"  [V12]  Pattern confirmed (has_bullish_pattern):                       {len(v12_signals)}")
+    print(f"  [V12-Z] No pattern confirmation:                                      {len(v12_none_signals)}")
 
     if not v1_signals and not v2_signals:
         print("\nNo signals generated. Exiting.")
@@ -1052,6 +1169,36 @@ async def main():
             'name': f'V10MX-B) VCP+Minervini+overext, PREMIUM+',
             'signals': v10mx_signals,
             'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        # V11 configs: isolate impact of S/R features (sr_breakout, at_key_support, trendline_break)
+        {
+            'name': 'V11-A) WITH S/R feature, HIGH+',
+            'signals': v11_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V11-Z) WITHOUT S/R feature, HIGH+ (baseline)',
+            'signals': v11_none_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        # V12 configs: isolate impact of chart/candle pattern confirmation
+        {
+            'name': 'V12-A) Pattern confirmed, HIGH+',
+            'signals': v12_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
+            'pos_pct': 0.10, 'risk_pct': 0.02,
+            'trailing': False,
+        },
+        {
+            'name': 'V12-Z) No pattern, HIGH+ (baseline)',
+            'signals': v12_none_signals,
+            'filter': lambda s: s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH'),
             'pos_pct': 0.10, 'risk_pct': 0.02,
             'trailing': False,
         },

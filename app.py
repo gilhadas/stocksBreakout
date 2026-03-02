@@ -66,7 +66,7 @@ if not check_auth():
 st.sidebar.title("Breakout Scanner")
 
 # Handle programmatic page switches (from Chart/Back buttons)
-_pages = ["Scan", "Signals", "Portfolio", "Chart", "Backtest", "Watchlists"]
+_pages = ["Portfolio", "Scan", "Signals", "Chart", "Backtest", "Watchlists"]
 _next = st.session_state.pop('_next_page', None)
 if _next and _next in _pages:
     st.session_state['nav_radio'] = _next

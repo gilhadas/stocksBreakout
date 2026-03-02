@@ -39,31 +39,34 @@ PORTFOLIO = {
 # --- Signal Scoring Configuration ---
 # V2: Composite momentum + conviction scoring (replaces 3 binary checks)
 SCORING_WEIGHTS = {
-    'vol_confirm': 16,          # Volume is king
-    'trend_ok': 16,             # Trend is king
-    'momentum_strong': 13,      # Composite RSI+MACD+ADX+ROC score >= 50
-    'dist_confirm': 10,
-    'candle_ok': 8,
-    'rr_ok': 10,
-    'no_vol_divergence': 5,
-    'conviction_strong': 8,     # Breakout conviction score >= 40
-    'rs_ok': 8,
-    'consolidation': 8,
-    'has_bullish_pattern': 10,  # V3: Pattern confirmation bonus
-    'near_52w_high': 8,         # V5: Within 5% of 52-week high
-    'rsi_divergence': 5,        # V5: RSI bullish divergence
-    'sector_momentum': 6,       # V5: Sector ETF momentum
-    'pattern_vol_confirmed': 2, # V6: Pattern confirmed by volume (reduced V9 — False signals win more often)
-    'momentum_surge': 12,      # V7: Explosive gap/intraday move + high volume
-    'minervini_template': 15,  # V8: Minervini Stage 2 Trend Template
-    'vcp_quality': 14,         # V10: VCP proportional score (0.0-1.0)
+    'vol_confirm': 16,          # Volume is king (unchanged)
+    'trend_ok': 2,              # Trend is king — optimizer reduced (dist/support more predictive)
+    'momentum_strong': 3,       # Composite RSI+MACD+ADX+ROC score >= 50
+    'dist_confirm': 24,         # Distance from MA — optimizer top signal
+    'candle_ok': 19,            # Candle structure — optimizer raised
+    'rr_ok': 2,                 # R:R ratio — optimizer reduced
+    'no_vol_divergence': 6,
+    'conviction_strong': 4,     # Breakout conviction score >= 40
+    'rs_ok': 16,                # Relative strength vs SPY — optimizer raised
+    'consolidation': 12,        # Consolidation quality
+    'has_bullish_pattern': 13,  # V3: Pattern confirmation bonus
+    'near_52w_high': 17,        # V5: Within 5% of 52-week high — optimizer raised
+    'rsi_divergence': 14,       # V5: RSI bullish divergence — optimizer raised
+    'sector_momentum': 8,       # V5: Sector ETF momentum
+    'pattern_vol_confirmed': 12,# V6: Pattern confirmed by volume — optimizer raised
+    'momentum_surge': 2,        # V7: Explosive gap/intraday move + high volume — optimizer reduced
+    'minervini_template': 0,    # V8: Minervini Stage 2 — optimizer eliminated
+    'vcp_quality': 15,          # V10: VCP proportional score (0.0-1.0)
+    'sr_breakout': 11,          # V11: Breaking above tested resistance (≥2 touches)
+    'at_key_support': 24,       # V11: Price hugging a key support zone — optimizer top signal
+    'trendline_break': 9,       # V11b: Breaking above angled resistance trendline (≥3 swing highs)
 }
 
 SCORE_THRESHOLDS = {
-    'GOLD': 90,
-    'PREMIUM': 80,
-    'HIGH': 65,
-    'STANDARD': 60,
+    'GOLD': 99,      # was 90 — optimizer tightened GOLD (fewer but higher conviction)
+    'PREMIUM': 69,   # was 80 — optimizer lowered (more PREMIUM signals pass)
+    'HIGH': 65,      # unchanged
+    'STANDARD': 50,  # was 60 — optimizer lowered
 }
 
 QUALITY_SIZING = {
