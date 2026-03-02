@@ -385,12 +385,38 @@ def refresh_prices() -> dict:
 
 # ── Trailing stop simulation ──────────────────────────────────────────────────
 
-def simulate_trailing_stops(trail_pct: float = TRAIL_PCT) -> dict:
+def _compute_atr_series(hist: 'pd.DataFrame', period: int = 14) -> 'pd.Series':
+    """Compute Wilder's ATR from yfinance history (capitalized columns).
+
+    Uses EWM (exponential smoothing) — Wilder's original definition —
+    which is more responsive than a simple rolling mean.
+    """
+    import pandas as pd
+    tr = pd.concat([
+        hist['High'] - hist['Low'],
+        (hist['High'] - hist['Close'].shift(1)).abs(),
+        (hist['Low']  - hist['Close'].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+
+def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
+                             atr_mult: float = 0.0,
+                             atr_period: int = 14) -> dict:
     """
     Walk through every trading day from each position's date_added to today.
-    Trailing stop = max(initial_stop, highest_close_since_entry * (1 - trail_pct)).
-    Close the position on the first day its low touches or crosses the trailing stop.
 
+    Two trailing-stop modes (mutually exclusive):
+
+    PCT mode (atr_mult == 0):
+        trail_stop = max(initial_stop, highest_close * (1 - trail_pct))
+
+    ATR mode (atr_mult > 0):
+        trail_stop = max(initial_stop, highest_close - atr_mult * ATR14)
+        ATR is Wilder's EWM-smoothed ATR on daily bars.
+        trail_pct is ignored in this mode.
+
+    Close the position on the first day its low touches the trailing stop.
     Returns {'closed': [symbols], 'checked': int, 'data': data}
     """
     import yfinance as yf
@@ -401,6 +427,7 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT) -> dict:
         _save(data)
         return {'closed': [], 'checked': 0, 'data': data}
 
+    use_atr    = atr_mult > 0
     closed_now = []
     still_open = []
 
@@ -411,43 +438,62 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT) -> dict:
         entry_price  = p['entry_price']
 
         try:
-            # Use start= only (no period=) to get the full history from entry
+            # Fetch extra history before entry for ATR warm-up (45 calendar days)
+            if use_atr:
+                warmup_start = (
+                    pd.Timestamp(date_added) - pd.Timedelta(days=45)
+                ).strftime('%Y-%m-%d')
+            else:
+                warmup_start = date_added
+
             hist = yf.Ticker(sym.replace(' ', '-')).history(
-                start=date_added, auto_adjust=True
+                start=warmup_start,
+                auto_adjust=True,
             )
             if hist is None or hist.empty:
                 still_open.append(p)
                 continue
 
-            # Strip timezone so date string formatting is unambiguous
+            # Strip timezone
             idx = hist.index
             if hasattr(idx, 'tz') and idx.tz is not None:
                 idx = idx.tz_localize(None)
             hist.index = idx
 
+            # Pre-compute ATR series for the full history
+            atr_series = _compute_atr_series(hist, atr_period) if use_atr else None
+
+            # Trim to entry date for the walk-forward loop
+            entry_dt = pd.Timestamp(date_added)
+            hist_from_entry = hist[hist.index >= entry_dt]
+            if hist_from_entry.empty:
+                still_open.append(p)
+                continue
+
             # Walk each trading day chronologically
             highest_close = entry_price
             closed_this   = False
-            first_bar     = True   # skip entry-day stop check (position just opened)
+            first_bar     = True
 
-            for date, row in hist.iterrows():
+            for date, row in hist_from_entry.iterrows():
                 close = float(row['Close'])
                 low   = float(row['Low'])
 
                 if first_bar:
-                    # On the entry day the position was just initiated; update
-                    # high-water mark with the day's close, then move on.
                     if close > highest_close:
                         highest_close = close
                     first_bar = False
                     continue
 
-                # Trailing stop is set BEFORE the current bar opens, based on
-                # the highest close seen so far (previous day's data).
-                trail_stop = max(initial_stop,
-                                 round(highest_close * (1.0 - trail_pct), 4))
+                # Compute trailing stop level
+                if use_atr:
+                    atr_val = float(atr_series.get(date, atr_series.dropna().iloc[-1]))
+                    trail_stop = max(initial_stop,
+                                     round(highest_close - atr_mult * atr_val, 4))
+                else:
+                    trail_stop = max(initial_stop,
+                                     round(highest_close * (1.0 - trail_pct), 4))
 
-                # Position closed when intraday low touches the trailing stop
                 if low <= trail_stop:
                     exit_px   = trail_stop
                     exit_date = date.strftime('%Y-%m-%d')
@@ -460,25 +506,29 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT) -> dict:
                         'pnl':            pnl,
                         'pnl_pct':        pnl_pct,
                         'close_reason':   'trailing_stop',
-                        'trail_pct':      trail_pct,
+                        'trail_pct':      trail_pct if not use_atr else None,
+                        'atr_mult':       atr_mult  if use_atr else None,
                         'highest_close':  round(highest_close, 4),
                     })
                     closed_now.append(sym)
                     closed_this = True
                     break
 
-                # Update high-water mark AFTER stop check (stop was set before bar opened)
                 if close > highest_close:
                     highest_close = close
 
             if not closed_this:
-                # Still open — update current price to latest close
-                p['current_price'] = round(float(hist['Close'].dropna().iloc[-1]), 4)
-                # Store current trailing stop for UI display
+                last_close = float(hist_from_entry['Close'].dropna().iloc[-1])
+                p['current_price'] = round(last_close, 4)
                 highest = max(entry_price,
-                              float(hist['Close'].dropna().max()))
-                p['trail_stop'] = max(initial_stop,
-                                      round(highest * (1.0 - trail_pct), 4))
+                              float(hist_from_entry['Close'].dropna().max()))
+                if use_atr:
+                    atr_now = float(atr_series.dropna().iloc[-1])
+                    p['trail_stop'] = max(initial_stop,
+                                          round(highest - atr_mult * atr_now, 4))
+                else:
+                    p['trail_stop'] = max(initial_stop,
+                                          round(highest * (1.0 - trail_pct), 4))
                 still_open.append(p)
 
         except Exception:
