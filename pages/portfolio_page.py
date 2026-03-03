@@ -791,7 +791,7 @@ def _render_watch_lists():
     cols = st.columns(len(_WATCHLIST_FILES))
     for col, (fname, label, desc) in zip(cols, _WATCHLIST_FILES):
         path = f"{_LISTS_DIR}/{fname}"
-        st.text(
+        st.text(path)  # show the file path being read for transparency/debugging   
 
         symbols, found = _read_txt_symbols(path)
         col.metric(label=label, value=f"{len(symbols)} symbols" if found else "Not found")
