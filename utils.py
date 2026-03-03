@@ -178,8 +178,6 @@ def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
     """Load text file — tries S3 first (via raw s3fs), falls back to local."""
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
-    import streamlit as st
-    st.toast(f"Attempting to load text from S3 path: {s3_path}")
     if _is_cloud(): 
         try:
             fs = _s3_fs()
