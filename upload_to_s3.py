@@ -7,6 +7,12 @@ Usage:
     python upload_to_s3.py                          # upload default dirs
     python upload_to_s3.py --dirs scanner_output/signals scanner_output/portfolio
     python upload_to_s3.py --hours 2               # only files modified in last 2 h
+    python upload_to_s3.py --files path/to/file.csv path/to/other.csv  # exact files
+    python upload_to_s3.py --files "scanner_output/signals/signals_daytrade_*.csv"
+
+    # In cron — capture the newest signal file and upload only that:
+    SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1)
+    [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio
 
 Credentials (in priority order):
     1. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in environment
@@ -15,6 +21,7 @@ Credentials (in priority order):
 """
 
 import argparse
+import glob as _glob
 import logging
 import os
 import sys
@@ -47,6 +54,9 @@ DEFAULT_DIRS = [
     'scanner_output/portfolio',
     'scanner_output/signal_reports',
 ]
+
+# File extensions never uploaded to S3 (logs stay local only)
+EXCLUDED_EXTENSIONS = {'.log'}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,6 +100,8 @@ def upload_dir(s3, bucket: str, local_dir: str,
     for f in sorted(local_path.rglob('*')):
         if not f.is_file():
             continue
+        if f.suffix in EXCLUDED_EXTENSIONS:
+            continue
         mtime = f.stat().st_mtime
         if since_seconds is not None and (now - mtime) > since_seconds:
             continue
@@ -110,14 +122,62 @@ def upload_dir(s3, bucket: str, local_dir: str,
     return count
 
 
+def upload_files(s3, bucket: str, paths: list[str]) -> int:
+    """Upload a specific list of files (absolute or relative paths, supports globs).
+
+    Args:
+        s3:     boto3 S3 client
+        bucket: S3 bucket name
+        paths:  List of file paths or glob patterns (relative to PROJECT_ROOT or absolute)
+
+    Returns:
+        Number of files uploaded.
+    """
+    count = 0
+    for pattern in paths:
+        # Expand glob patterns; fall back to treating as literal path
+        p = Path(pattern)
+        if not p.is_absolute():
+            pattern = str(PROJECT_ROOT / pattern)
+        matched = _glob.glob(pattern, recursive=True)
+        if not matched:
+            logger.warning(f"  No files matched: {pattern}")
+            continue
+        for fpath in sorted(matched):
+            f = Path(fpath)
+            if not f.is_file():
+                continue
+            if f.suffix in EXCLUDED_EXTENSIONS:
+                logger.warning(f"  Skipping log file: {fpath}")
+                continue
+            # Keep path relative to PROJECT_ROOT for the S3 key
+            try:
+                rel = f.relative_to(PROJECT_ROOT)
+            except ValueError:
+                rel = f  # absolute path outside project root — use full path as key
+            s3_key = str(rel).replace('\\', '/')
+            try:
+                s3.upload_file(str(f), bucket, s3_key)
+                logger.info(f"  ✓ {s3_key}")
+                count += 1
+            except ClientError as e:
+                logger.error(f"  ✗ {s3_key}: {e}")
+    return count
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Upload scanner_output to S3 for Streamlit Cloud access'
     )
     parser.add_argument(
-        '--dirs', nargs='+', default=DEFAULT_DIRS, metavar='DIR',
+        '--dirs', nargs='+', default=None, metavar='DIR',
         help=f'Directories to upload (relative to project root). '
-             f'Default: {" ".join(DEFAULT_DIRS)}'
+             f'Default (when --files not given): {" ".join(DEFAULT_DIRS)}'
+    )
+    parser.add_argument(
+        '--files', nargs='+', default=None, metavar='FILE',
+        help='Specific files or glob patterns to upload (relative to project root or absolute). '
+             'When provided, --dirs is still processed if explicitly given.'
     )
     parser.add_argument(
         '--hours', type=float, default=None, metavar='N',
@@ -137,6 +197,9 @@ def main():
     since_seconds = args.hours * 3600 if args.hours else None
     since_epoch = args.since_epoch
 
+    # When --files is given but --dirs is not, skip the default dirs
+    dirs_to_scan = args.dirs if args.dirs is not None else ([] if args.files else DEFAULT_DIRS)
+
     try:
         s3 = _s3_client()
     except NoCredentialsError:
@@ -153,7 +216,15 @@ def main():
         logger.info(f"  (only files modified in last {args.hours:.1f} h)")
 
     total = 0
-    for d in args.dirs:
+
+    # Upload explicit files first
+    if args.files:
+        n = upload_files(s3, args.bucket, args.files)
+        total += n
+        logger.info(f"  --files: {n} file(s)")
+
+    # Then any directories
+    for d in dirs_to_scan:
         n = upload_dir(s3, args.bucket, d, since_seconds, since_epoch)
         total += n
         if n:

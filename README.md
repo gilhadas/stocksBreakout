@@ -14,15 +14,16 @@ backtesting, and automated cron + Discord notifications.
 2. [Quick Start](#quick-start)
 3. [Trading Modes](#trading-modes)
 4. [Detection Pipeline](#detection-pipeline)
-5. [Signal Scoring (V10)](#signal-scoring-v10)
+5. [Signal Scoring (V12)](#signal-scoring-v12--optuna-optimized-weights)
 6. [CLI Reference](#cli-reference)
 7. [Output Columns](#output-columns)
 8. [Cron Schedule](#cron-schedule)
-9. [Backtest Results](#backtest-results)
-10. [Streamlit Dashboard](#streamlit-dashboard)
-11. [Notifications](#notifications)
-12. [IB Connection](#ib-connection)
-13. [Troubleshooting](#troubleshooting)
+9. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
+10. [Backtest Results](#backtest-results)
+11. [Streamlit Dashboard](#streamlit-dashboard)
+12. [Notifications](#notifications)
+13. [IB Connection](#ib-connection)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -393,14 +394,96 @@ python upload_to_s3.py --since-epoch $START --dirs scanner_output/signals scanne
 
 Requires `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `.env` or environment.
 
-### momentum-watch monitor (`monitor_watch.py`)
+---
 
-Standalone 15-min script — tracks HOLDING/RECOVERING/FADING/FAILED status per symbol.
+## Momentum-Watch Monitor (`monitor_watch.py`)
 
-- Fib retracement column: nearest level (0%, 23.6%, 38.2%, 50%, 61.8%, 78.6%, 100%)
-- State file: `scanner_output/.watch_monitor_YYYYMMDD.json`
-- Alerts only on status **change** (no spam)
-- Discord alert on FADING/FAILED; info alert on recovery
+Standalone script run every 15 minutes during market hours. Tracks whether stocks on the
+momentum-watch list are still running or fading — without running a full scan.
+
+> **Does NOT write any CSV files.** It writes only one hidden JSON state file per day
+> (`scanner_output/.watch_monitor_YYYYMMDD.json`). It is therefore **not** a cause of
+> duplicate signal CSVs appearing in S3.
+
+### How it works
+
+**Input:** `input/momentum_watch_daytrade.txt` — populated by the Phase 1 daytrade scan
+(`--export-momentum-watch`). Contains PREMIUM/GOLD + HIGH-momentum + near-miss symbols.
+
+**Data:** Fetches 15-min bars from yfinance (no IB needed). Always fresh — disk cache disabled.
+
+**Classification per symbol (4 statuses):**
+
+| Status | Trigger | Icon |
+|--------|---------|------|
+| `HOLDING` | Price ≥ today's open | ✅ |
+| `RECOVERING` | Price slightly below open but not failed | 🟡 |
+| `FADING` | Price > 3% below intraday high **AND** (3-bar trend falling OR volume dried up) | ⚠️ |
+| `FAILED` | Price > 2% below today's open (move is dead) | 🔴 |
+
+**Fibonacci retracement column:** For each symbol, prints the nearest Fib level to the current price,
+measured downward from today's intraday high to intraday low:
+
+```
+0%  →  At today's high (full move intact)
+23.6%, 38.2%, 50%, 61.8%, 78.6%  →  Partial retracement levels
+100%  →  Full give-back to today's low (move failed)
+```
+
+**State file** (`scanner_output/.watch_monitor_YYYYMMDD.json`):
+Stores the last known status for each symbol. One file per trading day (auto-reset at midnight ET).
+Used to detect **transitions** — alerts fire only when status *changes*, not on every check.
+
+**Discord notification logic:**
+
+| Transition | Alert level |
+|-----------|-------------|
+| HOLDING → FADING | `warn` (orange) |
+| HOLDING → FAILED | `crit` (red) |
+| RECOVERING → FADING | `warn` |
+| RECOVERING → FAILED | `crit` |
+| FADING → FAILED | `crit` |
+| FADING → HOLDING | `info` (green — recovery, don't close early) |
+| FAILED → HOLDING / RECOVERING | `info` |
+
+Each Discord alert shows: current price, vs-open%, vs-high%, nearest Fib level, volume ratio, 3-bar trend.
+
+### Usage
+
+```bash
+# Live daytrade watch list (default)
+python monitor_watch.py --notify
+
+# Swing watch list
+python monitor_watch.py --mode swing --notify
+
+# Custom file, no Discord (dry run)
+python monitor_watch.py --file input/my_watchlist.txt --dry-run
+
+# Print only (no notifications even with --notify)
+python monitor_watch.py                     # omit --notify → no Discord
+```
+
+### Cron schedule
+
+```
+# First check after Phase 1 scan (9:45 AM)
+45 9 * * 1-5   python monitor_watch.py --notify
+
+# Every 15 min 10:00 AM – 3:45 PM
+*/15 10-15 * * 1-5   python monitor_watch.py --notify
+
+# Final check at market close
+0 16 * * 1-5   python monitor_watch.py --notify
+```
+
+### Output files — what it writes (and what it does NOT)
+
+| File | Written? | Notes |
+|------|---------|-------|
+| `scanner_output/.watch_monitor_YYYYMMDD.json` | ✅ Yes | Hidden state file, reset daily |
+| `scanner_output/signals/signals_*.csv` | ❌ No | Only written by `breakout_scanner.py` |
+| Any other CSV | ❌ No | This script never writes CSVs |
 
 ---
 
