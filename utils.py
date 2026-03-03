@@ -20,7 +20,6 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from turtle import st
 from typing import List, Dict, Optional
 
 import pandas as pd
