@@ -755,6 +755,7 @@ def _read_txt_symbols(path: str) -> tuple[list[str], bool]:
         (symbols, found) — found=True means the file existed (even if empty)
     """
     text = load_text(path)
+    st.toast(f"Read {len(text) if text else 0} chars from {path}")
     if text is None:
         return [], False          # file not found
     if not text:
