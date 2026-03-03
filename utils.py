@@ -370,6 +370,8 @@ def get_positions_from_file(file_path: str) -> List[Dict]:
                         'stop': float(row['stop']),
                         'target': float(row['target']),
                         'timeframe': row['timeframe'].strip(),
+                        # quality: default PREMIUM for legacy rows that predate this column
+                        'quality': (row.get('quality', '') or 'PREMIUM').strip().upper(),
                     })
                 except (KeyError, ValueError) as e:
                     logger.warning(f"Skip invalid row in {file_path}: {row} ({e})")
@@ -406,6 +408,13 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
         for pos in get_positions_from_file(positions_file):
             existing_symbols.add(pos['symbol'].upper())
 
+    # Detect if existing file already has a 'quality' column
+    has_quality_col = False
+    if file_exists:
+        with open(positions_file, 'r') as _f:
+            _hdr = csv.DictReader(_f)
+            has_quality_col = 'quality' in (_hdr.fieldnames or [])
+
     # Filter and convert signals
     new_rows = []
     for sig in signals:
@@ -424,6 +433,7 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
             'stop': round(entry_price * 0.99, 2),  # 1% below breakout
             'target': sig.get('Target', 0),
             'timeframe': timeframe,
+            'quality': quality,
         })
         existing_symbols.add(symbol.upper())
 
@@ -431,9 +441,14 @@ def append_signals_to_positions(signals: List[Dict], positions_file: str,
         logger.info(f"No new {min_quality}+ signals to append to {positions_file}")
         return 0
 
+    # Include quality column for new files or files that already have it
+    fieldnames = ['symbol', 'mode', 'entry', 'entry_date', 'stop', 'target', 'timeframe']
+    if not file_exists or has_quality_col:
+        fieldnames.append('quality')
+
     write_header = not file_exists
     with open(positions_file, 'a', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'entry_date', 'stop', 'target', 'timeframe'])
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
         if write_header:
             writer.writeheader()
         writer.writerows(new_rows)

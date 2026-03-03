@@ -164,16 +164,16 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 logger.warning("⚠️  Auto-positions still appended despite market warning — review before trading!")
             append_signals_to_positions(results, args.auto_positions, args.mode)
 
-        # Export PREMIUM tickers to watchlist file for re-evaluation scans
+        # Export PREMIUM + GOLD tickers to watchlist file for re-evaluation scans
         if getattr(args, 'export_premium', None):
             premium_symbols = [
                 sig.get('Symbol') or sig.get('symbol', '')
                 for sig in results
-                if sig.get('Quality') == 'PREMIUM'
+                if sig.get('Quality') in ('PREMIUM', 'GOLD')
             ]
             with open(args.export_premium, 'w') as f:
                 f.write('\n'.join(premium_symbols))
-            logger.info(f"Exported {len(premium_symbols)} PREMIUM tickers to {args.export_premium}")
+            logger.info(f"Exported {len(premium_symbols)} PREMIUM/GOLD tickers to {args.export_premium}")
 
         # Export momentum-watch list: PREMIUM/GOLD + HIGH-momentum + HIGH vol≥3 + near-miss high-vol
         # This broader set is used for subsequent Phase 2 re-evaluation scans
@@ -275,8 +275,15 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     if not positions:
         logger.error("No positions loaded")
         return []
-    
-    logger.info(f"Loaded {len(positions)} positions from {args.exit_file}")
+
+    # Only evaluate exits for PREMIUM and GOLD positions
+    _quality_rank = {'GOLD': 4, 'PREMIUM': 3, 'HIGH': 2, 'STANDARD': 1, 'REJECT': 0}
+    positions = [p for p in positions if _quality_rank.get(p.get('quality', 'PREMIUM'), 0) >= 3]
+    if not positions:
+        logger.info("No PREMIUM/GOLD positions to evaluate for exit")
+        return []
+
+    logger.info(f"Loaded {len(positions)} PREMIUM/GOLD positions from {args.exit_file}")
     
     # Determine regime
     sample_mode = positions[0]['mode']
