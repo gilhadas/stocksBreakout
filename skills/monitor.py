@@ -54,8 +54,8 @@ async def run_monitor_skill(
 
             if not use_portfolio:
                 positions_files = [
-                    'input/positions_swing_mock.csv',
-                    'input/positions_daytrade_mock.csv'
+                    'scanner_output/lists/positions_swing_mock.csv',
+                    'scanner_output/lists/positions_daytrade_mock.csv'
                 ]
 
         if not use_portfolio:

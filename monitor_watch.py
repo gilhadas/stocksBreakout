@@ -4,7 +4,7 @@ monitor_watch.py
 ================
 Momentum-watch signal validator — runs every 15 minutes during trading hours.
 
-Reads input/momentum_watch_daytrade.txt (or --file / --mode).
+Reads scanner_output/lists/momentum_watch_daytrade.txt (or --file / --mode).
 For each symbol, fetches the latest 15-min bars from yfinance and classifies:
 
   HOLDING    — price still above today's open, momentum intact
@@ -19,7 +19,7 @@ Alert state stored in scanner_output/.watch_monitor_YYYYMMDD.json
 Usage:
   python monitor_watch.py                          # live daytrade watch list
   python monitor_watch.py --mode swing             # swing watch list
-  python monitor_watch.py --file input/my.txt      # custom file
+  python monitor_watch.py --file scanner_output/lists/my.txt  # custom file
   python monitor_watch.py --dry-run                # print only, no Discord
   python monitor_watch.py --notify                 # force enable Discord
 """
@@ -51,7 +51,7 @@ OUT_DIR = Path('scanner_output')
 
 # ── Default watch-list paths ──────────────────────────────────────────────────
 WATCH_FILES = {
-    'daytrade': 'input/momentum_watch_daytrade.txt',
+    'daytrade': 'scanner_output/lists/momentum_watch_daytrade.txt',
     'swing':    'input/momentum_watch_swing.txt',
 }
 

@@ -983,7 +983,7 @@ Examples:
         type=str,
         metavar='FILES',
         help='Monitor positions for price drops. Comma-separated CSV files. '
-             'Example:  input/positions_swing_mock.csv,input/positions_daytrade_mock.csv'
+             'Example:  scanner_output/lists/positions_swing_mock.csv,scanner_output/lists/positions_daytrade_mock.csv'
     )
     parser.add_argument(
         '--portfolio-report',

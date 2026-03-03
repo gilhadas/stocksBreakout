@@ -19,11 +19,12 @@ backtesting, and automated cron + Discord notifications.
 7. [Output Columns](#output-columns)
 8. [Cron Schedule](#cron-schedule)
 9. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
-10. [Backtest Results](#backtest-results)
-11. [Streamlit Dashboard](#streamlit-dashboard)
-12. [Notifications](#notifications)
-13. [IB Connection](#ib-connection)
-14. [Troubleshooting](#troubleshooting)
+10. [scanner_output/lists/ — Live Working Files](#scanner_outputlists--live-working-files)
+11. [Backtest Results](#backtest-results)
+12. [Streamlit Dashboard](#streamlit-dashboard)
+13. [Notifications](#notifications)
+14. [IB Connection](#ib-connection)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -46,14 +47,10 @@ weight_optimizer.py    # Optuna walk-forward weight optimizer (V12)
 upload_to_s3.py        # Sync scanner_output to S3 for Streamlit Cloud
 app.py                 # Streamlit dashboard entry point
 input/
-  optimizer_watch.txt  # 78 diverse symbols for weight optimization
+  ALL.txt              # Full watchlist (~1300 symbols)
 pages/
   signals_page.py      # Signal viewer (V9-C default filter)
   portfolio_page.py    # Portfolio P&L dashboard
-input/
-  ALL.txt              # Full watchlist (~1300 symbols)
-  positions_swing_mock.csv   # Mock swing positions
-  positions_daytrade_mock.csv
 scanner_output/
   signals/             # Breakout signal CSVs
   exits/               # Exit evaluation CSVs
@@ -62,6 +59,14 @@ scanner_output/
   backtests/           # Backtest JSON results
   logs/                # Cron and scan logs
   cache/               # yfinance parquet disk cache
+  lists/               # Auto-generated watch lists and live position files
+    premium_swing.txt          # PREMIUM/GOLD swing signals (Phase 2 watchlist)
+    premium_daytrade.txt       # PREMIUM/GOLD daytrade signals (Phase 2 watchlist)
+    premium_longterm.txt       # PREMIUM/GOLD longterm signals (Phase 2 watchlist)
+    momentum_watch_daytrade.txt # Daytrade momentum watch (Phase 1 → Phase 2 feed)
+    optimizer_watch.txt        # 78 diverse symbols for weight optimization
+    positions_swing_mock.csv   # Auto-appended PREMIUM/GOLD swing positions
+    positions_daytrade_mock.csv # Auto-appended PREMIUM/GOLD daytrade positions
 cron_jobs.txt          # Full cron schedule (install with: crontab cron_jobs.txt)
 ```
 
@@ -297,10 +302,10 @@ python breakout_scanner.py <watchlist_file> [options]
 
 ```bash
 # Run with 300 Optuna trials on diverse watchlist
-python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt
+python weight_optimizer.py --trials 300 --symbols scanner_output/lists/optimizer_watch.txt
 
 # Print config.py patch after finding best weights
-python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt --apply
+python weight_optimizer.py --trials 300 --symbols scanner_output/lists/optimizer_watch.txt --apply
 
 # Faster smoke test
 python weight_optimizer.py --trials 10 --symbols input/MAGS.txt
@@ -407,7 +412,7 @@ momentum-watch list are still running or fading — without running a full scan.
 
 ### How it works
 
-**Input:** `input/momentum_watch_daytrade.txt` — populated by the Phase 1 daytrade scan
+**Input:** `scanner_output/lists/momentum_watch_daytrade.txt` — populated by the Phase 1 daytrade scan
 (`--export-momentum-watch`). Contains PREMIUM/GOLD + HIGH-momentum + near-miss symbols.
 
 **Data:** Fetches 15-min bars from yfinance (no IB needed). Always fresh — disk cache disabled.
@@ -487,6 +492,211 @@ python monitor_watch.py                     # omit --notify → no Discord
 
 ---
 
+## scanner_output/lists/ — Live Working Files
+
+All files in `scanner_output/lists/` are **auto-generated at runtime** by cron jobs. They are not static configuration — they are the live state of the scanning pipeline and are overwritten or appended to on each run. Do not edit them manually while cron is active.
+
+---
+
+### `premium_swing.txt`
+
+**Written by:** Phase 1 swing scan (cron 9:35 AM ET, daily)
+**Read by:** Phase 2 swing scan (4:30 PM ET), evening re-scan (7:30 PM ET)
+**CLI flag:** `--export-premium scanner_output/lists/premium_swing.txt`
+
+Contains one ticker per line. Populated with every symbol that scored **PREMIUM or GOLD** quality during the morning-wide swing scan of `input/ALL.txt`. This narrowed list (~10–60 symbols vs ~1300 scanned) is re-evaluated later in the day on updated price data — much faster than re-running the full scan.
+
+```
+# Example content
+PATH
+VECO
+TYL
+NFLX
+```
+
+**Why it matters:** The full `input/ALL.txt` scan at 9:35 AM uses prior-close data. By 4:30 PM, intraday moves may have validated or invalidated the morning signals. Re-scanning only the PREMIUM/GOLD subset makes this fast and targeted.
+
+**Reset:** Overwritten on every Phase 1 morning scan. Stale if the morning scan produced no PREMIUM+ signals (file will be empty).
+
+---
+
+### `premium_daytrade.txt`
+
+**Written by:** Phase 1 daytrade scan (cron 9:35 AM ET, daily)
+**Read by:** *(not re-scanned directly; see `momentum_watch_daytrade.txt` for Phase 2)*
+**CLI flag:** `--export-premium scanner_output/lists/premium_daytrade.txt`
+
+Same concept as `premium_swing.txt` but for daytrade mode. Contains tickers that scored PREMIUM or GOLD on 15-min bars at 9:35 AM. In daytrade flow, Phase 2 uses `momentum_watch_daytrade.txt` (a broader set) rather than this file directly. `premium_daytrade.txt` serves as an audit trail of which symbols met the highest quality bar at open.
+
+**Reset:** Overwritten on every Phase 1 daytrade scan.
+
+---
+
+### `premium_longterm.txt`
+
+**Written by:** Phase 1 longterm scan (cron Monday 9:00 AM ET, weekly)
+**Read by:** Future longterm re-evaluation runs (not currently scheduled)
+**CLI flag:** `--export-premium scanner_output/lists/premium_longterm.txt`
+
+Weekly export of PREMIUM/GOLD tickers from the full `input/ALL.txt` scan in longterm mode (1-week bars, SMA trend). Typically contains fewer signals than swing/daytrade due to the stricter weekly trend requirements. Useful for manually reviewing and seeding long-term positions.
+
+**Reset:** Overwritten every Monday morning. Previous week's list is replaced entirely.
+
+---
+
+### `momentum_watch_daytrade.txt`
+
+**Written by:** Phase 1 daytrade scan (cron 9:35 AM ET, daily)
+**Read by:** Phase 2 daytrade scans (10:00 AM, 2:00 PM, 8:20 PM ET), `monitor_watch.py` (every 15 min)
+**CLI flag:** `--export-momentum-watch scanner_output/lists/momentum_watch_daytrade.txt`
+
+This is the most actively used list file. It is a **broader** export than `premium_daytrade.txt` and includes:
+
+| Inclusion criteria | Reason |
+|--------------------|--------|
+| PREMIUM or GOLD quality | Highest conviction signals |
+| HIGH quality + momentum surge | Strong intraday move (≥5% gap/move + Vol_Ratio ≥3.0) |
+| HIGH quality + Vol_Ratio ≥3.0 | High volume even without a gap |
+| Near-miss breakout (within 0.5% of 52w high) + vol_confirm | Almost broke out — worth watching for follow-through |
+
+**How it flows through the day:**
+
+```
+9:35 AM  Phase 1: scans ALL.txt → writes momentum_watch_daytrade.txt
+9:45 AM  monitor_watch.py first check (HOLDING/FADING/FAILED status)
+10:00 AM Phase 2: re-scans momentum_watch_daytrade.txt with fresh 15-min data
+Every 15 min  monitor_watch.py tracks status changes, sends Discord alerts
+2:00 PM  Phase 2: re-scans momentum_watch_daytrade.txt again
+8:20 PM  Phase 4: evening re-scan on momentum_watch_daytrade.txt
+```
+
+**Current size:** ~100–500 symbols depending on market activity.
+
+**Reset:** Overwritten by every Phase 1 daytrade scan. The monitor (`monitor_watch.py`) only reads it, never writes it.
+
+---
+
+### `optimizer_watch.txt`
+
+**Written by:** Manually curated (not auto-generated)
+**Read by:** `weight_optimizer.py`, `enhanced_backtest.py`
+**CLI flag:** `--symbols scanner_output/lists/optimizer_watch.txt`
+
+A hand-picked list of ~80 symbols covering diverse sectors and market caps, designed to give the Optuna walk-forward optimizer a representative cross-section of the market. Unlike `ALL.txt` (1300+ symbols), this smaller set allows the optimizer to run 300 trials in ~15–30 minutes rather than hours.
+
+**Sector breakdown:**
+
+| Sector | Example symbols |
+|--------|-----------------|
+| Large-Cap Tech | AAPL, MSFT, NVDA, AMD, AVGO |
+| Mid-Cap Tech / High-Growth | DKNG, MELI, HOOD, COIN, RKLB |
+| Finance | GS, JPM, BAC, V, MA |
+| Healthcare | LLY, UNH, ABBV, MRK |
+| Energy | XOM, CVX, OXY, DVN |
+| Industrials | CAT, DE, GE, HON |
+| Consumer | AMZN, COST, WMT, HD |
+| ETFs / Benchmarks | SPY, QQQ, IWM, GLD |
+
+SPY is auto-appended by `weight_optimizer.py` for benchmark comparison even if not listed here.
+
+**Usage:**
+
+```bash
+# Run optimizer on this watchlist
+python weight_optimizer.py --trials 300 --symbols scanner_output/lists/optimizer_watch.txt
+
+# Run backtest comparison using same symbols
+python enhanced_backtest.py --watchlist scanner_output/lists/optimizer_watch.txt \
+  --start 2024-01-01 --end 2024-12-31 --versions v1,v11,v12 --limit 30
+```
+
+**Note:** This file should be edited manually when you want to add/remove symbols. It is the only file in `scanner_output/lists/` that is not auto-generated.
+
+---
+
+### `positions_swing_mock.csv`
+
+**Written by:** `--auto-positions` flag after every swing scan that finds PREMIUM/GOLD signals
+**Read by:** Exit evaluator (3:45 PM, 4:30 PM), portfolio monitor (every 15 min)
+**CLI flags:** `--auto-positions` (write), `--exit-file` (read for exits), `--monitor` (read for monitoring)
+
+> **Not the Streamlit portfolio.** This is a flat input list for the **cron exit evaluator and portfolio monitor scripts**. The Streamlit "Auto Portfolio (V9-C)" tab reads `scanner_output/portfolio/auto_portfolio.json` instead — a separate system managed by `auto_portfolio.py` that simulates $100K of paper capital, tracks P&L, and handles trailing stops. These two systems are independent and do not share data.
+
+Tracks open **swing positions** for cron exit evaluation — PREMIUM and GOLD quality breakout signals auto-appended after each scan. Only PREMIUM (score ≥ PREMIUM threshold) and GOLD (score ≥ GOLD threshold) signals are ever written here. Lower quality signals (HIGH, STANDARD) are never added.
+
+**CSV format:**
+
+```csv
+symbol,mode,entry,entry_date,stop,target,timeframe,quality
+TPL,swing,401.62,2026-01-26,397.60,524.17,1 day,PREMIUM
+HAS,swing,104.00,2026-01-26,102.96,125.16,1 day,GOLD
+```
+
+| Column | Description |
+|--------|-------------|
+| `symbol` | Ticker |
+| `mode` | Always `swing` |
+| `entry` | Price at signal time |
+| `entry_date` | Date auto-appended (YYYY-MM-DD) |
+| `stop` | Initial stop: 1% below entry (hard floor) |
+| `target` | Scanner-computed price target |
+| `timeframe` | Always `1 day` for swing |
+| `quality` | `PREMIUM` or `GOLD` |
+
+**Deduplication:** A symbol already in the file is never re-added, even if it appears in later scans. The scanner checks existing symbols before appending.
+
+**Exit behavior:** The exit evaluator reads this file and evaluates each PREMIUM/GOLD position for stop hits, trend breaks, or target proximity. Positions are NOT automatically removed from this file when an exit signal fires — you must remove them manually or via the portfolio reset UI in the Streamlit dashboard.
+
+---
+
+### `positions_daytrade_mock.csv`
+
+**Written by:** `--auto-positions` flag after every daytrade scan that finds PREMIUM/GOLD signals
+**Read by:** Exit evaluator (3:30 PM), portfolio monitor (every 15 min)
+**CLI flags:** `--auto-positions` (write), `--exit-file` (read for exits), `--monitor` (read for monitoring)
+
+> **Not the Streamlit portfolio.** Same distinction as `positions_swing_mock.csv` above — this is a flat input list for cron scripts only. The Streamlit Auto Portfolio tab uses `auto_portfolio.json`.
+
+Same structure as `positions_swing_mock.csv` but for **daytrade mode** (15-min bars). Positions here are intraday — they are typically entered and closed on the same or next trading day.
+
+**CSV format:**
+
+```csv
+symbol,mode,entry,entry_date,stop,target,timeframe,quality
+MPC,daytrade,204.17,2026-03-02,202.13,205.83,15 mins,PREMIUM
+TRMB,daytrade,69.03,2026-03-02,68.34,70.22,15 mins,PREMIUM
+```
+
+**Key differences from swing positions:**
+
+| | Swing | Daytrade |
+|--|-------|---------|
+| `mode` | `swing` | `daytrade` |
+| `timeframe` | `1 day` | `15 mins` |
+| Typical hold | Days to weeks | Hours to 1–2 days |
+| Exit scan | 3:45 PM, 4:30 PM | 3:30 PM |
+| Stop distance | ~1% below entry | ~1% below entry |
+
+**Important:** Daytrade positions accumulate across sessions since auto-positions only appends, never removes. Clean this file manually at the start of each week or use the Streamlit dashboard reset button to clear closed positions.
+
+---
+
+### Summary table
+
+| File | Auto-generated? | Written by | Read by | Reset cadence |
+|------|----------------|------------|---------|---------------|
+| `premium_swing.txt` | ✅ Yes | Phase 1 swing scan | Phase 2 swing scan | Daily (overwrite) |
+| `premium_daytrade.txt` | ✅ Yes | Phase 1 daytrade scan | Audit only | Daily (overwrite) |
+| `premium_longterm.txt` | ✅ Yes | Phase 1 longterm scan | Manual review | Weekly (overwrite) |
+| `momentum_watch_daytrade.txt` | ✅ Yes | Phase 1 daytrade scan | Phase 2 + monitor_watch | Daily (overwrite) |
+| `optimizer_watch.txt` | ❌ Manual | Hand-curated | weight_optimizer, backtest | Never (edit manually) |
+| `positions_swing_mock.csv` | ✅ Yes (append) | Every swing scan | **Cron** exit evaluator, monitor | Manual / dashboard reset |
+| `positions_daytrade_mock.csv` | ✅ Yes (append) | Every daytrade scan | **Cron** exit evaluator, monitor | Manual / dashboard reset |
+
+**Separate system — `scanner_output/portfolio/auto_portfolio.json`:** The Streamlit Auto Portfolio tab uses this file instead. Managed by `auto_portfolio.py`, it reads raw signal CSVs directly, simulates $100K paper capital with 10% position sizing, tracks full P&L history, and applies 8% trailing stops. It is independent of the positions CSVs above.
+
+---
+
 ## Backtest Results
 
 Backtest script: `enhanced_backtest.py` — compares V1 through V12 vs SPY and Minervini buy-and-hold.
@@ -535,7 +745,7 @@ Backtest script: `enhanced_backtest.py` — compares V1 through V12 vs SPY and M
 ### Optuna Weight Optimizer (Mar 2026, 78 symbols)
 
 ```bash
-python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt --apply
+python weight_optimizer.py --trials 300 --symbols scanner_output/lists/optimizer_watch.txt --apply
 ```
 
 Walk-forward: 4 folds × 6 months (optimize on folds 1–3, validate on fold 4).
@@ -587,10 +797,10 @@ python enhanced_backtest.py --watchlist input/ALL.txt --start 2025-01-01 --end 2
 python enhanced_backtest.py --watchlist input/ALL.txt --start 2024-01-01 --end 2025-12-31
 
 # V11/V12 isolation only
-python enhanced_backtest.py --watchlist input/optimizer_watch.txt --start 2024-01-01 --end 2024-12-31 --versions v1,v11,v12 --limit 30
+python enhanced_backtest.py --watchlist scanner_output/lists/optimizer_watch.txt --start 2024-01-01 --end 2024-12-31 --versions v1,v11,v12 --limit 30
 
 # Run weight optimizer (300 trials, ~45 min)
-python weight_optimizer.py --trials 300 --symbols input/optimizer_watch.txt --apply
+python weight_optimizer.py --trials 300 --symbols scanner_output/lists/optimizer_watch.txt --apply
 ```
 
 Results saved to `scanner_output/backtests/multi_config_vs_spy_YYYY-MM-DD_YYYY-MM-DD.json`.

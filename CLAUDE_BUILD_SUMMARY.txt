@@ -3,7 +3,7 @@ CLAUDE SKILLS & SUBAGENTS BUILDOUT COMPLETE
 ================================================================================
 
 PROJECT: stocksBreakout Trading System
-DATE: February 14, 2026
+DATE: February 14, 2026 (updated March 2026)
 STATUS: ✅ READY TO USE
 
 ================================================================================
@@ -28,20 +28,19 @@ WHAT WAS BUILT
   ✅ news-research-agent          - Fundamental research
   ✅ level2-analyzer              - Order book analysis
 
-📚 DOCUMENTATION (6 Guides)
-  ✅ CLAUDE_README.md             - This is the main entry point
-  ✅ CLAUDE_INTEGRATION_GUIDE.md  - Quick reference & examples
-  ✅ CLAUDE_SKILLS_GUIDE.md       - Detailed skill documentation
-  ✅ SUBAGENTS_GUIDE.md           - Advanced agent workflows
-  ✅ SETUP_CLAUDE_SKILLS.md       - Installation & setup
-  ✅ CLAUDE_SKILLS_SUMMARY.md     - Feature overview
+📚 DOCUMENTATION (5 Files)
+  ✅ CLAUDE.md                    - Project instructions for Claude (start here)
+  ✅ README.md                    - Full project reference & scanner_output/lists/ guide
+  ✅ algo-trading-guide.md        - Trading strategy & indicator reference
+  ✅ webhook-readme.md            - Webhook server setup & usage
+  ✅ README.Docker.md             - Docker deployment guide
 
 💻 CODE FILES (5 Implementations)
   ✅ skills/__init__.py           - Skills registry
-  ✅ skills/scan.py              - /scan implementation
-  ✅ skills/backtest.py          - /backtest implementation
-  ✅ skills/monitor.py           - /monitor implementation
-  ✅ skills/analyze_market.py    - /analyze-market implementation
+  ✅ skills/scan.py               - /scan implementation
+  ✅ skills/backtest.py           - /backtest implementation
+  ✅ skills/monitor.py            - /monitor implementation
+  ✅ skills/analyze_market.py     - /analyze-market implementation
 
 ================================================================================
 QUICK START (Choose One)
@@ -53,12 +52,12 @@ OPTION A: Just Run Scans (5 min)
   $ Check scanner_output/signals/
 
 OPTION B: Full Integration (30 min)
-  1. Read: CLAUDE_INTEGRATION_GUIDE.md
+  1. Read: CLAUDE.md and README.md
   2. Run: /scan, /monitor, /backtest
   3. Ask: "Analyze signal quality"
 
 OPTION C: Power User Setup (1 hour)
-  1. Read all guides
+  1. Read all docs
   2. /cron-setup --install swing daytrade
   3. Create custom skills
   4. Schedule automation
@@ -69,7 +68,7 @@ DAILY WORKFLOWS
 
 MORNING (5 min)
   1. /analyze-market --period 1week
-  2. /scan --mode swing --watchlist S&P_500.txt
+  2. /scan --mode swing --watchlist input/ALL.txt
   3. /scan --mode daytrade --premium
 
 DAYTIME (1 min)
@@ -101,25 +100,25 @@ FILE LOCATIONS
 ================================================================================
 
 Documentation:
-  CLAUDE_README.md              - START HERE
-  CLAUDE_INTEGRATION_GUIDE.md  - Quick reference
-  CLAUDE_SKILLS_GUIDE.md       - All skills explained
-  SUBAGENTS_GUIDE.md           - Advanced workflows
-  SETUP_CLAUDE_SKILLS.md       - Installation
-  CLAUDE_SKILLS_SUMMARY.md     - Overview
+  CLAUDE.md                     - Project instructions & conventions (START HERE)
+  README.md                     - Full project reference
+  algo-trading-guide.md         - Strategy & indicator reference
+  webhook-readme.md             - Webhook server setup
+  README.Docker.md              - Docker deployment
 
 Skills Code:
   skills/__init__.py            - Registry
-  skills/scan.py               - /scan
-  skills/backtest.py           - /backtest
-  skills/monitor.py            - /monitor
-  skills/analyze_market.py     - /analyze-market
+  skills/scan.py                - /scan
+  skills/backtest.py            - /backtest
+  skills/monitor.py             - /monitor
+  skills/analyze_market.py      - /analyze-market
 
 Results:
-  scanner_output/signals/      - Generated signals (CSV)
-  scanner_output/logs/         - Execution logs
-  input/positions_swing_mock.csv    - Positions
-  input/positions_daytrade_mock.csv - Positions
+  scanner_output/signals/       - Generated signals (CSV)
+  scanner_output/logs/          - Execution logs
+  scanner_output/lists/positions_swing_mock.csv    - Cron exit-evaluator positions
+  scanner_output/lists/positions_daytrade_mock.csv - Cron exit-evaluator positions
+  scanner_output/portfolio/auto_portfolio.json     - Streamlit Auto Portfolio state
 
 ================================================================================
 KEY FEATURES
@@ -165,8 +164,8 @@ NEXT ACTIONS
 ================================================================================
 
 1. READ (10 min)
-   Open: CLAUDE_README.md
-   Then: CLAUDE_INTEGRATION_GUIDE.md
+   Open: CLAUDE.md
+   Then: README.md
 
 2. TEST (10 min)
    Run: /scan --mode swing
@@ -174,15 +173,14 @@ NEXT ACTIONS
 
 3. EXPLORE (30 min)
    Try: /monitor, /backtest, /analyze-market
-   Read: CLAUDE_SKILLS_GUIDE.md
 
 4. SETUP (30 min)
-   Read: SETUP_CLAUDE_SKILLS.md
+   Review: cron_jobs.txt
    Configure: /cron-setup --install swing daytrade
 
 5. OPTIMIZE (1 hour)
-   Read: SUBAGENTS_GUIDE.md
-   Run: claude ask "Analyze signal quality"
+   Run: python weight_optimizer.py --trials 300
+   Ask: "Analyze signal quality"
 
 ================================================================================
 SUPPORT
@@ -194,10 +192,9 @@ Built-in Help:
   claude ask "What's my portfolio risk?"
 
 Documentation:
-  CLAUDE_INTEGRATION_GUIDE.md  - Common questions
-  CLAUDE_SKILLS_GUIDE.md       - Skill parameters
-  SUBAGENTS_GUIDE.md           - Advanced usage
-  SETUP_CLAUDE_SKILLS.md       - Troubleshooting
+  CLAUDE.md        - Project conventions & architecture
+  README.md        - Full reference (scanner_output/lists/ guide, backtest results)
+  algo-trading-guide.md - Strategy & indicator details
 
 ================================================================================
 VERIFICATION
@@ -206,7 +203,7 @@ VERIFICATION
 Run these to verify setup:
 
   python -c "from skills import SKILLS_REGISTRY; print(f'✓ Skills: {len(SKILLS_REGISTRY)}')"
-  python skills/scan.py --mode swing --watchlist input/premium_swing.txt
+  python skills/scan.py --mode swing --watchlist scanner_output/lists/premium_swing.txt
   /scan --mode swing
   /monitor
   /backtest --period 2024 --mode swing
@@ -246,7 +243,7 @@ Time Spent:
 Value Delivered:
   - 8 reusable skills
   - 6 specialized subagents
-  - 6 comprehensive guides
+  - 5 documentation files
   - 5 working implementations
   - Professional Claude integration
   - Production-ready system
@@ -263,7 +260,6 @@ STATUS: READY TO USE NOW
 ================================================================================
 
 Everything is implemented, documented, and tested.
-No additional setup required beyond reading CLAUDE_README.md.
 
 Start with: /scan --mode swing
 

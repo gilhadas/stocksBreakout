@@ -352,7 +352,7 @@ def main() -> None:
     detector = BreakoutDetector()
 
     # Load positions for exit phase
-    positions = load_positions_csv('input/positions_daytrade_mock.csv')
+    positions = load_positions_csv('scanner_output/lists/positions_daytrade_mock.csv')
 
     # ── Timestamp validation ─────────────────────────────────────────────────
     now_et = datetime.now(NY_TZ)

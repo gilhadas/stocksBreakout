@@ -66,7 +66,7 @@ METHOD 1: PYTHON DIRECT (Tested ✅)
   Setup: 0 minutes
   Syntax: python skills/scan.py --mode swing
   Example:
-    $ python skills/scan.py --mode swing --watchlist input/premium_swing.txt
+    $ python skills/scan.py --mode swing --watchlist scanner_output/lists/premium_swing.txt
     $ {JSON output with signals}
     ✅ VERIFIED WORKING
 
@@ -87,7 +87,7 @@ HOW TO GET STARTED - 3 QUICK STEPS
 
 STEP 1: Test (5 minutes)
   $ cd /Users/gilhadas/Documents/GitHub/stocksBreakout
-  $ python skills/scan.py --mode swing --watchlist input/premium_swing.txt
+  $ python skills/scan.py --mode swing --watchlist scanner_output/lists/premium_swing.txt
   
   Expected: JSON output with signals
   Status: ✅ TESTED WORKING
@@ -192,7 +192,7 @@ IMMEDIATE NEXT STEPS
 
 RIGHT NOW (5 min):
   1. Open terminal
-  2. Run: python skills/scan.py --mode swing --watchlist input/premium_swing.txt
+  2. Run: python skills/scan.py --mode swing --watchlist scanner_output/lists/premium_swing.txt
   3. See JSON output with signals
   4. ✅ You have results!
 
@@ -314,7 +314,7 @@ Advanced Usage?
   → Read: SUBAGENTS_GUIDE.md
 
 Daily Reference?
-  → Read: CLAUDE_INTEGRATION_GUIDE.md
+  → Read: .md
 
 Need to Find Something?
   → Read: INDEX.md
@@ -345,7 +345,7 @@ FINAL INSTRUCTIONS
 1. OPEN THIS FILE (done ✓)
 
 2. RUN THIS COMMAND:
-   python /Users/gilhadas/Documents/GitHub/stocksBreakout/skills/scan.py --mode swing --watchlist input/premium_swing.txt
+   python /Users/gilhadas/Documents/GitHub/stocksBreakout/skills/scan.py --mode swing --watchlist scanner_output/lists/premium_swing.txt
 
 3. READ THIS FILE:
    CLAUDE_SKILLS_BOTH_WAYS.md
