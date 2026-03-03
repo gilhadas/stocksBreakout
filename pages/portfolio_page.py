@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-from utils import load_data, list_files
+from utils import load_data, load_text, save_data, save_text, list_files
 
 
 def _get_portfolio():
@@ -749,23 +749,19 @@ def _color_quality_cell(val: str) -> str:
 
 
 def _read_txt_symbols(path: str) -> list[str]:
-    """Read a symbol list from a txt file (one symbol per line, skip comments/blanks)."""
-    try:
-        with open(path) as f:
-            return [ln.strip() for ln in f if ln.strip() and not ln.startswith('#')]
-    except FileNotFoundError:
+    """Read a symbol list — S3 on cloud, local filesystem otherwise."""
+    text = load_text(path)
+    if not text:
         return []
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith('#')]
 
 
 def _read_positions_csv(path: str) -> pd.DataFrame | None:
-    """Read a positions CSV. Returns None if file missing or empty."""
-    try:
-        df = pd.read_csv(path)
-        if df.empty:
-            return None
-        return df
-    except (FileNotFoundError, Exception):
+    """Read a positions CSV — S3 on cloud, local filesystem otherwise."""
+    df = load_data(path)
+    if df is None or df.empty:
         return None
+    return df
 
 
 def _render_watch_lists():
@@ -847,8 +843,9 @@ def _render_watch_lists():
                     st.warning(f"This will erase all positions in `{path}`. Are you sure?")
                     c1, c2 = st.columns(2)
                     if c1.button("Yes, clear it", key=f"yes_clear_{fname}", type="primary"):
-                        with open(path, 'w') as fh:
-                            fh.write('')
+                        _POSITIONS_COLS = ['symbol', 'mode', 'entry', 'entry_date',
+                                           'stop', 'target', 'timeframe', 'quality']
+                        save_data(pd.DataFrame(columns=_POSITIONS_COLS), path)
                         st.session_state[f"confirm_clear_{fname}"] = False
                         st.toast(f"Cleared {fname}")
                         st.rerun()
