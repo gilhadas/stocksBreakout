@@ -748,19 +748,30 @@ def _color_quality_cell(val: str) -> str:
     return ''
 
 
-def _read_txt_symbols(path: str) -> list[str]:
-    """Read a symbol list — S3 on cloud, local filesystem otherwise."""
+def _read_txt_symbols(path: str) -> tuple[list[str], bool]:
+    """Read a symbol list — S3 on cloud, local filesystem otherwise.
+
+    Returns:
+        (symbols, found) — found=True means the file existed (even if empty)
+    """
     text = load_text(path)
+    if text is None:
+        return [], False          # file not found
     if not text:
-        return []
-    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith('#')]
+        return [], True           # file found but empty
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith('#')], True
 
 
 def _read_positions_csv(path: str) -> pd.DataFrame | None:
-    """Read a positions CSV — S3 on cloud, local filesystem otherwise."""
+    """Read a positions CSV — S3 on cloud, local filesystem otherwise.
+
+    Returns:
+        DataFrame with rows  — file found and has data
+        Empty DataFrame      — file found but has no position rows yet
+        None                 — file not found / read failed
+    """
     df = load_data(path)
-    if df is None or df.empty:
-        return None
+    return df  # preserve empty DataFrame vs None distinction
     return df
 
 
@@ -780,15 +791,15 @@ def _render_watch_lists():
     cols = st.columns(len(_WATCHLIST_FILES))
     for col, (fname, label, desc) in zip(cols, _WATCHLIST_FILES):
         path = f"{_LISTS_DIR}/{fname}"
-        symbols = _read_txt_symbols(path)
-        col.metric(label=label, value=f"{len(symbols)} symbols")
+        symbols, found = _read_txt_symbols(path)
+        col.metric(label=label, value=f"{len(symbols)} symbols" if found else "Not found")
         col.caption(desc)
 
     st.divider()
 
     for fname, label, desc in _WATCHLIST_FILES:
         path = f"{_LISTS_DIR}/{fname}"
-        symbols = _read_txt_symbols(path)
+        symbols, found = _read_txt_symbols(path)
         with st.expander(f"**{label}** — {fname}  ({len(symbols)} symbols)", expanded=False):
             st.caption(desc)
             if symbols:
@@ -797,8 +808,11 @@ def _render_watch_lists():
                 rows = [symbols[i:i+chunk] for i in range(0, len(symbols), chunk)]
                 for row in rows:
                     st.write("  ".join(f"`{s}`" for s in row))
+            elif found:
+                st.info("File found but empty — will populate after next scan.")
             else:
-                st.info(f"No symbols yet — file is empty or does not exist: `{path}`")
+                s3_key = f"s3://stocks-breakout-scanner-s3-bucket/{path}"
+                st.warning(f"File not found. Expected S3 key: `{s3_key}`")
 
     # ── Positions CSVs ────────────────────────────────────────────────────────
     st.markdown("### Mock Positions (Auto-Portfolio)")
@@ -806,8 +820,9 @@ def _render_watch_lists():
         path = f"{_LISTS_DIR}/{fname}"
         df = _read_positions_csv(path)
 
+        n_rows = len(df) if (df is not None and not df.empty) else 0
         with st.expander(
-            f"**{label}** — {fname}  ({len(df) if df is not None else 0} positions)",
+            f"**{label}** — {fname}  ({n_rows} positions)",
             expanded=True,
         ):
             st.caption(desc)
@@ -852,5 +867,18 @@ def _render_watch_lists():
                     if c2.button("Cancel", key=f"cancel_clear_{fname}"):
                         st.session_state[f"confirm_clear_{fname}"] = False
                         st.rerun()
+            elif df is not None:
+                # File was found on S3/local but has no position rows yet
+                st.info(
+                    "File found but no positions yet — will populate after the next "
+                    "scan finds PREMIUM/GOLD signals and the cron uploads."
+                )
             else:
-                st.info(f"No positions yet — file is empty or does not exist: `{path}`")
+                # File not found — show the exact S3 key that was tried
+                s3_key = f"s3://stocks-breakout-scanner-s3-bucket/{path}"
+                st.warning(
+                    f"File not found.  \n"
+                    f"Expected S3 key: `{s3_key}`  \n"
+                    f"Make sure the cron has run at least once since the last deploy "
+                    f"and that `scanner_output/lists` is in the `--dirs` upload argument."
+                )
