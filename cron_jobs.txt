@@ -72,6 +72,20 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
+# PRE-MARKET MONITORING (Before open)
+# ============================================
+# Detects pre-market gaps on sector ETFs and priority symbols.
+# Writes scanner_output/lists/premarket_watch.txt — Phase 1 injects this into momentum_watch.
+# Discord alert if IBIT or any priority symbol gaps >= 3% before open.
+
+# Every weekday at 8:00 AM ET - First pre-market check (1.5 hrs before open)
+0  8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --notify >> scanner_output/logs/cron_premarket.log 2>&1
+
+# Every weekday at 8:45 AM ET - Second check (45 min before open, fresher data)
+45 8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --notify >> scanner_output/logs/cron_premarket.log 2>&1
+
+
+# ============================================
 # DAY TRADING (Intraday scans)
 # ============================================
 

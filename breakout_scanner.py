@@ -186,6 +186,19 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         if getattr(args, 'export_momentum_watch', None):
             watch_symbols = []
             seen = set()
+            # Pre-seed from premarket_watch.txt (written by premarket_monitor.py at 8 AM).
+            # These are pre-market gappers that must survive Phase 1's rewrite of this file.
+            _pm_file = Path('scanner_output/lists/premarket_watch.txt')
+            if _pm_file.exists():
+                try:
+                    _pm_syms = [s.strip() for s in _pm_file.read_text().splitlines() if s.strip()]
+                    for s in _pm_syms:
+                        if s not in seen:
+                            watch_symbols.append(s); seen.add(s)
+                    if _pm_syms:
+                        logger.info(f"Pre-seeded {len(_pm_syms)} pre-market gappers from premarket_watch.txt")
+                except Exception as _e:
+                    logger.warning(f"Could not read premarket_watch.txt: {_e}")
             for sig in results:
                 sym    = sig.get('Symbol') or sig.get('symbol', '')
                 q      = sig.get('Quality', '')
