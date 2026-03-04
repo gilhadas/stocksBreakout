@@ -290,6 +290,21 @@ SENTIMENT = {
     },
 }
 
+# --- Sector Baskets (momentum trigger for correlated groups) ---
+# When a trigger ETF moves >= trigger_pct in a single day (either direction),
+# the entire sector basket is added to momentum_watch so Phase 2 re-scans them.
+# Useful for crypto plays that lack classic consolidation but move together.
+SECTOR_BASKETS = {
+    'crypto': {
+        'trigger_etf': 'IBIT',   # BlackRock Bitcoin ETF — best proxy for crypto sector
+        'trigger_pct': 3.0,       # Trigger when IBIT moves ±3% intraday/daily
+        'symbols': [
+            'COIN', 'MSTR', 'HOOD', 'HUT', 'IREN', 'BITF', 'CIFR',
+            'APLD', 'CLSK', 'RIOT', 'MARA', 'CORZ', 'BMNR', 'GLXY',
+        ],
+    },
+}
+
 NOTIFICATIONS = {
     # Email notifications via SMTP
     'email': {

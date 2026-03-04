@@ -719,10 +719,8 @@ _LISTS_DIR = "scanner_output/lists"
 
 # Files to display, in order: (filename, label, description)
 _WATCHLIST_FILES = [
-    ("premium_swing.txt",          "Premium Swing",      "PREMIUM/GOLD signals from last swing scan (Phase 1 → Phase 2 input)"),
-    ("premium_daytrade.txt",       "Premium Daytrade",   "PREMIUM/GOLD signals from last daytrade Phase 1 scan"),
     ("premium_longterm.txt",       "Premium Long-term",  "PREMIUM/GOLD signals from last long-term (weekly) scan"),
-    ("momentum_watch_daytrade.txt","Momentum Watch",     "PREMIUM/GOLD + HIGH-momentum + near-miss — Phase 2 & monitor input"),
+    ("momentum_watch_daytrade.txt","Momentum Watch",     "PREMIUM/GOLD + HIGH-momentum + near-miss — daytrade Phase 2 & monitor input"),
     ("optimizer_watch.txt",        "Optimizer Watch",    "Manually curated watchlist for weight optimizer backtests"),
 ]
 

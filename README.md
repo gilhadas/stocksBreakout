@@ -60,13 +60,11 @@ scanner_output/
   logs/                # Cron and scan logs
   cache/               # yfinance parquet disk cache
   lists/               # Auto-generated watch lists and live position files
-    premium_swing.txt          # PREMIUM/GOLD swing signals (Phase 2 watchlist)
-    premium_daytrade.txt       # PREMIUM/GOLD daytrade signals (Phase 2 watchlist)
-    premium_longterm.txt       # PREMIUM/GOLD longterm signals (Phase 2 watchlist)
-    momentum_watch_daytrade.txt # Daytrade momentum watch (Phase 1 → Phase 2 feed)
-    optimizer_watch.txt        # 78 diverse symbols for weight optimization
-    positions_swing_mock.csv   # Auto-appended PREMIUM/GOLD swing positions
-    positions_daytrade_mock.csv # Auto-appended PREMIUM/GOLD daytrade positions
+    positions_swing_mock.csv    # PREMIUM/GOLD swing positions — Phase 2 watchlist + exit evaluator input
+    positions_daytrade_mock.csv # PREMIUM/GOLD daytrade positions — exit evaluator input
+    premium_longterm.txt        # PREMIUM/GOLD longterm signals (weekly, no positions CSV for longterm)
+    momentum_watch_daytrade.txt # Daytrade momentum watch: PREMIUM/GOLD + HIGH-momentum + near-miss
+    optimizer_watch.txt         # 78 diverse symbols for weight optimization
 cron_jobs.txt          # Full cron schedule (install with: crontab cron_jobs.txt)
 ```
 
@@ -372,8 +370,8 @@ All times are US Eastern (TZ=America/New_York set in cron_jobs.txt).
 |-----------|------|-----|
 | Mon 9:00 AM | Mon | Longterm Phase 1: full scan → premium export |
 | Mon 9:15 AM | Mon | Longterm exit evaluation |
-| 9:35 AM | Mon–Fri | Swing Phase 1: full scan → premium export |
-| 9:35 AM | Mon–Fri | Daytrade Phase 1: full scan → momentum-watch export |
+| 9:35 AM | Mon–Fri | Swing Phase 1: full scan → auto-positions append |
+| 9:35 AM | Mon–Fri | Daytrade Phase 1: full scan → auto-positions + momentum-watch export |
 | 9:45 AM | Mon–Fri | First momentum-watch monitor check |
 | 10:00 AM | Mon–Fri | Daytrade Phase 2: re-scan momentum-watch |
 | Every 15 min | Mon–Fri | Portfolio monitor + momentum-watch monitor |
@@ -381,8 +379,8 @@ All times are US Eastern (TZ=America/New_York set in cron_jobs.txt).
 | 3:30 PM | Mon–Fri | Daytrade exit check |
 | 3:45 PM | Mon–Fri | Swing exit evaluation |
 | 4:00 PM | Mon–Fri | Final portfolio check + S3 upload |
-| 4:30 PM | Mon–Fri | Swing Phase 2: re-scan premium |
-| 7:30 PM | Mon–Fri | Swing evening: re-scan premium |
+| 4:30 PM | Mon–Fri | Swing Phase 2: re-scan all open positions (positions_swing_mock.csv) |
+| 7:30 PM | Mon–Fri | Swing evening: re-scan all open positions (positions_swing_mock.csv) |
 | 8:20 PM | Mon–Fri | Daytrade Phase 4: evening re-scan momentum-watch |
 | 8:30 PM | Mon–Fri | Validate signals (3+ days old) |
 | Sun 9:00 PM | Sun | Learning recommendations from validation |
@@ -498,37 +496,23 @@ All files in `scanner_output/lists/` are **auto-generated at runtime** by cron j
 
 ---
 
-### `premium_swing.txt`
+### `positions_swing_mock.csv` as Phase 2 watchlist
 
-**Written by:** Phase 1 swing scan (cron 9:35 AM ET, daily)
-**Read by:** Phase 2 swing scan (4:30 PM ET), evening re-scan (7:30 PM ET)
-**CLI flag:** `--export-premium scanner_output/lists/premium_swing.txt`
-
-Contains one ticker per line. Populated with every symbol that scored **PREMIUM or GOLD** quality during the morning-wide swing scan of `input/ALL.txt`. This narrowed list (~10–60 symbols vs ~1300 scanned) is re-evaluated later in the day on updated price data — much faster than re-running the full scan.
-
-```
-# Example content
-PATH
-VECO
-TYL
-NFLX
-```
-
-**Why it matters:** The full `input/ALL.txt` scan at 9:35 AM uses prior-close data. By 4:30 PM, intraday moves may have validated or invalidated the morning signals. Re-scanning only the PREMIUM/GOLD subset makes this fast and targeted.
-
-**Reset:** Overwritten on every Phase 1 morning scan. Stale if the morning scan produced no PREMIUM+ signals (file will be empty).
-
----
-
-### `premium_daytrade.txt`
-
-**Written by:** Phase 1 daytrade scan (cron 9:35 AM ET, daily)
-**Read by:** *(not re-scanned directly; see `momentum_watch_daytrade.txt` for Phase 2)*
-**CLI flag:** `--export-premium scanner_output/lists/premium_daytrade.txt`
-
-Same concept as `premium_swing.txt` but for daytrade mode. Contains tickers that scored PREMIUM or GOLD on 15-min bars at 9:35 AM. In daytrade flow, Phase 2 uses `momentum_watch_daytrade.txt` (a broader set) rather than this file directly. `premium_daytrade.txt` serves as an audit trail of which symbols met the highest quality bar at open.
-
-**Reset:** Overwritten on every Phase 1 daytrade scan.
+> **Why there is no `premium_swing.txt` anymore.**
+>
+> Previously the Phase 1 scan exported a separate `premium_swing.txt` containing just the Symbol column
+> of PREMIUM/GOLD signals, which Phase 2 and Evening scans used as their watchlist. This was pure
+> duplication: `positions_swing_mock.csv` already tracks exactly those same signals with full position
+> details (entry, stop, target, quality). Maintaining two files in sync added complexity with no benefit.
+>
+> **Current design:** Phase 1 writes PREMIUM/GOLD signals to `positions_swing_mock.csv` via
+> `--auto-positions`. Phase 2 and Evening scans pass `positions_swing_mock.csv` directly as their
+> watchlist — `get_watchlist_from_file()` reads the `symbol` column when given a `.csv` file. One file,
+> three purposes: Phase 2 watchlist input · exit evaluator input · Streamlit Watch Lists display.
+>
+> `premium_daytrade.txt` was removed for the same reason. Daytrade's Phase 2 always used
+> `momentum_watch_daytrade.txt` (a broader set) anyway, so `premium_daytrade.txt` had no readers
+> and was always empty in production.
 
 ---
 
@@ -685,13 +669,11 @@ TRMB,daytrade,69.03,2026-03-02,68.34,70.22,15 mins,PREMIUM
 
 | File | Auto-generated? | Written by | Read by | Reset cadence |
 |------|----------------|------------|---------|---------------|
-| `premium_swing.txt` | ✅ Yes | Phase 1 swing scan | Phase 2 swing scan | Daily (overwrite) |
-| `premium_daytrade.txt` | ✅ Yes | Phase 1 daytrade scan | Audit only | Daily (overwrite) |
+| `positions_swing_mock.csv` | ✅ Yes (append) | Phase 1 swing scan | Phase 2/Evening swing scans · **Cron** exit evaluator · monitor | Manual / dashboard reset |
+| `positions_daytrade_mock.csv` | ✅ Yes (append) | Phase 1 daytrade scan | **Cron** exit evaluator · monitor | Manual / dashboard reset |
 | `premium_longterm.txt` | ✅ Yes | Phase 1 longterm scan | Manual review | Weekly (overwrite) |
-| `momentum_watch_daytrade.txt` | ✅ Yes | Phase 1 daytrade scan | Phase 2 + monitor_watch | Daily (overwrite) |
+| `momentum_watch_daytrade.txt` | ✅ Yes | Phase 1 daytrade scan | Phase 2 daytrade scans + monitor_watch | Daily (overwrite) |
 | `optimizer_watch.txt` | ❌ Manual | Hand-curated | weight_optimizer, backtest | Never (edit manually) |
-| `positions_swing_mock.csv` | ✅ Yes (append) | Every swing scan | **Cron** exit evaluator, monitor | Manual / dashboard reset |
-| `positions_daytrade_mock.csv` | ✅ Yes (append) | Every daytrade scan | **Cron** exit evaluator, monitor | Manual / dashboard reset |
 
 **Separate system — `scanner_output/portfolio/auto_portfolio.json`:** The Streamlit Auto Portfolio tab uses this file instead. Managed by `auto_portfolio.py`, it reads raw signal CSVs directly, simulates $100K paper capital with 10% position sizing, tracks full P&L history, and applies 8% trailing stops. It is independent of the positions CSVs above.
 

@@ -305,13 +305,30 @@ def list_files(local_dir: str, pattern: str = "*",
 
 def get_watchlist_from_file(file_path: str) -> List[str]:
     """
-    Load watchlist from file
+    Load watchlist from a .txt or .csv file.
 
-    Format:
-        AAPL, MSFT, GOOGL
-        ### Comments start with ###
-        TSLA
+    .txt format:
+        AAPL, MSFT, GOOGL      # comma-separated on one line, or one per line
+        ### Comments ignored
+
+    .csv format:
+        Must have a 'Symbol' or 'symbol' column; all other columns are ignored.
+        Used so positions CSVs (positions_swing_mock.csv, etc.) can serve
+        directly as Phase-2 scan watchlists without a separate .txt export.
     """
+    if file_path.lower().endswith('.csv'):
+        try:
+            df = pd.read_csv(file_path)
+            col = 'Symbol' if 'Symbol' in df.columns else 'symbol'
+            symbols = df[col].dropna().astype(str).str.strip().unique().tolist()
+            return [s for s in symbols if s]
+        except FileNotFoundError:
+            logger.warning(f"Watchlist CSV not found: {file_path}")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to load watchlist from CSV {file_path}: {e}")
+            return []
+
     watchlist = []
     try:
         with open(file_path, 'r') as f:

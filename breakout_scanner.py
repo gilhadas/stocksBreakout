@@ -175,20 +175,35 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 f.write('\n'.join(premium_symbols))
             logger.info(f"Exported {len(premium_symbols)} PREMIUM/GOLD tickers to {args.export_premium}")
 
-        # Export momentum-watch list: PREMIUM/GOLD + HIGH-momentum + HIGH vol≥3 + near-miss high-vol
-        # This broader set is used for subsequent Phase 2 re-evaluation scans
+        # Export momentum-watch list: PREMIUM/GOLD + HIGH-momentum + near-miss high-vol
+        # This broader set is used for subsequent Phase 2 re-evaluation scans.
+        #
+        # Inclusion rules for HIGH-quality signals:
+        #   • Momentum type (gap ≥5% or intraday move ≥5% + vol ≥3x)
+        #   • vol ≥ 2.0x  — decent volume confirmation (3.0 was too strict at open)
+        #   • bullish pattern + near 52w high — coiled setup likely to break regardless of vol
+        #   • bullish pattern + at key support/resistance — breakout from level imminent
         if getattr(args, 'export_momentum_watch', None):
             watch_symbols = []
             seen = set()
             for sig in results:
-                sym = sig.get('Symbol') or sig.get('symbol', '')
-                q   = sig.get('Quality', '')
-                vol = sig.get('Vol', 0)
-                typ = sig.get('Type', '')
+                sym    = sig.get('Symbol') or sig.get('symbol', '')
+                q      = sig.get('Quality', '')
+                vol    = sig.get('Vol', 0)
+                typ    = sig.get('Type', '')
+                checks = sig.get('Checks', {})
+                has_pattern  = checks.get('has_bullish_pattern', False)
+                near_high    = checks.get('near_52w_high', False)
+                at_level     = checks.get('at_key_support', False) or checks.get('sr_breakout', False)
                 if sym and sym not in seen:
                     if q in ('PREMIUM', 'GOLD'):
                         watch_symbols.append(sym); seen.add(sym)
-                    elif q == 'HIGH' and (typ == 'Momentum' or vol >= 3.0):
+                    elif q == 'HIGH' and (
+                        typ == 'Momentum'             # V7 momentum surge
+                        or vol >= 2.0                 # strong volume (was 3.0)
+                        or (has_pattern and near_high) # coiled near 52w high → likely to break
+                        or (has_pattern and at_level)  # at support/resistance with pattern
+                    ):
                         watch_symbols.append(sym); seen.add(sym)
             # Also include near-miss rejections (within 0.5% of breakout) + high-vol rejections
             rejections = orchestrator.get_rejection_reasons()
@@ -196,9 +211,32 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 sym = rej.get('symbol', '')
                 if sym and sym not in seen:
                     is_near_miss = 'Near miss' in rej.get('reasons', '')
-                    is_high_vol = rej.get('vol_ratio', 0) >= 3.0
+                    is_high_vol = rej.get('vol_ratio', 0) >= 2.0  # was 3.0
                     if is_near_miss or is_high_vol:
                         watch_symbols.append(sym); seen.add(sym)
+            # Sector basket trigger: when a key ETF moves >= threshold, add the whole sector
+            from config import SECTOR_BASKETS
+            import yfinance as _yf
+            for basket_name, basket in SECTOR_BASKETS.items():
+                trigger = basket['trigger_etf']
+                threshold = basket['trigger_pct']
+                try:
+                    hist = _yf.Ticker(trigger).history(period='2d', interval='1d')
+                    if len(hist) >= 2:
+                        move_pct = (hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100
+                        if abs(move_pct) >= threshold:
+                            added = []
+                            for sym in basket['symbols']:
+                                if sym not in seen:
+                                    watch_symbols.append(sym); seen.add(sym); added.append(sym)
+                            logger.info(
+                                f"Sector basket '{basket_name}': {trigger} moved {move_pct:+.1f}% "
+                                f"— added {len(added)} tickers: {', '.join(added)}"
+                            )
+                        else:
+                            logger.debug(f"Sector basket '{basket_name}': {trigger} moved {move_pct:+.1f}% — below {threshold}% threshold, skipping")
+                except Exception as _e:
+                    logger.warning(f"Sector basket '{basket_name}' trigger check failed: {_e}")
             with open(args.export_momentum_watch, 'w') as f:
                 f.write('\n'.join(watch_symbols))
             logger.info(
