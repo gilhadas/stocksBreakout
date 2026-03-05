@@ -45,9 +45,19 @@ except ImportError:
     print("ERROR: yfinance not installed. Run: pip install yfinance")
     sys.exit(1)
 
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
+
 sys.path.insert(0, str(Path(__file__).parent))
 from config import SECTOR_BASKETS
 from notifier import Notifier
+try:
+    from finbert_sentiment import batch_sentiment as _finbert_batch, SentimentResult
+    _FINBERT_AVAILABLE = True
+except ImportError:
+    _FINBERT_AVAILABLE = False
 
 NY_TZ = ZoneInfo('America/New_York')
 OUT_DIR = Path('scanner_output')
@@ -238,6 +248,165 @@ def scan_watchonly_etfs(now_et: datetime) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Previous-day top gainers (Yahoo Finance screener)
+# ---------------------------------------------------------------------------
+
+_YF_GAINERS_URL = (
+    'https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved'
+)
+_YF_HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+
+
+def fetch_previous_day_gainers(
+    top_n: int = 25,
+    min_pct: float = 3.0,
+) -> List[Dict]:
+    """Fetch yesterday's top gainers from Yahoo Finance screener.
+
+    Returns list of dicts sorted by gain_pct descending:
+        {symbol, prev_gain_pct, volume, prev_close}
+
+    These are *yesterday's* gainers (the screener reports the most recent
+    completed session), so they are stocks that already showed momentum and
+    may continue or retrace in today's pre-market / open.
+    """
+    if _requests is None:
+        logger.warning("fetch_previous_day_gainers: 'requests' not installed")
+        return []
+
+    params = {
+        'scrIds': 'day_gainers',
+        'count': max(top_n + 10, 30),   # fetch a few extra to survive min_pct filter
+        'region': 'US',
+        'lang': 'en-US',
+    }
+    try:
+        resp = _requests.get(
+            _YF_GAINERS_URL, params=params, headers=_YF_HEADERS, timeout=10
+        )
+        resp.raise_for_status()
+        quotes = resp.json()['finance']['result'][0]['quotes']
+    except Exception as exc:
+        logger.warning(f"fetch_previous_day_gainers: Yahoo Finance API error: {exc}")
+        return []
+
+    gainers: List[Dict] = []
+    for q in quotes:
+        pct = q.get('regularMarketChangePercent', 0.0)
+        if pct < min_pct:
+            continue
+        gainers.append({
+            'symbol':        q['symbol'],
+            'prev_gain_pct': round(pct, 1),
+            'volume':        int(q.get('regularMarketVolume', 0)),
+            'prev_close':    round(float(q.get('regularMarketPreviousClose', 0)), 2),
+        })
+
+    gainers.sort(key=lambda x: x['prev_gain_pct'], reverse=True)
+    top_str = ', '.join(
+        g['symbol'] + ' +' + str(g['prev_gain_pct']) + '%' for g in gainers[:5]
+    )
+    logger.info(
+        f"fetch_previous_day_gainers: {len(gainers)} gainers ≥{min_pct}%"
+        + (f" (top: {top_str})" if top_str else "")
+    )
+    return gainers[:top_n]
+
+
+# ---------------------------------------------------------------------------
+# X (Twitter) cashtag trending  — requires X API Basic ($200/mo) or higher
+# ---------------------------------------------------------------------------
+# Set TWITTER_BEARER_TOKEN in your .env or pass --x-token KEY to enable.
+# Without a key this function returns [] and is silently skipped.
+#
+# Why X API?
+#   Tweet volume for a $CASHTAG in the last 60 min is a leading indicator
+#   for retail-driven momentum (meme stocks, crypto, small-cap catalysts).
+#   It complements Finnhub/FinBERT (institutional news) with retail flow.
+#
+# Tier needed for real-time 7-day search: X API Basic ($200/month).
+# Full-archive (historical backtest): Enterprise only — not practical.
+# ---------------------------------------------------------------------------
+
+def scan_x_trending_cashtags(
+    symbols: List[str],
+    bearer_token: str,
+    min_mentions: int = 50,
+    recent_minutes: int = 60,
+) -> List[Dict]:
+    """Search X (Twitter) for trending $CASHTAG mentions among watch symbols.
+
+    For each symbol checks tweet volume + engagement in the last `recent_minutes`.
+    Returns symbols with >= min_mentions tweets, sorted by engagement score.
+
+    Args:
+        symbols:        List of ticker symbols to check
+        bearer_token:   X API Bearer Token (Basic tier or higher)
+        min_mentions:   Min tweet count to flag a symbol (default: 50)
+        recent_minutes: Look-back window in minutes (default: 60)
+
+    Returns:
+        List of dicts: {symbol, tweet_count, engagement, sample_text}
+    """
+    try:
+        import tweepy
+    except ImportError:
+        logger.warning("X API: tweepy not installed (pip install tweepy)")
+        return []
+
+    import time as _time
+    from datetime import timezone as _tz
+
+    client = tweepy.Client(bearer_token=bearer_token, wait_on_rate_limit=False)
+    start_time = datetime.now(_tz.utc) - timedelta(minutes=recent_minutes)
+
+    trending: List[Dict] = []
+    for sym in symbols:
+        try:
+            query = f'${sym} lang:en -is:retweet'
+            resp  = client.search_recent_tweets(
+                query=query,
+                max_results=100,
+                start_time=start_time,
+                tweet_fields=['public_metrics', 'text'],
+            )
+            if not resp.data:
+                continue
+
+            tweet_count = len(resp.data)
+            if tweet_count < min_mentions:
+                continue
+
+            engagement = sum(
+                t.public_metrics.get('like_count', 0)
+                + t.public_metrics.get('retweet_count', 0) * 2
+                for t in resp.data
+            )
+            top_tweet = max(resp.data, key=lambda t: t.public_metrics.get('like_count', 0))
+            trending.append({
+                'symbol':       sym,
+                'tweet_count':  tweet_count,
+                'engagement':   engagement,
+                'sample_text':  top_tweet.text[:120].replace('\n', ' '),
+            })
+            logger.debug(f"  X ${sym}: {tweet_count} tweets, engagement={engagement}")
+
+        except tweepy.errors.TooManyRequests:
+            logger.warning("X API rate limit hit — stopping cashtag scan early")
+            break
+        except Exception as exc:
+            logger.debug(f"X API error for ${sym}: {exc}")
+        _time.sleep(0.4)   # ~150 req/15 min safety margin for Basic tier
+
+    trending.sort(key=lambda x: x['engagement'], reverse=True)
+    logger.info(
+        f"scan_x_trending_cashtags: {len(trending)} symbol(s) trending "
+        f"(≥{min_mentions} mentions in last {recent_minutes} min)"
+    )
+    return trending
+
+
+# ---------------------------------------------------------------------------
 # Discord formatting
 # ---------------------------------------------------------------------------
 
@@ -252,6 +421,9 @@ def format_discord_message(
     now_et: datetime,
     total_watch: int,
     dry_run: bool,
+    sentiments: Optional[Dict] = None,
+    prev_day_gainers: Optional[List[Dict]] = None,
+    x_trending: Optional[List[Dict]] = None,
 ) -> Tuple[str, str]:
 
     basket_summary = ', '.join(
@@ -287,16 +459,61 @@ def format_discord_message(
             )
         lines.append("")
 
-    # Individual gappers
+    # Individual gappers — enrich with FinBERT sentiment if available
     if gappers:
-        lines.append("**📈 Individual Pre-Market Gappers:**")
+        has_sent = bool(sentiments)
+        lines.append("**📈 Pre-Market Gappers" + (" + FinBERT Sentiment:" if has_sent else ":") + "**")
         for g in gappers[:15]:
-            lines.append(
-                f"  {_sign(g['gap_pct'])} `{g['symbol']:<8}` **{g['gap_pct']:+.1f}%**  "
+            sym = g['symbol']
+            base = (
+                f"  {_sign(g['gap_pct'])} `{sym:<8}` **{g['gap_pct']:+.1f}%**  "
                 f"(${g['pm_price']} vs ${g['prev_close']})"
             )
+            if has_sent and sym in sentiments:
+                s = sentiments[sym]
+                conf_bar = '█' * round(s['score'] * 5)  # ████░ style
+                headline_snip = s['top_headline'][:55] + ('…' if len(s['top_headline']) > 55 else '')
+                sent_str = f"  {s['emoji']} **{s['label']}** {s['score']:.2f} [{conf_bar}]  _{headline_snip}_"
+                lines.append(base)
+                lines.append(sent_str)
+            else:
+                lines.append(base)
         if len(gappers) > 15:
             lines.append(f"  … and {len(gappers)-15} more")
+        lines.append("")
+
+    # Previous-day gainers section
+    if prev_day_gainers:
+        has_sent = bool(sentiments)
+        lines.append("**📊 Yesterday's Top Gainers" + (" + FinBERT:" if has_sent else ":") + "**")
+        for g in prev_day_gainers[:15]:
+            sym = g['symbol']
+            base = (
+                f"  ↑ `{sym:<8}` **+{g['prev_gain_pct']:.1f}%** yesterday"
+                f"  (vol {g['volume']//1000:,}K)"
+            )
+            if has_sent and sym in sentiments:
+                s = sentiments[sym]
+                conf_bar = '█' * round(s['score'] * 5)
+                headline_snip = s['top_headline'][:55] + ('…' if len(s['top_headline']) > 55 else '')
+                sent_str = f"  {s['emoji']} **{s['label']}** {s['score']:.2f} [{conf_bar}]  _{headline_snip}_"
+                lines.append(base)
+                lines.append(sent_str)
+            else:
+                lines.append(base)
+        if len(prev_day_gainers) > 15:
+            lines.append(f"  … and {len(prev_day_gainers)-15} more")
+        lines.append("")
+
+    # X (Twitter) trending cashtags section
+    if x_trending:
+        lines.append("**🐦 Trending on X (cashtags):**")
+        for x in x_trending[:10]:
+            bar    = '█' * min(5, x['tweet_count'] // 20)
+            sample = x['sample_text'][:60] + ('…' if len(x['sample_text']) > 60 else '')
+            lines.append(
+                f"  🔥 `{x['symbol']:<8}` {x['tweet_count']} tweets  [{bar}]  _{sample}_"
+            )
         lines.append("")
 
     lines.append(f"→ {total_watch} symbols written to `premarket_watch.txt`")
@@ -324,6 +541,13 @@ def main() -> int:
                         help='Force enable Discord notifications')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print results only — no file writes, no Discord')
+    parser.add_argument('--no-sentiment', action='store_true',
+                        help='Skip FinBERT sentiment analysis (faster, no model download)')
+    parser.add_argument('--x-token', default=None, metavar='BEARER_TOKEN',
+                        help='X (Twitter) API Bearer Token for cashtag trending scan. '
+                             'Requires Basic tier ($200/mo). Also reads TWITTER_BEARER_TOKEN env var.')
+    parser.add_argument('--x-mentions', type=int, default=50,
+                        help='Min tweet count to flag a symbol as X-trending (default: 50)')
     parser.add_argument('--output', default=str(PREMARKET_FILE),
                         help=f'Output file (default: {PREMARKET_FILE})')
     args = parser.parse_args()
@@ -346,8 +570,59 @@ def main() -> int:
     logger.info("── Market context ETFs ──────────────────────────")
     etf_context = scan_watchonly_etfs(now_et)
 
-    # Merge, deduplicate
-    all_watch = list(dict.fromkeys(basket_syms + [g['symbol'] for g in gappers]))
+    # 4 — Previous-day top gainers (continue momentum candidates)
+    logger.info("── Previous-day top gainers ─────────────────────")
+    prev_day_gainers = fetch_previous_day_gainers(top_n=25, min_pct=3.0)
+
+    # 5 — X (Twitter) cashtag trending (optional — requires TWITTER_BEARER_TOKEN)
+    import os as _os
+    _x_bearer = args.x_token or _os.environ.get('TWITTER_BEARER_TOKEN')
+    x_trending: List[Dict] = []
+    if _x_bearer:
+        logger.info("── X cashtag trending ───────────────────────────")
+        _x_syms = list(dict.fromkeys(
+            [g['symbol'] for g in gappers] +
+            [g['symbol'] for g in prev_day_gainers[:15]] +
+            list(PRIORITY_SYMBOLS)
+        ))
+        x_trending = scan_x_trending_cashtags(_x_syms, _x_bearer, min_mentions=args.x_mentions)
+        if x_trending:
+            logger.info(f"  X trending ({len(x_trending)} symbols):")
+            for x in x_trending[:10]:
+                logger.info(f"    🔥 {x['symbol']:<8} {x['tweet_count']} tweets  "
+                            f"engagement={x['engagement']:,}")
+    else:
+        logger.debug("── X cashtag trending: skipped (no TWITTER_BEARER_TOKEN) ──")
+
+    # Merge, deduplicate (basket_syms + pre-market gappers + prev-day gainers + X trending)
+    gapper_syms  = [g['symbol'] for g in gappers]
+    gainer_syms  = [g['symbol'] for g in prev_day_gainers]
+    x_trend_syms = [x['symbol'] for x in x_trending]
+    all_watch = list(dict.fromkeys(basket_syms + gapper_syms + gainer_syms + x_trend_syms))
+
+    # 6 — FinBERT sentiment: top 15 gappers + top 10 prev-day gainers (single batch)
+    sentiments: Optional[Dict] = None
+    sentiment_syms = list(dict.fromkeys(
+        [g['symbol'] for g in gappers[:15]] +
+        [g['symbol'] for g in prev_day_gainers[:10]]
+    ))
+    run_sentiment = _FINBERT_AVAILABLE and not args.no_sentiment and sentiment_syms
+    if run_sentiment:
+        logger.info(f"── FinBERT sentiment ({len(sentiment_syms)} symbols) ──────────────")
+        try:
+            sentiments = _finbert_batch(sentiment_syms, max_headlines=8, max_age_hours=24)
+            for sym, s in sentiments.items():
+                logger.info(
+                    f"  {s['emoji']} {sym:<8} {s['label']:<8} "
+                    f"score={s['score']:.2f}  net={s['net_score']:+.2f}  "
+                    f"({s['breakdown']['bullish']}↑/{s['breakdown']['bearish']}↓/{s['breakdown']['neutral']}~)  "
+                    f'"{s["top_headline"][:60]}"'
+                )
+        except Exception as _e:
+            logger.warning(f"FinBERT sentiment failed: {_e}")
+            sentiments = None
+    elif not _FINBERT_AVAILABLE and not args.no_sentiment:
+        logger.info("── FinBERT not available (pip install transformers torch) ──")
 
     # ── Summary ──────────────────────────────────────────────────────────────
     logger.info("")
@@ -361,11 +636,25 @@ def main() -> int:
     if gappers:
         logger.info("  Individual gappers:")
         for g in gappers:
+            sym = g['symbol']
+            sent_tag = ''
+            if sentiments and sym in sentiments:
+                s = sentiments[sym]
+                sent_tag = f"  {s['emoji']} {s['label']} ({s['score']:.2f})"
             logger.info(
-                f"    {_sign(g['gap_pct'])} {g['symbol']:<8} {g['gap_pct']:+.1f}%  "
-                f"(${g['pm_price']} vs ${g['prev_close']})"
+                f"    {_sign(g['gap_pct'])} {sym:<8} {g['gap_pct']:+.1f}%  "
+                f"(${g['pm_price']} vs ${g['prev_close']}){sent_tag}"
             )
-    if not triggered_baskets and not gappers:
+    if prev_day_gainers:
+        logger.info("  Yesterday's top gainers added:")
+        for g in prev_day_gainers[:10]:
+            sym = g['symbol']
+            sent_tag = ''
+            if sentiments and sym in sentiments:
+                s = sentiments[sym]
+                sent_tag = f"  {s['emoji']} {s['label']} ({s['score']:.2f})"
+            logger.info(f"    ↑ {sym:<8} +{g['prev_gain_pct']:.1f}%{sent_tag}")
+    if not triggered_baskets and not gappers and not prev_day_gainers:
         logger.info("  No pre-market gaps above threshold — nothing to flag.")
         logger.info("  (Run with --threshold 1.5 to lower sensitivity)")
     logger.info(f"  Total watch symbols: {len(all_watch)}")
@@ -389,7 +678,9 @@ def main() -> int:
     if should_notify:
         subject, message = format_discord_message(
             triggered_baskets, gappers, etf_context, now_et,
-            len(all_watch), dry_run=False
+            len(all_watch), dry_run=False, sentiments=sentiments,
+            prev_day_gainers=prev_day_gainers,
+            x_trending=x_trending if x_trending else None,
         )
         notifier = Notifier()
         sent = notifier.send_discord(subject=subject, message=message)

@@ -18,13 +18,16 @@ backtesting, and automated cron + Discord notifications.
 6. [CLI Reference](#cli-reference)
 7. [Output Columns](#output-columns)
 8. [Cron Schedule](#cron-schedule)
-9. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
-10. [scanner_output/lists/ — Live Working Files](#scanner_outputlists--live-working-files)
-11. [Backtest Results](#backtest-results)
-12. [Streamlit Dashboard](#streamlit-dashboard)
-13. [Notifications](#notifications)
-14. [IB Connection](#ib-connection)
-15. [Troubleshooting](#troubleshooting)
+9. [Pre-Market Monitor](#pre-market-monitor-premarket_monitorpy)
+10. [FinBERT Quality Promotion](#finbert-quality-promotion)
+11. [FinBERT Backtest](#finbert-backtest-finbert_backtestpy)
+12. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
+13. [scanner_output/lists/ — Live Working Files](#scanner_outputlists--live-working-files)
+14. [Backtest Results](#backtest-results)
+15. [Streamlit Dashboard](#streamlit-dashboard)
+16. [Notifications](#notifications)
+17. [IB Connection](#ib-connection)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -41,6 +44,9 @@ exit_evaluator.py      # Position exit signal generation
 pattern_recognition.py # 28 patterns: 16 chart + 11 candle + VCP (V12)
 notifier.py            # Discord / Email / Telegram notifications
 portfolio.py           # Position tracking, P&L, snapshots
+premarket_monitor.py   # Pre-market gap scanner + FinBERT + X trending (8:00, 8:45 AM)
+finbert_sentiment.py   # ProsusAI/finbert model wrapper (batch sentiment, per-symbol)
+finbert_backtest.py    # FinBERT quality-promotion backtest vs baseline (Finnhub historical news)
 monitor_watch.py       # 15-min momentum-watch monitor script
 enhanced_backtest.py   # Multi-config A/B backtest (V1–V12 vs SPY)
 weight_optimizer.py    # Optuna walk-forward weight optimizer (V12)
@@ -58,7 +64,8 @@ scanner_output/
   portfolio/           # Portfolio snapshots
   backtests/           # Backtest JSON results
   logs/                # Cron and scan logs
-  cache/               # yfinance parquet disk cache
+  cache/               # yfinance parquet disk cache + Finnhub news JSON cache
+    finnhub/           # Permanent Finnhub news cache (keyed by symbol+date range)
   lists/               # Auto-generated watch lists and live position files
     positions_swing_mock.csv    # PREMIUM/GOLD swing positions — Phase 2 watchlist + exit evaluator input
     positions_daytrade_mock.csv # PREMIUM/GOLD daytrade positions — exit evaluator input
@@ -81,6 +88,12 @@ python breakout_scanner.py input/ALL.txt --mode swing --mock
 
 # Live swing scan with notifications
 python breakout_scanner.py input/ALL.txt --mode swing --live --notify
+
+# Pre-market gap scan + FinBERT (runs at 8:00/8:45 AM)
+python premarket_monitor.py
+
+# FinBERT quality-promotion backtest (Finnhub historical news recommended)
+python finbert_backtest.py --start 2025-01-01 --end 2025-12-31 --finnhub-key YOUR_KEY
 
 # Launch web dashboard
 streamlit run app.py
@@ -353,6 +366,11 @@ START=$(date +%s) && python breakout_scanner.py ...
 | Type | 'Momentum' for gap/run signals | |
 | RSI | Current RSI | |
 | Sector | Sector classification | |
+| FinBERT | Sentiment label: bullish / bearish / neutral | Added post-scan |
+| FinBERT_Score | FinBERT confidence for dominant label (0–1) | |
+| FinBERT_Net | (bullish − bearish) / total headlines (−1 to +1) | |
+| FinBERT_Headline | Top headline used for sentiment | |
+| FinBERT_Promoted | Promotion tier: 'HIGH→PREMIUM' or 'PREMIUM→GOLD' | Only when promoted |
 
 ---
 
@@ -368,6 +386,8 @@ All times are US Eastern (TZ=America/New_York set in cron_jobs.txt).
 
 | Time (ET) | Days | Job |
 |-----------|------|-----|
+| 8:00 AM | Mon–Fri | Pre-market monitor: gap scan + FinBERT + X trending → `premarket_watch.txt` + Discord |
+| 8:45 AM | Mon–Fri | Pre-market monitor: second scan (updated pre-market prices) |
 | Mon 9:00 AM | Mon | Longterm Phase 1: full scan → premium export |
 | Mon 9:15 AM | Mon | Longterm exit evaluation |
 | 9:35 AM | Mon–Fri | Swing Phase 1: full scan → auto-positions append |
@@ -396,6 +416,171 @@ python upload_to_s3.py --since-epoch $START --dirs scanner_output/signals scanne
 ```
 
 Requires `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `.env` or environment.
+
+---
+
+## Pre-Market Monitor (`premarket_monitor.py`)
+
+Standalone agent run at 8:00 AM and 8:45 AM ET via cron. Scans for pre-market gaps,
+enriches top gappers with FinBERT sentiment, fetches yesterday's top gainers, and
+optionally pulls real-time X (Twitter) trending cashtags.
+
+### Data sources
+
+| Source | What it provides |
+|--------|-----------------|
+| yfinance `prepost=True` | Pre-market candles 4 AM–9:29 AM ET for gap calculation |
+| Yahoo Finance Screener API | Yesterday's top 25 gainers (prev-day % gain, volume) |
+| `finbert_sentiment.py` | FinBERT sentiment on top 15 gappers |
+| X API v2 (optional) | Real-time `$CASHTAG` trending (likes + 2× retweets = engagement) |
+
+### Features
+
+- **Gap detection**: scans `PRIORITY_SYMBOLS` (36 high-beta symbols) + any `SECTOR_BASKET` triggered (e.g. IBIT ≥ 3% → entire crypto basket added)
+- **WATCHONLY_ETFs**: QQQ, XLE, XLF, IBB, XME, ARKK, GLD, TLT shown in Discord for market context
+- **Yesterday's top gainers**: `fetch_previous_day_gainers(top_n=25, min_pct=3.0)` — shown in Discord "Yesterday's Top Gainers" section; symbols merged into FinBERT batch
+- **X trending** (optional): `scan_x_trending_cashtags()` searches `$SYMBOL lang:en -is:retweet`, sorted by engagement; shown in "Trending on X" section
+- **Sector basket trigger**: IBIT ≥ 3% → all crypto symbols auto-added to watch list
+- **Output**: writes `premarket_watch.txt` → pre-seeds Phase 1 `momentum_watch_daytrade.txt`
+
+### Usage
+
+```bash
+# Full pre-market scan with FinBERT sentiment
+python premarket_monitor.py
+
+# Skip FinBERT (faster on quiet days)
+python premarket_monitor.py --no-sentiment
+
+# Include X trending (requires TWITTER_BEARER_TOKEN env var or --x-token)
+python premarket_monitor.py --x-token YOUR_BEARER_TOKEN
+
+# Adjust X trending sensitivity
+python premarket_monitor.py --x-token YOUR_BEARER_TOKEN --x-mentions 30
+
+# Dry run (no Discord, no file write)
+python premarket_monitor.py --dry-run
+```
+
+### Key lesson from Mar 4 retrospective
+
+Gap days (8–16% moves on IBIT/COIN/MSTR) can occur on **low volume ratios (1.3–1.6×)** — the standard vol threshold would miss them. The pre-market monitor catches these before market open by using actual pre-market price data rather than scanner volume logic.
+
+### Gap direction vs sentiment signal (most actionable)
+
+| Scenario | Signal type |
+|----------|------------|
+| Gap down + FinBERT bullish | Buy-the-dip candidate (IREN Mar 4: -8% gap, bullish 0.91) |
+| Gap up + FinBERT bearish | Fade candidate (MDB Mar 5: +7% gap, bearish 0.97 on guidance cut) |
+| Gap up + FinBERT bullish | Momentum continuation (standard breakout) |
+
+### Environment variables
+
+```
+TWITTER_BEARER_TOKEN=...   # X API Basic tier ($200/mo) — for cashtag trending
+FINNHUB_API_KEY=...        # Free at finnhub.io — for historical news in finbert_backtest.py
+```
+
+> **X API tiers**: Free (7-day lookback), Basic $200/mo (7-day), Pro $5k/mo (30-day).
+> Full archive requires Enterprise ($42k+/mo). X API is suitable for **real-time trending only**,
+> not historical backtesting.
+
+---
+
+## FinBERT Quality Promotion
+
+After every scan, `breakout_scanner.py` enriches HIGH+ signals with FinBERT news sentiment.
+Bullish FinBERT signals that meet threshold requirements are **promoted one quality tier up**:
+
+| From | To | FinBERT_Score threshold | FinBERT_Net threshold |
+|------|----|------------------------|----------------------|
+| HIGH | PREMIUM | ≥ 0.70 | ≥ 0.25 |
+| PREMIUM | GOLD | ≥ 0.82 | ≥ 0.40 |
+
+**`FinBERT_Net`** = (bullish_count − bearish_count) / total_headlines. A value of 0.25 means
+roughly 5 bullish vs 2 bearish in 8 headlines — a clear majority, not just a single article.
+
+### Rules
+
+- **Promotion only** — bearish FinBERT never downgrades a signal
+- **HIGH+ only** — STANDARD signals are never promoted
+- **PREMIUM→GOLD uses a higher bar** (0.82 / 0.40) because GOLD bypasses scanner hard gates
+- `FinBERT_Promoted` key added to signal dict → visible in CSV export for auditability
+- Promotion happens **before CSV export and Discord notification**
+
+### Configure in `config.py`
+
+```python
+FINBERT_PROMOTION = {
+    'enabled': True,
+    'high_to_premium': {'min_score': 0.70, 'min_net': 0.25},
+    'premium_to_gold':  {'min_score': 0.82, 'min_net': 0.40},
+}
+```
+
+### Discord badge
+
+Promoted signals show an extra line in the Discord embed:
+
+```
+⬆ PROMOTED: HIGH→PREMIUM
+```
+
+---
+
+## FinBERT Backtest (`finbert_backtest.py`)
+
+Evaluates whether FinBERT quality promotion improves risk-adjusted returns vs a baseline
+scanner, using **true historical news** via Finnhub (no lookahead bias).
+
+```bash
+# Baseline only (no sentiment)
+python finbert_backtest.py --start 2025-01-01 --end 2025-12-31 --no-sentiment
+
+# With Finnhub historical news (recommended — no lookahead bias)
+python finbert_backtest.py --start 2025-01-01 --end 2025-12-31 --finnhub-key YOUR_KEY
+
+# Or set env var (reads FINNHUB_API_KEY automatically)
+export FINNHUB_API_KEY=your_key
+python finbert_backtest.py --start 2025-01-01 --end 2025-12-31
+```
+
+### 4 simulation configs
+
+| Config | Description |
+|--------|------------|
+| **A** | Baseline HIGH+ (no FinBERT) |
+| **B** | Baseline PREMIUM+ (no FinBERT) |
+| **C** | FinBERT HIGH+ — promoted signals get PREMIUM position sizing |
+| **D** | FinBERT PREMIUM+ — includes FinBERT-promoted symbols |
+
+### News data sources
+
+| Source | Coverage | Notes |
+|--------|----------|-------|
+| **Finnhub** (recommended) | Date-range filtered historical news | 60 req/min free; cached to `scanner_output/cache/finnhub/` |
+| **yfinance** (fallback) | ~10 most recent articles (today only) | No historical coverage — cannot simulate past dates accurately |
+
+> **Why Finnhub?** yfinance only returns the ~10 most recent news articles, all timestamped today.
+> Without per-date news, any "historical" backtest using yfinance sentiment has **lookahead bias**
+> (you'd be reading today's news for a signal from 2 months ago). Finnhub provides true dated news
+> with `from`/`to` query parameters.
+
+> **Finnhub free tier**: sign up at [finnhub.io](https://finnhub.io) — 60 req/min, no cost.
+
+### Promotion table output
+
+```
+Symbol     Date       Quality(before) Quality(after) FinBERT_Score  Net    Outcome
+AAPL       2025-02-10 HIGH            PREMIUM        0.83           +0.40  +8.2% (TP hit)
+NVDA       2025-02-14 PREMIUM         GOLD           0.91           +0.55  +12.1% (TP hit)
+```
+
+### Statistical note
+
+A 1-month backtest window on a focused watchlist (e.g. MAGS.txt) produces ~7 HIGH+ signals — not
+statistically significant. Use a 6–12 month window with a broader watchlist (e.g. ALL.txt) for
+meaningful comparison.
 
 ---
 
@@ -923,6 +1108,8 @@ DISCORD_WEBHOOK_URL=https://discordapp.com/api/webhooks/...
 TAVILY_API_KEY=tvly-...
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
+FINNHUB_API_KEY=...            # Free at finnhub.io — historical news for finbert_backtest.py
+TWITTER_BEARER_TOKEN=...       # X API Basic ($200/mo) — real-time cashtag trending in premarket_monitor.py
 EOF
 ```
 

@@ -290,6 +290,24 @@ SENTIMENT = {
     },
 }
 
+# --- FinBERT Quality Promotion ---
+# Bullish FinBERT sentiment promotes a signal one tier up (HIGH→PREMIUM or PREMIUM→GOLD).
+# Two thresholds must both be met:
+#   min_score : FinBERT confidence for the dominant bullish label (0–1)
+#   min_net   : (bullish_count - bearish_count) / total headlines (-1 to +1)
+# PREMIUM→GOLD uses a higher bar because GOLD bypasses the scanner's 5 hard gates.
+FINBERT_PROMOTION = {
+    'enabled': True,
+    'high_to_premium': {
+        'min_score': 0.70,   # e.g. 70% confident bullish
+        'min_net':   0.25,   # e.g. 5↑/2↓ out of 8 headlines
+    },
+    'premium_to_gold': {
+        'min_score': 0.82,   # higher bar — GOLD is the top tier
+        'min_net':   0.40,   # majority of headlines clearly bullish
+    },
+}
+
 # --- Sector Baskets (momentum trigger for correlated groups) ---
 # When a trigger ETF moves >= trigger_pct in a single day (either direction),
 # the entire sector basket is added to momentum_watch so Phase 2 re-scans them.

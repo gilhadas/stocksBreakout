@@ -226,12 +226,30 @@ class Notifier:
                 
                 for sig in signals[:10]:  # Limit to 10 in Discord
                     sector = f" [{sig['Sector']}]" if sig.get('Sector') else ""
+                    value = (
+                        f"Price: ${sig['Price']} | SL: ${sig['Stop']} | TP: ${sig['Target']}\n"
+                        f"R:R: {sig['R:R']} | Vol: {sig['Vol']}x"
+                    )
+                    # Append FinBERT sentiment line when available
+                    fb_label = sig.get('FinBERT')
+                    if fb_label:
+                        _emoji = {'bullish': '🟢', 'bearish': '🔴', 'neutral': '⚪'}.get(fb_label, '⚪')
+                        fb_score = sig.get('FinBERT_Score', 0)
+                        fb_net   = sig.get('FinBERT_Net', 0)
+                        fb_hl    = sig.get('FinBERT_Headline', '')
+                        conf_bar = '█' * round(fb_score * 5)
+                        value += (
+                            f"\n{_emoji} FinBERT: **{fb_label}** {fb_score:.2f} [{conf_bar}] "
+                            f"net={fb_net:+.2f}"
+                        )
+                        if fb_hl:
+                            value += f"\n_{fb_hl[:80]}_"
+                        fb_promoted = sig.get('FinBERT_Promoted', '')
+                        if fb_promoted:
+                            value += f"\n**⬆ PROMOTED: {fb_promoted}**"
                     embed['fields'].append({
                         'name': f"{sig['Symbol']}{sector} ({sig['Quality']})",
-                        'value': (
-                            f"Price: ${sig['Price']} | SL: ${sig['Stop']} | TP: ${sig['Target']}\n"
-                            f"R:R: {sig['R:R']} | Vol: {sig['Vol']}x"
-                        ),
+                        'value': value,
                         'inline': False
                     })
                 

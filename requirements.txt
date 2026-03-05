@@ -8,3 +8,6 @@ ib_insync>=0.9.86
 s3fs
 st-files-connection
 optuna>=3.0
+transformers>=4.40.0
+torch>=2.0.0
+tweepy>=4.14.0        # X API cashtag trending (premarket_monitor.py --x-token)

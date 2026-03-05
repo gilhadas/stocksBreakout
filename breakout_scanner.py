@@ -125,6 +125,73 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 sig['Sentiment'] = sent['sentiment']
                 sig['Buzz'] = sent['buzz_score']
 
+    # FinBERT sentiment for HIGH / PREMIUM / GOLD signals only
+    # Runs unconditionally when quality signals are present — no extra flag required.
+    # Adds FinBERT, FinBERT_Score, FinBERT_Net, FinBERT_Headline keys to each signal dict.
+    _quality_sigs = [s for s in results if s.get('Quality') in ('HIGH', 'PREMIUM', 'GOLD')]
+    if _quality_sigs:
+        try:
+            from finbert_sentiment import batch_sentiment as _fb_batch
+            _fb_syms = [s.get('Symbol') or s.get('symbol', '') for s in _quality_sigs]
+            _fb_syms = [s for s in _fb_syms if s]
+            if _fb_syms:
+                logger.info(f"FinBERT sentiment: analysing {len(_fb_syms)} HIGH+ signal(s)…")
+                _fb_results = _fb_batch(_fb_syms, max_headlines=8, max_age_hours=24)
+                for sig in results:
+                    sym = sig.get('Symbol') or sig.get('symbol', '')
+                    if sym in _fb_results:
+                        fb = _fb_results[sym]
+                        sig['FinBERT'] = fb['label']
+                        sig['FinBERT_Score'] = fb['score']
+                        sig['FinBERT_Net'] = fb['net_score']
+                        sig['FinBERT_Headline'] = fb['top_headline'][:100]
+                        logger.info(
+                            f"  {fb['emoji']} {sym:<8} {fb['label']:<8} "
+                            f"score={fb['score']:.2f} net={fb['net_score']:+.2f}  "
+                            f"({fb['breakdown']['bullish']}↑/{fb['breakdown']['bearish']}↓"
+                            f"/{fb['breakdown']['neutral']}~)  "
+                            f'"{fb["top_headline"][:65]}"'
+                        )
+        except ImportError:
+            logger.debug("FinBERT not available (pip install transformers torch)")
+        except Exception as _e:
+            logger.warning(f"FinBERT enrichment failed: {_e}")
+
+    # ── FinBERT quality promotion ─────────────────────────────────────────────
+    # Bullish FinBERT at sufficient confidence promotes HIGH→PREMIUM or PREMIUM→GOLD.
+    # Promotion-only: bearish FinBERT does NOT downgrade signals.
+    try:
+        from config import FINBERT_PROMOTION as _fb_promo_cfg
+        if _fb_promo_cfg.get('enabled', True):
+            _h2p = _fb_promo_cfg['high_to_premium']
+            _p2g = _fb_promo_cfg['premium_to_gold']
+            for sig in results:
+                fb_label = sig.get('FinBERT')
+                fb_score = sig.get('FinBERT_Score', 0.0)
+                fb_net   = sig.get('FinBERT_Net', 0.0)
+                quality  = sig.get('Quality', '')
+                sym      = sig.get('Symbol', '')
+
+                if fb_label != 'bullish':
+                    continue
+
+                if quality == 'HIGH' and fb_score >= _h2p['min_score'] and fb_net >= _h2p['min_net']:
+                    sig['Quality'] = 'PREMIUM'
+                    sig['FinBERT_Promoted'] = 'HIGH→PREMIUM'
+                    logger.info(
+                        f"  ⬆ {sym} promoted HIGH→PREMIUM "
+                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f})"
+                    )
+                elif quality == 'PREMIUM' and fb_score >= _p2g['min_score'] and fb_net >= _p2g['min_net']:
+                    sig['Quality'] = 'GOLD'
+                    sig['FinBERT_Promoted'] = 'PREMIUM→GOLD'
+                    logger.info(
+                        f"  ⬆ {sym} promoted PREMIUM→GOLD "
+                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f})"
+                    )
+    except Exception as _fp_e:
+        logger.debug(f"FinBERT promotion skipped: {_fp_e}")
+
     # Check market regime — warn if choppy or red
     market_warning = None
     try:
