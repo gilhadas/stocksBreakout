@@ -21,13 +21,14 @@ backtesting, and automated cron + Discord notifications.
 9. [Pre-Market Monitor](#pre-market-monitor-premarket_monitorpy)
 10. [FinBERT Quality Promotion](#finbert-quality-promotion)
 11. [FinBERT Backtest](#finbert-backtest-finbert_backtestpy)
-12. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
-13. [scanner_output/lists/ — Live Working Files](#scanner_outputlists--live-working-files)
-14. [Backtest Results](#backtest-results)
-15. [Streamlit Dashboard](#streamlit-dashboard)
-16. [Notifications](#notifications)
-17. [IB Connection](#ib-connection)
-18. [Troubleshooting](#troubleshooting)
+12. [Earnings Date Warning](#earnings-date-warning)
+13. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
+14. [scanner_output/lists/ — Live Working Files](#scanner_outputlists--live-working-files)
+15. [Backtest Results](#backtest-results)
+16. [Streamlit Dashboard](#streamlit-dashboard)
+17. [Notifications](#notifications)
+18. [IB Connection](#ib-connection)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -371,6 +372,9 @@ START=$(date +%s) && python breakout_scanner.py ...
 | FinBERT_Net | (bullish − bearish) / total headlines (−1 to +1) | |
 | FinBERT_Headline | Top headline used for sentiment | |
 | FinBERT_Promoted | Promotion tier: 'HIGH→PREMIUM' or 'PREMIUM→GOLD' | Only when promoted |
+| Earnings_Date | Next quarterly earnings report date (YYYY-MM-DD) | Added post-scan |
+| Earnings_Timing | BMO or AMC (Before Market Open / After Market Close) | BMO = 6-12 AM, AMC = 4-6 PM ET |
+| Earnings_Warning | Warning text for imminent earnings (within 7 days) | PREMIUM/GOLD only, empty for others |
 
 ---
 
@@ -581,6 +585,76 @@ NVDA       2025-02-14 PREMIUM         GOLD           0.91           +0.55  +12.1
 A 1-month backtest window on a focused watchlist (e.g. MAGS.txt) produces ~7 HIGH+ signals — not
 statistically significant. Use a 6–12 month window with a broader watchlist (e.g. ALL.txt) for
 meaningful comparison.
+
+---
+
+## Earnings Date Warning
+
+Every signal is automatically enriched with the next quarterly earnings report date and timing (Before or After market hours). Earnings dates are critical for breakout traders — a stock breaking out right before earnings carries extra **gap risk**.
+
+### Features
+
+**Automatic enrichment** (post-scan, per-signal):
+- Fetches `yf.Ticker(sym).calendar` for next earnings date
+- Determines timing from the datetime hour (6 AM–12 PM → **BMO**, 12 PM–6 PM → **AMC**)
+- Adds 3 columns to every signal:
+  - `Earnings_Date` — next earnings announcement date (YYYY-MM-DD)
+  - `Earnings_Timing` — "BMO" or "AMC" (empty if unknown)
+  - `Earnings_Warning` — warning text for imminent earnings (within 7 days) on PREMIUM/GOLD signals only
+
+### Discord Notification
+
+In Discord embeds, signals show earnings information:
+
+| Quality | Earnings within 7 days | Earnings > 7 days away |
+|---------|------------------------|------------------------|
+| **PREMIUM / GOLD** | **⚠ EARNINGS in Xd (BMO/AMC)** ← **Bold warning badge** | Earnings: YYYY-MM-DD (BMO/AMC) |
+| HIGH / STANDARD | Earnings: YYYY-MM-DD (BMO/AMC) | Earnings: YYYY-MM-DD (BMO/AMC) |
+
+**Why the distinction?** PREMIUM and GOLD signals are your highest-conviction trades. Earnings within 7 days adds significant overnight/opening gap risk. The warning is a **visual alert** (bold red in Discord) to reconsider position sizing or delay entry.
+
+### Example Discord embed
+
+```
+Symbol: COIN [Finance] (PREMIUM)
+Price: $142.50 | SL: $139.20 | TP: $156.80
+R:R: 2.1 | Vol: 2.8x
+
+⚠ EARNINGS in 3d (AMC)   ← Warning badge for PREMIUM with earnings in 7 days
+```
+
+### Rules
+
+- **BMO (Before Market Open):** Earnings announced pre-market (6 AM–9:30 AM ET)
+  - Stock often gaps open, breakout candle structure invalidated overnight
+  - Higher risk: can't place stops or take profits until market opens
+
+- **AMC (After Market Close):** Earnings announced after-hours (4 PM–6 PM ET)
+  - More predictable: trade during normal hours, then manage overnight gap risk
+  - Slightly lower risk than BMO
+
+- **No earnings in sight:** `Earnings_Date` is empty; no warning issued
+
+- **7-day threshold (configurable):** Hardcoded in `breakout_scanner.py` line ~232
+  - Change `_EARNINGS_WARN_DAYS = 7` to adjust sensitivity
+
+### CSV export
+
+All 3 columns appear in the signal CSV — useful for post-analysis and audit trail:
+
+```csv
+Symbol,Price,Quality,Earnings_Date,Earnings_Timing,Earnings_Warning
+COIN,142.50,PREMIUM,2026-03-22,AMC,"EARNINGS in 3d (AMC)"
+NVDA,156.23,HIGH,2026-04-25,AMC,""
+TPL,401.62,GOLD,2026-05-10,BMO,"EARNINGS in 9d (BMO)"
+```
+
+### Strategy notes
+
+- **Before earnings:** consider **reducing position size** on PREMIUM/GOLD signals
+- **After earnings:** look for **post-earnings breakouts** (scanner runs post-market, can catch follow-through)
+- **Swing traders:** earnings within 7 days is a signal to **tighten stops** and **take profits early**
+- **Daytrade mode:** earnings same day can trigger **wide 4 PM gaps** — monitor positions closely into close
 
 ---
 

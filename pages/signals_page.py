@@ -535,6 +535,20 @@ def render_signals_page():
     if min_abs_gain > 0 and 'Gain%' in filtered.columns:
         filtered = filtered[filtered['Gain%'].abs() >= min_abs_gain]
 
+    # Show earnings warning summary if any PREMIUM/GOLD signals have imminent earnings
+    if 'Earnings_Warning' in filtered.columns and 'Quality' in filtered.columns:
+        warn_signals = filtered[
+            (filtered['Quality'].isin(['PREMIUM', 'GOLD'])) &
+            (filtered['Earnings_Warning'].notna()) &
+            (filtered['Earnings_Warning'] != '')
+        ].copy()
+        if not warn_signals.empty:
+            warn_text = ', '.join([
+                f"{row['Symbol']} {row['Earnings_Warning']}"
+                for _, row in warn_signals.iterrows()
+            ])
+            st.warning(f"⚠️ **Earnings Risk:** {warn_text}")
+
     if filtered.empty:
         st.info("No signals match the selected filters.")
         return
@@ -568,6 +582,8 @@ def render_signals_page():
     detail_cols = ['Symbol', 'Quality', 'Price', 'Current', 'Gain%',
                    'Stop', 'Target', 'R:R', 'HitTarget', 'HitStop',
                    'Patterns', 'VCP_Quality', 'VCP_Pivot', 'VCP_Contractions',
+                   'Earnings_Date', 'Earnings_Timing', 'Earnings_Warning',
+                   'Earnings_This_Week', 'Reporting_Watchlist',
                    'Sector', 'DaysSince']
     # Insert Price@Date columns after Current
     if col_label and col_label in filtered.columns:
@@ -597,13 +613,27 @@ def render_signals_page():
     total_df = pd.DataFrame([total_row])[detail_cols]
 
     def _color_trade_row(row):
-        """Color entire row: green for winners, red for losers."""
+        """Color entire row: green for winners, red for losers.
+        Special: highlight Earnings_Warning column if imminent earnings on PREMIUM/GOLD."""
         gain = row.get('Gain%', 0) if pd.notna(row.get('Gain%', 0)) else 0
+        base_color = []
+
         if gain > 0:
-            return ['background-color: #0d2618; color: #4caf50'] * len(row)
+            base_color = ['background-color: #0d2618; color: #4caf50'] * len(row)
         elif gain < 0:
-            return ['background-color: #2a1111; color: #ef5350'] * len(row)
-        return [''] * len(row)
+            base_color = ['background-color: #2a1111; color: #ef5350'] * len(row)
+        else:
+            base_color = [''] * len(row)
+
+        # Highlight Earnings_Warning cell for PREMIUM/GOLD with imminent earnings
+        if 'Earnings_Warning' in detail_cols and 'Quality' in detail_cols:
+            warn_idx = detail_cols.index('Earnings_Warning')
+            qual_val = row.get('Quality', '')
+            warn_val = row.get('Earnings_Warning', '')
+            if qual_val in ['PREMIUM', 'GOLD'] and pd.notna(warn_val) and str(warn_val).strip():
+                base_color[warn_idx] = 'background-color: #ff6b4a; color: #ffffff; font-weight: bold'
+
+        return base_color
 
     def _color_total_row(row):
         return ['background-color: #1a1a2e; color: #ffffff; font-weight: bold'] * len(row)
@@ -618,6 +648,9 @@ def render_signals_page():
         'R:R': '{:.1f}',
         'VCP_Quality': '{:.2f}',
         'VCP_Pivot': '${:.2f}',
+        'Earnings_Date': '{}',  # YYYY-MM-DD
+        'Earnings_Timing': '{}',  # BMO/AMC
+        'Earnings_Warning': '{}',  # warning text or empty
     }
     if col_label:
         fmt[col_label] = '${:.2f}'

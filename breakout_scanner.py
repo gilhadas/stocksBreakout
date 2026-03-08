@@ -192,6 +192,88 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     except Exception as _fp_e:
         logger.debug(f"FinBERT promotion skipped: {_fp_e}")
 
+    # ── Earnings date enrichment ──────────────────────────────────────────────
+    # Adds Earnings_Date, Earnings_Timing (BMO/AMC), Earnings_Warning,
+    # Earnings_This_Week (True/False), and Reporting_Watchlist (True/False) to each signal.
+    if results:
+        try:
+            import yfinance as _yf
+            from datetime import datetime as _dt, timezone as _tz
+            _today = _dt.now(_NY_TZ).date()
+            _EARNINGS_WARN_DAYS = 7
+
+            # Load reporting watchlist for cross-reference tagging
+            _reporting_syms: set[str] = set()
+            _rw_path = os.path.join(os.path.dirname(__file__), 'input', 'reporting_watchlist.txt')
+            try:
+                with open(_rw_path, encoding='utf-8') as _rw_f:
+                    for _line in _rw_f:
+                        for _tok in _line.split(','):
+                            _s = _tok.strip().split(':')[-1].strip().upper()
+                            if _s:
+                                _reporting_syms.add(_s)
+            except Exception:
+                pass
+
+            for sig in results:
+                sym = sig.get('Symbol') or sig.get('symbol', '')
+                sig['Earnings_Date'] = ''
+                sig['Earnings_Timing'] = ''
+                sig['Earnings_Warning'] = ''
+                sig['Earnings_This_Week'] = False
+                sig['Reporting_Watchlist'] = sym.upper() in _reporting_syms if sym else False
+                if not sym:
+                    continue
+                try:
+                    _cal = _yf.Ticker(sym).calendar
+                    if _cal is None:
+                        continue
+                    _ed_raw = None
+                    if isinstance(_cal, dict):
+                        _ed_val = _cal.get('Earnings Date')
+                        if _ed_val:
+                            _ed_raw = _ed_val[0] if isinstance(_ed_val, list) else _ed_val
+                    elif hasattr(_cal, 'iloc'):
+                        try:
+                            _ed_raw = _cal.iloc[0, 0]
+                        except Exception:
+                            pass
+                    if _ed_raw is None:
+                        continue
+
+                    # Parse to datetime
+                    if isinstance(_ed_raw, str):
+                        _ed_raw = pd.Timestamp(_ed_raw)
+                    if hasattr(_ed_raw, 'date'):
+                        _ed_date = _ed_raw.date() if callable(_ed_raw.date) else _ed_raw.date
+                    else:
+                        _ed_date = pd.Timestamp(str(_ed_raw)).date()
+
+                    sig['Earnings_Date'] = str(_ed_date)
+
+                    # BMO / AMC from hour (hour < 12 → BMO, else AMC)
+                    if hasattr(_ed_raw, 'hour') and _ed_raw.hour > 0:
+                        sig['Earnings_Timing'] = 'BMO' if _ed_raw.hour < 12 else 'AMC'
+
+                    _days_until = (_ed_date - _today).days
+                    if 0 <= _days_until <= _EARNINGS_WARN_DAYS:
+                        sig['Earnings_This_Week'] = True
+                        _timing_str = f" ({sig['Earnings_Timing']})" if sig['Earnings_Timing'] else ""
+                        if sig.get('Quality') in ('PREMIUM', 'GOLD'):
+                            sig['Earnings_Warning'] = (
+                                f"EARNINGS in {_days_until}d{_timing_str}"
+                            )
+                            logger.warning(
+                                f"  ⚠ {sym} — earnings in {_days_until} day(s){_timing_str}, "
+                                f"quality={sig['Quality']}"
+                            )
+                        else:
+                            sig['Earnings_Warning'] = f"Earnings in {_days_until}d{_timing_str}"
+                except Exception as _e:
+                    logger.debug(f"Earnings fetch failed for {sym}: {_e}")
+        except Exception as _earn_e:
+            logger.debug(f"Earnings enrichment skipped: {_earn_e}")
+
     # Check market regime — warn if choppy or red
     market_warning = None
     try:

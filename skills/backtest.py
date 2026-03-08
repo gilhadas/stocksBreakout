@@ -1,196 +1,117 @@
 #!/usr/bin/env python3
 """
-Claude Skill: /backtest
-Run strategy backtests with comparison support
+Skill: backtest
+Run strategy backtests with comparison support.
+
+Usage:
+  python skills/backtest.py --period 2024 --compare configs
+  python skills/backtest.py --period 2025-01-01:2025-06-30 --mode swing
 """
 
-import asyncio
+import sys
 import argparse
-import logging
-from pathlib import Path
-from typing import Optional
-from datetime import datetime, timedelta
+import subprocess
+from datetime import datetime
 
-logger = logging.getLogger(__name__)
+def parse_period(period_str):
+    """Parse period string into start and end dates."""
+    if period_str == "2024":
+        return "2024-01-01", "2024-12-31"
+    elif period_str == "2025":
+        return "2025-01-01", "2025-12-31"
+    elif period_str == "last-month":
+        # Last calendar month
+        today = datetime.now()
+        first_of_this = today.replace(day=1)
+        last_of_last = first_of_this - pd.Timedelta(days=1)
+        first_of_last = last_of_last.replace(day=1)
+        return first_of_last.strftime("%Y-%m-%d"), last_of_last.strftime("%Y-%m-%d")
+    elif ":" in period_str:
+        return period_str.split(":")
+    else:
+        raise ValueError(f"Invalid period: {period_str}")
 
+def main():
+    parser = argparse.ArgumentParser(description="Run strategy backtests")
 
-async def run_backtest_skill(
-    period: str = '2024',
-    mode: str = 'swing',
-    compare: Optional[str] = None,
-    optimize: Optional[str] = None,
-    notify: bool = False,
-) -> dict:
-    """
-    Run strategy backtest on historical data
-
-    Args:
-        period: Date range (e.g., '2024', '2025-01-01:2025-12-31', 'last-month')
-        mode: Trading mode (swing, daytrade, longterm)
-        compare: Comparison type (v1-vs-v2, configs, modes)
-        optimize: Parameter to optimize (rsi_overbought, atr_mult, etc.)
-        notify: Send notifications
-
-    Returns:
-        dict with backtest results: {return, sharpe, max_dd, win_rate, w_l_ratio, comparison}
-    """
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-
-    try:
-        # Parse dates
-        if period == 'last-month':
-            end_date = datetime.now().date()
-            start_date = (datetime.now() - timedelta(days=30)).date()
-        elif period == 'last-quarter':
-            end_date = datetime.now().date()
-            start_date = (datetime.now() - timedelta(days=90)).date()
-        elif ':' in period:
-            start_str, end_str = period.split(':')
-            start_date = datetime.strptime(start_str, '%Y-%m-%d').date()
-            end_date = datetime.strptime(end_str, '%Y-%m-%d').date()
-        else:
-            # Assume year like '2024'
-            year = int(period)
-            start_date = datetime(year, 1, 1).date()
-            end_date = datetime(year, 12, 31).date()
-
-        logger.info(f"Backtest period: {start_date} to {end_date}")
-        logger.info(f"Mode: {mode}")
-        if compare:
-            logger.info(f"Comparison: {compare}")
-        if optimize:
-            logger.info(f"Optimizing: {optimize}")
-
-        # Import backtest module
-        from enhanced_backtest import run_backtest_v2
-
-        if compare == 'v1-vs-v2':
-            # Run both versions and compare
-            return await run_comparison_backtest(
-                start_date, end_date, mode
-            )
-        elif optimize:
-            # Run parameter sweep
-            return await run_optimization_backtest(
-                start_date, end_date, mode, optimize
-            )
-        else:
-            # Run single backtest
-            result = await run_backtest_v2(
-                start_date=str(start_date),
-                end_date=str(end_date),
-                mode=mode,
-                use_legacy_momentum=False  # V2 by default
-            )
-
-            return {
-                'success': True,
-                'period': f"{start_date} to {end_date}",
-                'mode': mode,
-                'metrics': {
-                    'return': f"{result.get('return', 0):.2f}%",
-                    'sharpe': f"{result.get('sharpe', 0):.2f}",
-                    'max_drawdown': f"{result.get('max_drawdown', 0):.2f}%",
-                    'win_rate': f"{result.get('win_rate', 0):.1f}%",
-                    'w_l_ratio': f"{result.get('w_l_ratio', 0):.2f}",
-                    'trades': result.get('total_trades', 0)
-                },
-                'full_result': result
-            }
-
-    except Exception as e:
-        logger.error(f"Backtest error: {e}", exc_info=True)
-        return {
-            'success': False,
-            'error': str(e)
-        }
-
-
-async def run_comparison_backtest(start_date, end_date, mode: str) -> dict:
-    """Compare V1 vs V2 scoring"""
-    from enhanced_backtest import run_backtest_v2
-
-    logger.info("Running V1 vs V2 comparison...")
-
-    # V1 (legacy momentum)
-    v1_result = await run_backtest_v2(
-        start_date=str(start_date),
-        end_date=str(end_date),
-        mode=mode,
-        use_legacy_momentum=True
+    parser.add_argument(
+        "--period",
+        default="2024",
+        help="Date range (2024, 2025, last-month, YYYY-MM-DD:YYYY-MM-DD)"
     )
 
-    # V2 (composite scoring)
-    v2_result = await run_backtest_v2(
-        start_date=str(start_date),
-        end_date=str(end_date),
-        mode=mode,
-        use_legacy_momentum=False
+    parser.add_argument(
+        "--mode",
+        choices=["swing", "daytrade", "longterm"],
+        default="swing",
+        help="Trading mode (default: swing)"
     )
 
-    improvement = {
-        'return': v2_result.get('return', 0) - v1_result.get('return', 0),
-        'sharpe': v2_result.get('sharpe', 0) - v1_result.get('sharpe', 0),
-        'win_rate': v2_result.get('win_rate', 0) - v1_result.get('win_rate', 0),
-    }
+    parser.add_argument(
+        "--compare",
+        choices=["v1-vs-v2", "configs", "modes"],
+        help="What to compare (v1-vs-v2, configs, modes)"
+    )
 
-    return {
-        'success': True,
-        'comparison': 'v1 vs v2',
-        'period': f"{start_date} to {end_date}",
-        'mode': mode,
-        'v1': {
-            'return': f"{v1_result.get('return', 0):.2f}%",
-            'sharpe': f"{v1_result.get('sharpe', 0):.2f}",
-            'max_drawdown': f"{v1_result.get('max_drawdown', 0):.2f}%",
-            'win_rate': f"{v1_result.get('win_rate', 0):.1f}%",
-        },
-        'v2': {
-            'return': f"{v2_result.get('return', 0):.2f}%",
-            'sharpe': f"{v2_result.get('sharpe', 0):.2f}",
-            'max_drawdown': f"{v2_result.get('max_drawdown', 0):.2f}%",
-            'win_rate': f"{v2_result.get('win_rate', 0):.1f}%",
-        },
-        'improvement': {
-            'return': f"{improvement['return']:+.2f}%",
-            'sharpe': f"{improvement['sharpe']:+.2f}",
-            'win_rate': f"{improvement['win_rate']:+.1f}%"
-        },
-        'winner': 'V2' if improvement['return'] > 0 else 'V1'
-    }
+    parser.add_argument(
+        "--optimize",
+        choices=["rsi_overbought", "atr_mult", "consolidation"],
+        help="Parameter to optimize (runs weight_optimizer.py instead)"
+    )
 
-
-async def run_optimization_backtest(start_date, end_date, mode: str, param: str) -> dict:
-    """Parameter optimization sweep"""
-    logger.info(f"Optimizing parameter: {param}")
-
-    # This would require parameter sweep logic
-    # For now, return placeholder
-    return {
-        'success': True,
-        'note': f"Optimization for {param} requires enhanced_backtest.py parameter sweep",
-        'recommendation': 'Use beat_spy_optimizer.py for detailed parameter analysis'
-    }
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Run backtest')
-    parser.add_argument('--period', default='2024', help='Date range')
-    parser.add_argument('--mode', default='swing', help='Trading mode')
-    parser.add_argument('--compare', help='Comparison type (v1-vs-v2, configs, modes)')
-    parser.add_argument('--optimize', help='Parameter to optimize')
-    parser.add_argument('--notify', action='store_true', help='Send notifications')
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Limit symbols (for faster testing)"
+    )
 
     args = parser.parse_args()
 
-    result = asyncio.run(run_backtest_skill(
-        period=args.period,
-        mode=args.mode,
-        compare=args.compare,
-        optimize=args.optimize,
-        notify=args.notify
-    ))
+    # Parse period
+    try:
+        start_date, end_date = parse_period(args.period)
+    except Exception as e:
+        print(f"Error parsing period: {e}")
+        sys.exit(1)
 
-    import json
-    print(json.dumps(result, indent=2, default=str))
+    print(f"📊 Running backtest")
+    print(f"Period: {start_date} to {end_date}")
+    print(f"Mode: {args.mode}")
+    if args.compare:
+        print(f"Compare: {args.compare}")
+    if args.optimize:
+        print(f"Optimize: {args.optimize}")
+    print("-" * 70)
+
+    # Route to appropriate script
+    if args.optimize:
+        # Use weight optimizer
+        cmd = [
+            "python", "weight_optimizer.py",
+            "--trials", "100",  # Reduced from 300 for speed
+            "--symbols", "scanner_output/lists/optimizer_watch.txt"
+        ]
+        print(f"🔧 Running parameter optimization: {args.optimize}")
+    else:
+        # Use enhanced backtest
+        cmd = [
+            "python", "enhanced_backtest.py",
+            "--start", start_date,
+            "--end", end_date,
+            "--limit", str(args.limit),
+            "--watchlist", "input/ALL.txt"
+        ]
+
+        if args.compare:
+            if args.compare == "configs":
+                cmd.extend(["--versions", "v1,v8,v9,v10,v12"])
+            elif args.compare == "modes":
+                cmd.extend(["--mode", args.mode])
+
+    result = subprocess.run(cmd)
+    sys.exit(result.returncode)
+
+
+if __name__ == "__main__":
+    main()

@@ -247,6 +247,16 @@ class Notifier:
                         fb_promoted = sig.get('FinBERT_Promoted', '')
                         if fb_promoted:
                             value += f"\n**⬆ PROMOTED: {fb_promoted}**"
+                    # Earnings date / warning
+                    _earn_warn = sig.get('Earnings_Warning', '')
+                    _earn_date = sig.get('Earnings_Date', '')
+                    if _earn_warn and sig.get('Quality') in ('PREMIUM', 'GOLD'):
+                        value += f"\n**⚠ {_earn_warn}**"
+                    elif _earn_date:
+                        _earn_timing = sig.get('Earnings_Timing', '')
+                        _t_str = f" ({_earn_timing})" if _earn_timing else ""
+                        value += f"\nEarnings: {_earn_date}{_t_str}"
+
                     embed['fields'].append({
                         'name': f"{sig['Symbol']}{sector} ({sig['Quality']})",
                         'value': value,
