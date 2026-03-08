@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 
 from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, BB_TREND_FILTER,
-                    WIN_PROBABILITY)
+                    WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS)
 from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
@@ -26,8 +26,8 @@ class BreakoutDetector:
 
     def __init__(self):
         self.rejection_reasons = []
-        # Instance-level copy of weights (may be adjusted by learning loop)
-        self.scoring_weights = dict(self.SCORING_WEIGHTS)
+        # Instance-level copy of weights from config.py (optimizer output)
+        self.scoring_weights = dict(SCORING_WEIGHTS)
         self._load_score_adjustments()
     
     def _load_score_adjustments(self):
@@ -111,7 +111,15 @@ class BreakoutDetector:
         min_bars = 100 if mode_name == 'scalping' else cfg.get('trend_period', 50)
         if len(df) < min_bars:
             return None
-        
+
+        # Stale data guard: reject if last bar is >5 trading days old (delisted/halted)
+        if hasattr(df.index, 'date'):
+            from datetime import date, timedelta
+            last_bar_date = df.index[-1].date() if hasattr(df.index[-1], 'date') else None
+            if last_bar_date and (date.today() - last_bar_date).days > 7:
+                logger.debug(f"{symbol}: stale data (last bar {last_bar_date})")
+                return None
+
         # Calculate indicators
         df = calculate_all_indicators(
             df, cfg['trend_type'], cfg.get('trend_period'), timeframe
@@ -372,8 +380,17 @@ class BreakoutDetector:
 
             if mode_name != 'scalping':
                 checks['rs_ok'] = rs_ok
-                # Momentum surge / VCP plays don't require basic BB consolidation
-                checks['consolidation'] = was_consolidating or momentum_surge or (vcp_quality > 0.3)
+                # Momentum surge / VCP / high-momentum plays bypass consolidation
+                from config import MOMENTUM_OVERRIDE as _mo_cfg
+                _momentum_override = (
+                    latest.get('Momentum_Score', 0) >= _mo_cfg['min_momentum']
+                    and latest['Vol_Ratio'] >= _mo_cfg['min_vol_ratio']
+                    and latest.get('RSI', 50) < _mo_cfg['max_rsi']
+                )
+                checks['consolidation'] = (
+                    was_consolidating or momentum_surge
+                    or (vcp_quality > 0.3) or _momentum_override
+                )
 
             # V4: Over-extension check (swing/longterm only)
             use_v4 = kwargs.get('use_v4_overextension', True)
@@ -470,6 +487,13 @@ class BreakoutDetector:
             trend_ok, momentum_strong, vol_confirm, has_bullish_pattern,
             bb_trend, rr_grade, conviction_strong
         )
+
+        # V13: Upgrade target using S/R resistance (computed after _calculate_rr)
+        if sr_data and sr_data.get('nearest_resistance'):
+            sr_res = float(sr_data['nearest_resistance'])
+            if sr_res > latest['close'] * 1.02 and sr_res > tp:
+                tp = sr_res
+                rr = (tp - latest['close']) / max(latest['close'] - sl, 1e-6)
 
         # Build signal
         signal = {
@@ -609,7 +633,16 @@ class BreakoutDetector:
         atr_target = latest['close'] + (cfg['tp_mult'] * latest['ATR'])
         # Use the higher of ATR target and pattern-derived target
         tp = max(atr_target, pattern_target) if pattern_target > 0 else atr_target
-        
+
+        # Fibonacci extension from consolidation range (1.618 × range)
+        if df is not None and len(df) >= 20:
+            consol_high = df['high'].iloc[-20:-1].max()
+            consol_low = df['low'].iloc[-20:-1].min()
+            if consol_high > consol_low:
+                fib_ext = consol_high + 1.618 * (consol_high - consol_low)
+                if fib_ext > tp:
+                    tp = fib_ext
+
         if mode_name == 'scalping' and spread_pct is not None:
             spread_price = latest['close'] * (spread_pct / 100.0)
             entry_eff = latest['close'] + spread_price * 0.5
@@ -674,34 +707,8 @@ class BreakoutDetector:
         return 'PREMIUM' if has_gap_up else 'HIGH'
 
     # --- Scoring weights for each check ---
-    # V1 keys (legacy): rsi_favorable, macd_favorable, adx_trending, vwap_ok
-    # V2 keys (new): momentum_strong, conviction_strong
-    SCORING_WEIGHTS = {
-        'vol_confirm': 16,
-        'trend_ok': 16,
-        'momentum_strong': 13,
-        'dist_confirm': 10,
-        'candle_ok': 8,
-        'rr_ok': 10,
-        'no_vol_divergence': 5,
-        'conviction_strong': 8,
-        'rs_ok': 8,
-        'consolidation': 8,
-        'has_bullish_pattern': 10,  # V3: Pattern confirmation
-        'not_overextended': 10,    # V4: Penalize over-extension from SMA
-        'near_52w_high': 8,        # V5: Within 5% of 52-week high
-        'rsi_divergence': 5,       # V5: RSI bullish divergence
-        'sector_momentum': 6,      # V5: Sector ETF momentum
-        'pattern_vol_confirmed': 2, # V6: Pattern confirmed by volume (reduced V9 — False signals win more often)
-        'momentum_surge': 12,      # V7: Explosive gap/intraday move + high volume (no consolidation needed)
-        'minervini_template': 15,  # V8: Minervini Stage 2 Trend Template (7+ of 8 conditions)
-        'vcp_quality': 14,         # V10: VCP proportional score (0.0-1.0 → up to 14 pts)
-        # V1 legacy weights (used when use_legacy_momentum=True)
-        'vwap_ok': 8,
-        'rsi_favorable': 8,
-        'macd_favorable': 7,
-        'adx_trending': 5,
-    }
+    # Scoring weights are imported from config.SCORING_WEIGHTS (optimizer output).
+    # Legacy V1 keys not in config are given default weight 5 via .get() fallback.
 
     def _calculate_signal_score(self, checks: dict) -> tuple:
         """Calculate weighted signal score from boolean checks.
@@ -719,13 +726,14 @@ class BreakoutDetector:
 
         pct = (score / max_score * 100) if max_score > 0 else 0
 
-        if pct >= 90:
+        # Quality thresholds from config.py (optimizer output)
+        if pct >= SCORE_THRESHOLDS.get('GOLD', 99):
             quality = 'GOLD'
-        elif pct >= 80:
+        elif pct >= SCORE_THRESHOLDS.get('PREMIUM', 69):
             quality = 'PREMIUM'
-        elif pct >= 65:
+        elif pct >= SCORE_THRESHOLDS.get('HIGH', 65):
             quality = 'HIGH'
-        elif pct >= 60:
+        elif pct >= SCORE_THRESHOLDS.get('STANDARD', 50):
             quality = 'STANDARD'
         else:
             quality = 'REJECT'

@@ -84,6 +84,11 @@ HC_BASE=https://hc-ping.com
 # Every weekday at 8:45 AM ET - Second check (45 min before open, fresher data)
 45 8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --notify >> scanner_output/logs/cron_premarket.log 2>&1
 
+# Every weekday at 9:31 AM ET - Opening surge check: first-minute momentum on pre-market watch list
+# Reads premarket_watch.txt → flags symbols breaking above PM high or surging on volume
+# Appends them to momentum_watch_daytrade.txt BEFORE Phase 1 runs at 9:35
+31 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --open-check --notify >> scanner_output/logs/cron_premarket.log 2>&1
+
 
 # ============================================
 # DAY TRADING (Intraday scans)

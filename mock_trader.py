@@ -38,7 +38,8 @@ class MockTrade:
     mode: str = 'swing'
     hold_days: int = 0
     win_probability: float = 0.50
-    
+    signal_type: str = ''
+
     def to_dict(self):
         d = asdict(self)
         d['entry_time'] = self.entry_time.isoformat()
@@ -353,8 +354,9 @@ class MockTrader:
 
         return quantity
     
-    def enter_trade(self, symbol: str, action: str, quantity: int, 
-                   price: float, stop_loss: float, take_profit: float) -> MockTrade:
+    def enter_trade(self, symbol: str, action: str, quantity: int,
+                   price: float, stop_loss: float, take_profit: float,
+                   signal_type: str = '') -> MockTrade:
         """Enter a mock trade"""
         trade = MockTrade(
             trade_id=self.trade_id_counter,
@@ -364,9 +366,10 @@ class MockTrader:
             entry_price=price,
             entry_time=datetime.now(),
             stop_loss=stop_loss,
-            take_profit=take_profit
+            take_profit=take_profit,
+            signal_type=signal_type
         )
-        
+
         self.trade_id_counter += 1
         self.trades.append(trade)
         self.open_positions[trade.trade_id] = trade  # Use trade_id instead of symbol
@@ -610,7 +613,8 @@ class SimulationMode:
                     quantity=quantity,
                     price=signal['price'],
                     stop_loss=signal.get('stop_loss', signal['price'] * 0.95),
-                    take_profit=signal.get('take_profit', signal['price'] * 1.10)
+                    take_profit=signal.get('take_profit', signal['price'] * 1.10),
+                    signal_type=signal.get('signal_type', signal.get('type', ''))
                 )
                 # Set V3 fields
                 trade.mode = signal.get('mode', 'swing')

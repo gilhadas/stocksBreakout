@@ -96,7 +96,8 @@ def _load_finbert():
             import logging as _logging
             _logging.getLogger('transformers').setLevel(_logging.ERROR)
             _logging.getLogger('huggingface_hub').setLevel(_logging.ERROR)
-            from transformers import pipeline
+            from transformers import pipeline, logging as _hf_logging
+            _hf_logging.set_verbosity_error()   # suppresses LOAD REPORT table
             logger.info("Loading FinBERT (ProsusAI/finbert) — first run downloads ~420 MB …")
             _finbert_pipeline = pipeline(
                 task='text-classification',

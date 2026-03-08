@@ -84,6 +84,13 @@ RR_GRADE_CONFIG = {
     'D': {'min_rr': 0.0, 'reject': True},  # R:R < 1.5 = reject
 }
 
+# --- Momentum Override (bypasses consolidation for high-momentum breakouts) ---
+MOMENTUM_OVERRIDE = {
+    'min_momentum': 90,       # Momentum_Score >= 90 (near-perfect)
+    'min_vol_ratio': 2.5,     # Volume >= 2.5× average
+    'max_rsi': 75,            # RSI < 75 (not overbought)
+}
+
 # --- Max Hold Period (bars) ---
 MAX_HOLD_BARS = {
     'swing': 30,

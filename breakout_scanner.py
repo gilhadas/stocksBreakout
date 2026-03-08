@@ -291,8 +291,11 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 sym = rej.get('symbol', '')
                 if sym and sym not in seen:
                     is_near_miss = 'Near miss' in rej.get('reasons', '')
-                    is_high_vol = rej.get('vol_ratio', 0) >= 2.0  # was 3.0
-                    if is_near_miss or is_high_vol:
+                    is_high_vol = rej.get('vol_ratio', 0) >= 2.0
+                    has_momentum = rej.get('momentum', 0) >= 70
+                    if is_near_miss and (is_high_vol or has_momentum):
+                        watch_symbols.append(sym); seen.add(sym)
+                    elif is_high_vol and has_momentum:
                         watch_symbols.append(sym); seen.add(sym)
             # Sector basket trigger: when a key ETF moves >= threshold, add the whole sector
             from config import SECTOR_BASKETS
@@ -324,27 +327,42 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 f"(PREMIUM/GOLD + HIGH-momentum + near-miss high-vol)"
             )
 
-        # Send notifications with CSV attachment — V9-C filter (PREMIUM/GOLD + Minervini≥7)
+        # Send notifications with CSV attachment
+        # V9-C filter: PREMIUM/GOLD + Minervini≥7  (classic breakout)
+        # BOUNCE filter: PREMIUM/GOLD + Type==BOUNCE (oversold bounce — no Minervini req)
         mode_desc = MODES[args.mode]['description']
         watchlist_name = Path(args.file).stem  # Get filename without extension
         subject_prefix = "⚠️ " if market_warning else "🚨 "
         warning_line = f"\n\n⚠️ {market_warning}" if market_warning else ""
-        notify_signals = [
+        v9c_signals = [
             s for s in results
             if s.get('Quality') in ('GOLD', 'PREMIUM')
             and (s.get('MinerviniScore') or 0) >= 7
         ]
+        bounce_signals = [
+            s for s in results
+            if s.get('Quality') in ('GOLD', 'PREMIUM')
+            and s.get('Type') == 'BOUNCE'
+            and s not in v9c_signals
+        ]
+        notify_signals = v9c_signals + bounce_signals
         if notify_signals:
+            n_v9c   = len(v9c_signals)
+            n_bnc   = len(bounce_signals)
+            tag_parts = []
+            if n_v9c:  tag_parts.append(f"{n_v9c} V9-C")
+            if n_bnc:  tag_parts.append(f"{n_bnc} BOUNCE")
+            tag = ' + '.join(tag_parts)
             notifier.send_all(
-                subject=f"{subject_prefix}{args.mode.upper()} Breakout Signals [{watchlist_name}]"
-                        f" ({len(notify_signals)} V9-C of {len(results)} total)",
-                message=f"{len(notify_signals)} V9-C breakout signals (PREMIUM + Minervini≥7)"
-                        f" from {len(results)} total — {watchlist_name}{warning_line}",
+                subject=f"{subject_prefix}{args.mode.upper()} Signals [{watchlist_name}]"
+                        f" ({tag} of {len(results)} total)",
+                message=f"{tag} signals (PREMIUM/GOLD) from {len(results)} total"
+                        f" — {watchlist_name}{warning_line}",
                 signals=notify_signals,
                 csv_path=output_file
             )
         else:
-            logger.info(f"No V9-C signals to notify ({len(results)} total signals below threshold)")
+            logger.info(f"No PREMIUM/GOLD signals to notify ({len(results)} total signals below threshold)")
         
         # Scalping warnings
         if args.mode == 'scalping':

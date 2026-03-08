@@ -19,7 +19,8 @@ class ExitEvaluator:
     def evaluate(self, df: pd.DataFrame, symbol: str, mode_name: str,
                 entry_price: float, stop_price: float, target_price: float,
                 timeframe: str, regime: str = "NORMAL",
-                days_held: int = 0, tp_reached: bool = False) -> Dict[str, Any]:
+                days_held: int = 0, tp_reached: bool = False,
+                signal_type: str = '') -> Dict[str, Any]:
         """
         Evaluate exit conditions for a LONG position
 
@@ -50,7 +51,9 @@ class ExitEvaluator:
         atr = float(latest['ATR'])
         vwap_val = latest.get('vwap', np.nan)
 
-        unrealized_r = (price - entry_price) / max(entry_price - stop_price, 1e-6)
+        # Guard against near-zero risk (tight stops or stale data) → prevents R overflow
+        risk = max(entry_price - stop_price, entry_price * 0.01)
+        unrealized_r = (price - entry_price) / risk
 
         # V9: Check if TP just reached — suggest trailing stop activation
         if not tp_reached and price >= target_price and price > entry_price:
@@ -67,29 +70,58 @@ class ExitEvaluator:
                 100
             ))
 
-        # 2. CRITICAL: Trend broken
-        trend_broken = price < trend_line
-        vwap_broken = (
-            not pd.isna(vwap_val) and
-            price < vwap_val and
-            ('min' in timeframe or 'hour' in timeframe)
-        )
+        is_bounce = signal_type == 'BOUNCE'
 
-        if trend_broken and (vwap_broken or mode_name == 'swing'):
-            exit_signals.append((
-                'EXIT_FULL',
-                f'Trend broken: {price:.2f} < {trend_line:.2f}',
-                90
-            ))
+        # 2. CRITICAL: Trend broken (skip for BOUNCE — they're below trend by design)
+        if not is_bounce:
+            trend_broken = price < trend_line
+            vwap_broken = (
+                not pd.isna(vwap_val) and
+                price < vwap_val and
+                ('min' in timeframe or 'hour' in timeframe)
+            )
 
-        # 3. For swing: SMA150 support lost
-        if mode_name == 'swing' and len(df) >= 150:
+            if trend_broken and (vwap_broken or mode_name == 'swing'):
+                exit_signals.append((
+                    'EXIT_FULL',
+                    f'Trend broken: {price:.2f} < {trend_line:.2f}',
+                    90
+                ))
+
+        # 3. For swing: SMA150 support lost (skip for BOUNCE)
+        if not is_bounce and mode_name == 'swing' and len(df) >= 150:
             sma150 = df['close'].rolling(150).mean().iloc[-1]
             if not np.isnan(sma150) and price < sma150 - 0.5 * atr:
                 exit_signals.append((
                     'EXIT_FULL',
                     f'Lost SMA150: {price:.2f} < {sma150:.2f}',
                     85
+                ))
+
+        # BOUNCE-specific exits: recovery target and failed bounce
+        if is_bounce:
+            # Recovery: price reached the trend line → mean reversion complete
+            if price >= trend_line:
+                exit_signals.append((
+                    'TRAIL',
+                    f'BOUNCE recovered to trend: {price:.2f} >= {trend_line:.2f}',
+                    80
+                ))
+            # Failed: price broke below recent swing low (10 bars)
+            if len(df) >= 10:
+                swing_low_10 = float(df['low'].iloc[-10:].min())
+                if price < swing_low_10 * 0.98:
+                    exit_signals.append((
+                        'EXIT_FULL',
+                        f'BOUNCE failed: {price:.2f} < {swing_low_10:.2f}',
+                        95
+                    ))
+            # Time decay: no recovery after 10 bars
+            if days_held >= 10 and price < trend_line and unrealized_r < 0.5:
+                exit_signals.append((
+                    'EXIT_FULL',
+                    f'BOUNCE stalled: {days_held} bars, no recovery (R={unrealized_r:.2f})',
+                    75
                 ))
 
         # 4. Reversal candle near target (skip if TP reached — V9 lets winners run)

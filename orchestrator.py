@@ -266,7 +266,8 @@ class ScannerOrchestrator:
                 target_price=pos['target'],
                 timeframe=timeframe,
                 regime=regime,
-                days_held=days_held
+                days_held=days_held,
+                signal_type=pos.get('signal_type', '')
             )
             
             exit_results.append(decision)

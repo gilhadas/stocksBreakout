@@ -67,6 +67,46 @@ PREMARKET_FILE = LISTS_DIR / 'premarket_watch.txt'
 
 DEFAULT_GAP_THRESHOLD = 3.0  # individual symbol gap % to flag
 
+# Exchanges whose symbols are not directly tradeable US equities on yfinance
+_SKIP_EXCHANGES = {
+    'BINANCE', 'BITSTAMP', 'COINBASE', 'CAPITALCOM', 'BSE',
+    'XETR', 'MIL', 'SP', 'FX', 'CRYPTO', 'COMEX', 'NYMEX',
+}
+
+# TradingView watchlist loader (handles EXCHANGE:SYMBOL and ### section headers)
+def _load_tv_watchlist(filepath) -> List[str]:
+    """Parse a TradingView-format watchlist file into plain ticker symbols.
+
+    Format: EXCHANGE:SYMBOL,EXCHANGE:SYMBOL,...,###SECTION HEADER,...
+    - Strips exchange prefix (e.g. NASDAQ:WIX → WIX)
+    - Skips non-US-equity exchanges (crypto, European, indices)
+    - Converts TradingView dot notation to yfinance (BRK.B → BRK-B)
+    - Deduplicates preserving order
+    """
+    try:
+        text = Path(filepath).read_text()
+    except FileNotFoundError:
+        logger.debug(f"Watchlist file not found: {filepath}")
+        return []
+
+    seen: set = set()
+    symbols: List[str] = []
+    for token in text.replace('\n', ',').split(','):
+        token = token.strip()
+        if not token or token.startswith('#'):
+            continue
+        if ':' in token:
+            exchange, sym = token.split(':', 1)
+            if exchange.upper() in _SKIP_EXCHANGES:
+                continue
+        else:
+            sym = token
+        sym = sym.strip().replace('.', '-')  # BRK.B → BRK-B for yfinance
+        if sym and sym not in seen:
+            seen.add(sym)
+            symbols.append(sym)
+    return symbols
+
 # Sector ETFs monitored beyond SECTOR_BASKETS triggers
 # (these only generate alerts, not basket additions)
 WATCHONLY_ETFS: Dict[str, str] = {
@@ -83,12 +123,29 @@ WATCHONLY_ETFS: Dict[str, str] = {
 # High-beta / catalyst-driven stocks always checked pre-market.
 # These are often missed by the main ALL.txt scanner because they
 # lack classic consolidation but move hard on sector catalysts.
-PRIORITY_SYMBOLS: List[str] = [
+#
+# Loaded dynamically from input/1_26_Setups.txt (TradingView format) if it exists,
+# merged with the hardcoded fallback list below.
+_PRIORITY_FALLBACK: List[str] = [
     # Crypto-adjacent
     'COIN', 'MSTR', 'HOOD', 'MARA', 'RIOT', 'HUT', 'IREN', 'BITF', 'GLXY',
     'CORZ', 'BMNR', 'CIFR', 'APLD', 'CLSK', 'NBIS',
     # High-beta tech / AI
     'NVDA', 'AMD', 'SMCI', 'PLTR', 'CRWD', 'NET', 'SNOW', 'DDOG', 'MDB',
+    # Mega-cap momentum (large moves on macro/earnings)
+    'TSLA', 'META', 'AVGO', 'APP',
+    # AI / data-center infrastructure
+    'ALAB', 'VRT', 'RBRK', 'BBAI',
+    # Fintech high-beta
+    'CVNA', 'UPST', 'AFRM', 'SOFI',
+    # Nuclear / SMR / clean energy speculative
+    'OKLO', 'SMR', 'NNE', 'CEG',
+    # Quantum computing
+    'QBTS', 'QUBT',
+    # Space / defense / eVTOL
+    'RKLB', 'KTOS', 'ACHR',
+    # Social / consumer high-beta
+    'RDDT', 'SNAP', 'DKNG',
     # Biotech (often catalyst-driven pre-market)
     'MRNA', 'BNTX', 'NFLX',
     # High-momentum names that move with news
@@ -96,6 +153,13 @@ PRIORITY_SYMBOLS: List[str] = [
     # Other frequently moved
     'WIX', 'CRWV', 'ORBS', 'ETHA',
 ]
+
+# Merge setup file symbols with fallback (file takes precedence, then fallback fills gaps)
+_SETUPS_FILE = Path('input/1_26_Setups.txt')
+_setup_file_symbols: List[str] = _load_tv_watchlist(_SETUPS_FILE)
+PRIORITY_SYMBOLS: List[str] = list(
+    dict.fromkeys(_setup_file_symbols + _PRIORITY_FALLBACK)
+)
 
 
 logging.basicConfig(
@@ -229,6 +293,109 @@ def scan_priority_symbols(
 
     gappers.sort(key=lambda x: abs(x['gap_pct']), reverse=True)
     return gappers
+
+
+# ---------------------------------------------------------------------------
+# Opening surge check (run at 9:31–9:35 AM — first-minute momentum)
+# ---------------------------------------------------------------------------
+
+def scan_opening_surge(
+    symbols: List[str],
+    now_et: datetime,
+    vol_mult: float = 2.0,
+    min_move_pct: float = 0.3,
+) -> List[Dict]:
+    """Check first-minute 1-min bar for momentum continuation at market open.
+
+    Run at 9:31–9:35 AM ET. Returns symbols where the opening minute shows:
+      - Meaningful first-minute move (≥ min_move_pct%) AND volume spike (≥ vol_mult ×)
+      - OR: price traded above the pre-market high (gap extension) with decent volume
+
+    Keys returned: symbol, first_open, first_close, first_high, first_move_pct,
+                   gap_from_prev, first_vol, vol_ratio, above_pm_high, pm_high
+    """
+    results: List[Dict] = []
+
+    for sym in symbols:
+        try:
+            t = yf.Ticker(sym)
+            df = t.history(period='2d', interval='1m', prepost=True)
+            if df is None or len(df) < 5:
+                continue
+            df.index = df.index.tz_convert('America/New_York')
+            today = now_et.date()
+
+            # Pre-market high (4:00–9:29 AM)
+            pm_bars = df[
+                (df.index.date == today) &
+                (df.index.hour >= 4) &
+                ~((df.index.hour == 9) & (df.index.minute >= 30))
+            ]
+            pm_high: Optional[float] = float(pm_bars['High'].max()) if len(pm_bars) > 0 else None
+
+            # Opening regular-session bars (≥ 9:30)
+            open_bars = df[
+                (df.index.date == today) &
+                ((df.index.hour > 9) | ((df.index.hour == 9) & (df.index.minute >= 30)))
+            ]
+            if len(open_bars) == 0:
+                continue
+
+            first = open_bars.iloc[0]
+            first_open  = float(first['Open'])
+            first_close = float(first['Close'])
+            first_vol   = int(first['Volume'])
+
+            if first_open <= 0:
+                continue
+
+            # Average 1-min volume from prev session (9:30 AM–3:59 PM)
+            prev_bars = df[df.index.date < today]
+            prev_reg  = prev_bars[
+                ((prev_bars.index.hour > 9) |
+                 ((prev_bars.index.hour == 9) & (prev_bars.index.minute >= 30))) &
+                (prev_bars.index.hour < 16)
+            ]
+            avg_vol   = float(prev_reg['Volume'].mean()) if len(prev_reg) > 0 else 0.0
+            vol_ratio = (first_vol / avg_vol) if avg_vol > 0 else 0.0
+
+            prev_close_val, _ = _prev_close_and_vol(df, today)
+            first_move_pct = (first_close - first_open) / first_open * 100
+            gap_from_prev  = (
+                (first_open - prev_close_val) / prev_close_val * 100
+                if prev_close_val else 0.0
+            )
+            above_pm_high = bool(pm_high and first_close > pm_high)
+
+            # Signal conditions
+            strong_candle = (first_move_pct >= min_move_pct and vol_ratio >= vol_mult)
+            gap_extension = (above_pm_high and vol_ratio >= vol_mult * 0.7)
+
+            if not (strong_candle or gap_extension):
+                continue
+
+            results.append({
+                'symbol':         sym,
+                'first_open':     round(first_open, 2),
+                'first_close':    round(first_close, 2),
+                'first_move_pct': round(first_move_pct, 2),
+                'gap_from_prev':  round(gap_from_prev, 2),
+                'first_vol':      first_vol,
+                'vol_ratio':      round(vol_ratio, 2),
+                'above_pm_high':  above_pm_high,
+                'pm_high':        round(pm_high, 2) if pm_high else None,
+            })
+        except Exception as exc:
+            logger.debug(f"{sym} opening surge: {exc}")
+
+    results.sort(
+        key=lambda x: (x['above_pm_high'], x['first_move_pct'], x['vol_ratio']),
+        reverse=True,
+    )
+    logger.info(
+        f"scan_opening_surge: {len(results)} symbol(s) showing first-minute momentum"
+    )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +692,93 @@ def format_discord_message(
 
 
 # ---------------------------------------------------------------------------
+# Opening check helper (called when --open-check is passed)
+# ---------------------------------------------------------------------------
+
+def _run_opening_check(args, now_et: datetime) -> int:
+    """Opening surge check mode — run at 9:31–9:35 AM ET.
+
+    Reads premarket_watch.txt (written by 8:00/8:45 AM pre-market scans),
+    checks first-minute 1-min bars for each symbol, and alerts via Discord
+    on any that are surging at open. Also appends surging symbols to
+    momentum_watch_daytrade.txt so Phase 1 / Phase 2 can track them.
+    """
+    logger.info("── Opening surge check ──────────────────────────")
+
+    # Load watch list from premarket_watch.txt (fallback: PRIORITY_SYMBOLS)
+    pm_file = LISTS_DIR / 'premarket_watch.txt'
+    if pm_file.exists():
+        watch_syms = [s.strip() for s in pm_file.read_text().splitlines() if s.strip()]
+        logger.info(f"  Loaded {len(watch_syms)} symbols from {pm_file}")
+    else:
+        watch_syms = list(PRIORITY_SYMBOLS)
+        logger.warning(f"  {pm_file} not found — falling back to PRIORITY_SYMBOLS ({len(watch_syms)})")
+
+    if args.symbols:
+        watch_syms = list(dict.fromkeys(watch_syms + args.symbols))
+
+    surges = scan_opening_surge(
+        watch_syms, now_et,
+        vol_mult=args.open_vol,
+        min_move_pct=args.open_move,
+    )
+
+    # Log results
+    if surges:
+        logger.info(f"  {len(surges)} opening surge(s) detected:")
+        for s in surges:
+            flag = ' ★ ABOVE PM HIGH' if s['above_pm_high'] else ''
+            logger.info(
+                f"    ↑ {s['symbol']:<8}  first_min={s['first_move_pct']:+.1f}%  "
+                f"vol_ratio={s['vol_ratio']:.1f}×  gap={s['gap_from_prev']:+.1f}%{flag}"
+            )
+    else:
+        logger.info("  No opening surges above threshold.")
+
+    # Append surging symbols to momentum_watch_daytrade.txt
+    if surges and not args.dry_run:
+        mw_file = LISTS_DIR / 'momentum_watch_daytrade.txt'
+        existing: set = set()
+        if mw_file.exists():
+            existing = {s.strip() for s in mw_file.read_text().splitlines() if s.strip()}
+        new_syms = [s['symbol'] for s in surges if s['symbol'] not in existing]
+        if new_syms:
+            mw_file.parent.mkdir(parents=True, exist_ok=True)
+            with mw_file.open('a') as fh:
+                fh.write('\n' + '\n'.join(new_syms) + '\n')
+            logger.info(f"  Appended {len(new_syms)} new symbol(s) → {mw_file}")
+
+    # Discord alert
+    should_notify = (not args.dry_run) and surges and (args.notify or bool(surges))
+    if should_notify:
+        subject = (
+            f"🚀 Opening Surge {now_et.strftime('%H:%M ET')} — "
+            f"{len(surges)} symbol(s) surging at open"
+        )
+        lines = [
+            f"**Opening surge check {now_et.strftime('%H:%M ET')} ({now_et.strftime('%Y-%m-%d')})**\n",
+            "**🚀 First-minute momentum movers:**",
+        ]
+        for s in surges[:15]:
+            flag   = '  ★ **ABOVE PM HIGH**' if s['above_pm_high'] else ''
+            pm_str = f" (PM high ${s['pm_high']})" if s['pm_high'] else ''
+            lines.append(
+                f"  ↑ `{s['symbol']:<8}` **{s['first_move_pct']:+.1f}%** first-min  "
+                f"vol {s['vol_ratio']:.1f}×  gap {s['gap_from_prev']:+.1f}%"
+                f"  ${s['first_close']}{pm_str}{flag}"
+            )
+        if len(surges) > 15:
+            lines.append(f"  … and {len(surges)-15} more")
+        lines.append("")
+        lines.append("→ Surging symbols appended to `momentum_watch_daytrade.txt`")
+        notifier = Notifier()
+        sent = notifier.send_discord(subject=subject, message='\n'.join(lines))
+        logger.info("Discord alert sent" if sent else "Discord alert failed")
+
+    return 0 if surges else 1
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -548,12 +802,23 @@ def main() -> int:
                              'Requires Basic tier ($200/mo). Also reads TWITTER_BEARER_TOKEN env var.')
     parser.add_argument('--x-mentions', type=int, default=50,
                         help='Min tweet count to flag a symbol as X-trending (default: 50)')
+    parser.add_argument('--open-check', action='store_true',
+                        help='Opening surge check mode (run at 9:31–9:35 AM ET): reads '
+                             'premarket_watch.txt and flags first-minute momentum movers')
+    parser.add_argument('--open-vol', type=float, default=2.0,
+                        help='Volume multiplier for opening surge check (default: 2.0×)')
+    parser.add_argument('--open-move', type=float, default=0.3,
+                        help='Min first-minute move %% for opening surge (default: 0.3%%)')
     parser.add_argument('--output', default=str(PREMARKET_FILE),
                         help=f'Output file (default: {PREMARKET_FILE})')
     args = parser.parse_args()
 
     now_et = datetime.now(NY_TZ)
     logger.info(f"Pre-market monitor | {now_et.strftime('%Y-%m-%d %H:%M %Z')}")
+
+    # ── Opening surge check mode (9:31–9:35 AM) ──────────────────────────────
+    if args.open_check:
+        return _run_opening_check(args, now_et)
 
     if now_et.hour >= 9 and now_et.minute >= 35:
         logger.warning("Market already open — pre-market data may be stale, proceeding anyway.")
