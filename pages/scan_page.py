@@ -5,7 +5,7 @@ import yfinance as yf
 import asyncio
 from streamlit_lightweight_charts import renderLightweightCharts
 
-from utils import load_data, list_files, _to_local_abs
+from utils import load_data, save_data, list_files, _to_local_abs, load_text, _is_cloud
 
 
 # ──────────────────────────────────────
@@ -15,7 +15,8 @@ from utils import load_data, list_files, _to_local_abs
 def _get_watchlist_files():
     """Get available watchlist files from input/ directory."""
     names = list_files('input', '*.txt')
-    return {n.replace('.txt', ''): _to_local_abs(f"input/{n}")
+    # Return relative paths so they work with both local open() and load_text() (S3)
+    return {n.replace('.txt', ''): f"input/{n}"
             for n in names if n != 'email_recipients.txt'}
 
 
@@ -50,6 +51,22 @@ def _ensure_event_loop():
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def _parse_txt_symbols(content: str) -> list:
+    """Parse symbols from raw watchlist text (same logic as get_watchlist_from_file)."""
+    symbols = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('###'):
+            continue
+        for s in line.split(','):
+            s = s.strip()
+            if s and not s.startswith('###'):
+                clean = s.split(':')[-1].strip()
+                if clean:
+                    symbols.append(clean)
+    return symbols
+
+
 def _run_scan(mode, watchlist_path):
     """Run the scanner and return results as DataFrame."""
     _ensure_event_loop()  # ib_insync/eventkit needs a loop at import time
@@ -57,7 +74,13 @@ def _run_scan(mode, watchlist_path):
     from utils import get_watchlist_from_file, classify_market_regime
     from config import MODES
 
-    symbols = get_watchlist_from_file(watchlist_path)
+    # Load symbols — S3-aware on cloud, local on server
+    if _is_cloud():
+        content = load_text(watchlist_path)
+        symbols = _parse_txt_symbols(content) if content else []
+    else:
+        symbols = get_watchlist_from_file(_to_local_abs(watchlist_path))
+
     if not symbols:
         return None, "No symbols loaded", None, None
 
@@ -78,6 +101,11 @@ def _run_scan(mode, watchlist_path):
     )
     regime = classify_market_regime(spy_perf, spy_vol)
     csv_path = orchestrator.save_results(results, mode, 'signals')
+
+    # On Streamlit Cloud, also persist signal CSV to S3 so Signals page can read it
+    if _is_cloud() and csv_path and results:
+        save_data(pd.DataFrame(results), csv_path)
+
     return results, regime, f"SPY {spy_perf:+.2%}", csv_path
 
 

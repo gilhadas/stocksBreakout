@@ -770,7 +770,6 @@ def _read_positions_csv(path: str) -> pd.DataFrame | None:
     """
     df = load_data(path)
     return df  # preserve empty DataFrame vs None distinction
-    return df
 
 
 def _render_watch_lists():
