@@ -59,7 +59,7 @@ def _run_scan(mode, watchlist_path):
 
     symbols = get_watchlist_from_file(watchlist_path)
     if not symbols:
-        return None, "No symbols loaded", None
+        return None, "No symbols loaded", None, None
 
     orchestrator = ScannerOrchestrator(None, yf_fallback=True)
     timeframe = MODES[mode]['default_timeframe']
