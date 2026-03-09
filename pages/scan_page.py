@@ -514,7 +514,9 @@ def render_scan_page():
                 else:
                     st.session_state['scan_results'] = []
             except Exception as e:
+                import traceback
                 st.error(f"Scan error: {e}")
+                st.code(traceback.format_exc(), language="python")
 
     # ── Load data ──
     results = st.session_state.get('scan_results')
