@@ -50,3 +50,5 @@ When adding features to `indicators.py` or `scanner.py`, adhere to these default
 - **Logic Critique:** If a proposed strategy change weakens the "edge" or increases risk, point it out immediately.
 - **Backtest Mentality:** When writing new scanner features, suggest how to validate them against historical data in `scanner_output/backtests/`.
 - **Modular Code:** Provide snippets in small, testable functions with clear docstrings.
+
+Summarize our progress, key decisions, and next steps into the CLAUDE.md file.

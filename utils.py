@@ -18,6 +18,26 @@ import csv
 import json
 import logging
 import os
+
+# ---------------------------------------------------------------------------
+# Custom SCAN log level (15) — between DEBUG (10) and INFO (20).
+# Use logger.scan() for per-symbol scanner decisions (skip reasons, scores).
+# This lets --debug suppress noisy library logs while keeping scanner output.
+# ---------------------------------------------------------------------------
+SCAN_LEVEL = 15
+logging.addLevelName(SCAN_LEVEL, 'SCAN')
+
+def _scan_log(self, message, *args, **kwargs):
+    if self.isEnabledFor(SCAN_LEVEL):
+        self._log(SCAN_LEVEL, message, args, **kwargs)
+
+logging.Logger.scan = _scan_log
+
+# Noisy third-party loggers to silence when --debug is active
+_QUIET_LIBS = [
+    'yfinance', 'peewee', 'urllib3', 'urllib3.connectionpool',
+    'httpx', 'httpcore', 'requests', 'charset_normalizer',
+]
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -547,7 +567,7 @@ def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
     return 'NORMAL'
 
 
-def setup_logging(log_file: str = None):
+def setup_logging(log_file: str = None, debug: bool = False):
     """
     Setup logging configuration with output to nested folder
     """
@@ -562,8 +582,9 @@ def setup_logging(log_file: str = None):
     if log_file is None:
         log_file = log_dir / f'scanner_{datetime.now():%Y%m%d}.log'
 
+    log_level = SCAN_LEVEL if debug else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format='%(asctime)s | %(levelname)s | %(message)s',
         handlers=[
             logging.FileHandler(log_file),
@@ -571,5 +592,6 @@ def setup_logging(log_file: str = None):
         ]
     )
 
-    # Reduce ib_insync verbosity
-    logging.getLogger('ib_insync').setLevel(logging.WARNING)
+    # Silence noisy library loggers regardless of --debug
+    for lib in _QUIET_LIBS + ['ib_insync']:
+        logging.getLogger(lib).setLevel(logging.WARNING)

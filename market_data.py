@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class MarketDataHandler:
-    """Handles all market data requests to Interactive Brokers with optional yfinance fallback"""
+    """Handles all market data requests to Interactive Brokers with Alpaca/yfinance fallback"""
 
     def __init__(self, ib_connection: IB, yf_fallback: bool = False):
         self.ib = ib_connection
@@ -24,8 +24,19 @@ class MarketDataHandler:
         self.spy_cache = {}
 
         if yf_fallback:
-            from yfinance_adapter import YFinanceAdapter
-            self.yf_adapter = YFinanceAdapter()
+            # Prefer Alpaca (real-time free data) over yfinance (15-min delayed)
+            try:
+                from alpaca_adapter import AlpacaAdapter
+                self.yf_adapter = AlpacaAdapter()
+                self.data_source_name = "Alpaca Markets"
+                logger.info("📊 Fallback data source: Alpaca Markets")
+            except Exception:
+                from yfinance_adapter import YFinanceAdapter
+                self.yf_adapter = YFinanceAdapter()
+                self.data_source_name = "yfinance"
+                logger.info("📊 Fallback data source: yfinance")
+        else:
+            self.data_source_name = "Interactive Brokers"
     
     async def get_historical_data(self, symbol: str, timeframe: str,
                                   exchange: str = 'SMART',

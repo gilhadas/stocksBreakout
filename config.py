@@ -270,6 +270,12 @@ IB_LIVE_PORT = 7496
 IB_HOST = '127.0.0.1'
 IB_CLIENT_ID = 1
 
+# --- Alpaca Data Settings ---
+# Free account at alpaca.markets — used as fallback data source when IB unavailable
+# Set ALPACA_API_KEY and ALPACA_SECRET_KEY in .env
+ALPACA_API_KEY    = os.environ.get('ALPACA_API_KEY', '')
+ALPACA_SECRET_KEY = os.environ.get('ALPACA_SECRET_KEY', '')
+
 # --- Data Request Settings ---
 DATA_DURATION = {
     'daily': '365 D',

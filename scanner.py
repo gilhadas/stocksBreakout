@@ -110,6 +110,7 @@ class BreakoutDetector:
         # Minimum data requirements
         min_bars = 100 if mode_name == 'scalping' else cfg.get('trend_period', 50)
         if len(df) < min_bars:
+            logger.scan(f"{symbol}: skip — insufficient bars ({len(df)} < {min_bars})")
             return None
 
         # Stale data guard: reject if last bar is >5 trading days old (delisted/halted)
@@ -132,6 +133,7 @@ class BreakoutDetector:
         # Scalping price filter
         if mode_name == 'scalping':
             if latest['close'] < cfg['min_price'] or latest['close'] > cfg['max_price']:
+                logger.scan(f"{symbol}: skip — price ${latest['close']:.2f} outside scalping range [{cfg['min_price']}, {cfg['max_price']}]")
                 return None
         
         # --- CORE BREAKOUT LOGIC ---
@@ -155,6 +157,7 @@ class BreakoutDetector:
         bb_trend = latest.get('BB_Trend', 'neutral')
         if BB_TREND_FILTER['enabled'] and BB_TREND_FILTER['reject_bearish']:
             if bb_trend == 'bearish':
+                logger.scan(f"{symbol}: skip — bearish BB trend")
                 return None
 
         # --- PATTERN DETECTION (V3) + VCP (V10) ---
@@ -231,6 +234,7 @@ class BreakoutDetector:
                 rr_grade = grade
                 break
         if RR_GRADE_CONFIG['D']['reject'] and rr_grade == 'D':
+            logger.scan(f"{symbol}: skip — R:R grade D (rr={rr:.2f})")
             return None
         
         # --- REJECTION LOGGING (with score preview) ---
@@ -318,6 +322,10 @@ class BreakoutDetector:
             # Mandatory gate: price must break above previous high.
             # Momentum surge stocks bypass the liquidity gate — high volume IS the liquidity signal.
             if not price_break or (not liquid_ok and not momentum_surge):
+                if not price_break:
+                    logger.scan(f"{symbol}: skip — no price break (close={latest['close']:.2f} vs prev_high={prev_high:.2f})")
+                else:
+                    logger.scan(f"{symbol}: skip — low liquidity (no momentum surge to bypass)")
                 return None
 
             if use_legacy:
@@ -401,7 +409,7 @@ class BreakoutDetector:
                     v4_thresholds = V4_OVEREXTENSION_FILTER.get('max_sma_dist_pct', {}).get(mode_name)
                     if v4_thresholds:
                         if sma_dist_pct > v4_thresholds['reject']:
-                            logger.debug(f"{symbol}: REJECTED (blow-off {sma_dist_pct:.1f}% from SMA)")
+                            logger.scan(f"{symbol}: skip — blow-off {sma_dist_pct:.1f}% from SMA")
                             return None
                         not_overextended = sma_dist_pct <= v4_thresholds['mild']
                         checks['not_overextended'] = not_overextended
@@ -409,6 +417,7 @@ class BreakoutDetector:
             score, max_score, quality = self._calculate_signal_score(checks)
 
             if quality == 'REJECT':
+                logger.scan(f"{symbol}: skip — score too low ({score}/{max_score})")
                 return None
 
             # --- GOLD HARD GATES ---
@@ -469,14 +478,17 @@ class BreakoutDetector:
                             logger.debug(f"{symbol}: PREMIUM→HIGH (stop too tight {stop_dist_pct:.2f}% < 1%)")
         else:
             # Original all-or-nothing logic
-            conditions = [
-                price_break, vol_confirm, dist_confirm, trend_ok,
-                vwap_ok, liquid_ok, candle_ok, rr_ok, not vol_divergence
-            ]
+            condition_names = ['price_break', 'vol_confirm', 'dist_confirm', 'trend_ok',
+                               'vwap_ok', 'liquid_ok', 'candle_ok', 'rr_ok', 'no_vol_div']
+            condition_vals  = [price_break, vol_confirm, dist_confirm, trend_ok,
+                               vwap_ok, liquid_ok, candle_ok, rr_ok, not vol_divergence]
             if mode_name != 'scalping':
-                conditions.extend([rs_ok, was_consolidating])
+                condition_names.extend(['rs_ok', 'consolidation'])
+                condition_vals.extend([rs_ok, was_consolidating])
 
-            if not all(conditions):
+            if not all(condition_vals):
+                failed = [n for n, v in zip(condition_names, condition_vals) if not v]
+                logger.scan(f"{symbol}: skip — failed: {', '.join(failed)}")
                 return None
 
             quality = self._determine_quality(mode_name, latest, df, has_gap_up)

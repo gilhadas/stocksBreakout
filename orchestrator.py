@@ -127,15 +127,20 @@ class ScannerOrchestrator:
             try:
                 # Get historical data
                 df = await self.market_data.get_historical_data(symbol, timeframe)
-                if df is None or len(df) < 50:
+                if df is None:
+                    logger.scan(f"{symbol}: skip — no data returned")
+                    return None
+                if len(df) < 50:
+                    logger.scan(f"{symbol}: skip — insufficient bars ({len(df)} < 50)")
                     return None
                 
-                # Check spread for scalping
+                # Check spread for scalping (skip in mock/yfinance fallback — no real-time quotes)
                 spread_pct = None
-                if mode == 'scalping':
+                if mode == 'scalping' and not self.market_data.yf_fallback:
                     spread_pct = await self.market_data.get_bid_ask_spread(symbol)
                     max_spread = MODES['scalping']['max_spread_pct']
                     if spread_pct is None or spread_pct > max_spread:
+                        logger.scan(f"{symbol}: skip — spread {spread_pct} (max {max_spread}%)")
                         return None
                 
                 # V5: Resolve sector for this symbol

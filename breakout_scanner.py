@@ -45,8 +45,11 @@ from utils import (
     get_watchlist_from_file,
     get_positions_from_file,
     classify_market_regime,
-    setup_logging
+    setup_logging,
+    SCAN_LEVEL,
+    _QUIET_LIBS,
 )
+from scan_event_log import attach_scan_csv_handler
 from orchestrator import ScannerOrchestrator
 from notifier import Notifier
 from mock_trader import MockIBConnection, MockTrader, SimulationMode
@@ -61,6 +64,16 @@ async def connect_to_ib(live: bool = False, mock: bool = False, mock_mode: str =
     """
     if mock:
         logger.info(f"Using MOCK trading mode ({mock_mode})")
+        # Try real IB PAPER port for market data even in mock mode (orders never placed).
+        # Only fall back to MockIBConnection (yfinance data) if PAPER port is unavailable.
+        real_ib = IB()
+        try:
+            await real_ib.connectAsync(IB_HOST, IB_PAPER_PORT, clientId=IB_CLIENT_ID)
+            real_ib.reqMarketDataType(3)  # delayed data — no live subscription needed
+            logger.info(f"Mock mode: real IB PAPER data (port {IB_PAPER_PORT}), no orders will be placed")
+            return real_ib
+        except Exception as e:
+            logger.warning(f"Mock mode: IB PAPER (port {IB_PAPER_PORT}) unavailable ({e}) — falling back to yfinance")
         ib = MockIBConnection(mode=mock_mode)
         await ib.connectAsync(IB_HOST, IB_PAPER_PORT, clientId=IB_CLIENT_ID)
         return ib
@@ -1219,9 +1232,14 @@ Examples:
         action='store_true',
         help='Monitor positions from portfolio.json (instead of CSV files)'
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable DEBUG logging — prints per-ticker skip reasons to the log'
+    )
 
     args = parser.parse_args()
-    
+
     # Setup logging
     if args.cron:
         # Cron mode: only errors to console, everything to log file
@@ -1231,8 +1249,9 @@ Examples:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f'scanner_{datetime.now(_NY_TZ):%Y%m%d}.log'
         
+        log_level = SCAN_LEVEL if args.debug else logging.INFO
         logging.basicConfig(
-            level=logging.INFO,
+            level=log_level,
             format='%(asctime)s | %(levelname)s | %(message)s',
             handlers=[
                 logging.FileHandler(log_file),
@@ -1240,10 +1259,14 @@ Examples:
             ]
         )
         logging.getLogger().handlers[1].setLevel(logging.ERROR)
-        logging.getLogger('ib_insync').setLevel(logging.WARNING)
+        for _lib in _QUIET_LIBS + ['ib_insync']:
+            logging.getLogger(_lib).setLevel(logging.WARNING)
     else:
-        setup_logging()
-    
+        setup_logging(debug=getattr(args, 'debug', False))
+
+    # Attach structured CSV handler for SCAN-level decisions (learning loop)
+    attach_scan_csv_handler()
+
     # Get timeframe
     if args.tf:
         args.timeframe = args.tf
@@ -1259,9 +1282,9 @@ Examples:
                 logger.info("Aborted by user")
                 return
     
+    # Scalping always forces LIVE-first, so only warn if explicitly paper (no --live, no scalping override)
     if args.mode == 'scalping' and not args.live and not args.cron and not args.mock:
-        logger.warning("⚠️  PAPER MODE = DELAYED DATA (15min lag)")
-        logger.warning("    Not suitable for live scalping!")
+        logger.info("ℹ️  Scalping: forcing IB LIVE connection (port %d)", IB_LIVE_PORT)
     
     # Mock mode info
     if args.mock:
@@ -1349,11 +1372,23 @@ Examples:
         print(format_sector_buzz(buzz_data))
         print()
 
-    # Connect to IB (returns None if IB unavailable)
-    ib = await connect_to_ib(args.live, args.mock, args.mock_mode)
-    yf_fallback = (ib is None)
+    # Scalping always needs IB LIVE — force live-first connection order
+    scalping_live = args.mode == 'scalping' and not args.mock
+    ib = await connect_to_ib(args.live or scalping_live, args.mock, args.mock_mode)
+    # Use Alpaca/yfinance fallback when there's no real IB connection
+    yf_fallback = (ib is None) or isinstance(ib, MockIBConnection)
     if yf_fallback:
-        logger.warning("Running with yfinance only (15-min delayed data)")
+        if scalping_live:
+            logger.error("❌ Scalping mode requires an IB LIVE connection — aborting")
+            logger.error("   Start TWS/IBG and ensure port %d (LIVE) is open", IB_LIVE_PORT)
+            return
+        logger.info("📊 No real IB connection — using Alpaca/yfinance for market data")
+    elif ib and not args.live:
+        # No live data subscription — switch IB to 15-min delayed streaming data.
+        # reqMarketDataType(3) prevents Error 10089 on reqMktData calls;
+        # reqHistoricalDataAsync is unaffected by this setting.
+        ib.reqMarketDataType(3)
+        logger.info("📊 IB connected — using delayed market data (no live subscription)")
 
     try:
         # Create orchestrator with yfinance fallback if IB unavailable
@@ -1411,7 +1446,14 @@ Examples:
     finally:
         if ib is not None:
             ib.disconnect()
-            logger.info("Disconnected from IB")
+            if isinstance(ib, MockIBConnection):
+                try:
+                    data_src = orchestrator.market_data.data_source_name
+                except NameError:
+                    data_src = 'yfinance'
+                logger.info(f"🔧 Mock IB disconnected — data source: {data_src}")
+            else:
+                logger.info("Disconnected from IB")
 
 
 if __name__ == "__main__":
