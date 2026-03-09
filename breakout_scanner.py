@@ -1401,8 +1401,10 @@ Examples:
     except Exception as e:
         logger.error(f"Scanner error: {e}", exc_info=True)
         if args.notify or args.cron:
+            _mode_tag = getattr(args, 'mode', 'unknown').upper()
+            _input_tag = Path(getattr(args, 'file', '') or '').name or 'unknown'
             notifier.send_all(
-                subject="❌ Scanner Error",
+                subject=f"❌ Scanner Error [{_mode_tag} | {_input_tag}]",
                 message=f"Scanner encountered an error: {str(e)}"
             )
 

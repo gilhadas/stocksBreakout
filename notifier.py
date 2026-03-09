@@ -34,6 +34,14 @@ class Notifier:
         # Mac native notifications (auto-detect)
         self.mac_native_enabled = platform.system() == 'Darwin'
 
+        # Warn early if email is enabled but password is missing
+        if self.email_enabled and not NOTIFICATIONS['email'].get('sender_password'):
+            logger.warning(
+                "⚠️  Email notifications enabled but GMAIL_APP_PASSWORD is not set. "
+                "Emails will fail. Set it in your .env file."
+            )
+            self.email_enabled = False
+
         # Persistent notification cache — survives across process runs within a day
         self._cache_file = Path('scanner_output') / '.notification_cache.json'
         self._sent_cache = self._load_cache()

@@ -513,8 +513,12 @@ def update_position_stops(positions_file: str, price_map: Dict[str, float]) -> L
 
     if updated:
         # Rewrite the entire file with updated stops
+        # Preserve 'quality' column if it exists in the data
+        base_fields = ['symbol', 'mode', 'entry', 'entry_date', 'stop', 'target', 'timeframe']
+        has_quality = any('quality' in pos for pos in positions)
+        fieldnames = base_fields + (['quality'] if has_quality else [])
         with open(positions_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['symbol', 'mode', 'entry', 'entry_date', 'stop', 'target', 'timeframe'])
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(positions)
 
