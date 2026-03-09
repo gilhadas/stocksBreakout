@@ -357,6 +357,13 @@ NOTIFICATIONS = {
     # Discord notifications via webhook
     'discord': {
         'enabled': True,  # Set to True to enable
+        'webhooks': {
+            'signals': 'https://discordapp.com/api/webhooks/1464758074941112353/dzvWJZwybS21NQ432EVRzZXBdYuymCcLu85vjYnDheDbyqECN_psBneA7neqUNQfTndX',
+            'exits': 'https://discord.com/api/webhooks/1464758104267817220/sXhuVFWv7JcRjzpAvmsJyDxEH7U4b0qJnxPtHyOU0cTH1eK6RudbopxpglJZkMCcYek_',
+            'errors': 'https://discordapp.com/api/webhooks/YOUR_ERRORS_WEBHOOK_ID/YOUR_ERRORS_WEBHOOK_TOKEN',
+            'alerts': 'https://discord.com/api/webhooks/1480682368393281557/1y4udRzqXXy8sJCkIjyEr0TsPh7Boa6D7v70qsp0YBGYrl32rV3Lz7njbe6PWfeaxXvU',
+        },
+        # Legacy single webhook (deprecated — use 'webhooks' above)
         'webhook_url': 'https://discordapp.com/api/webhooks/1464758074941112353/dzvWJZwybS21NQ432EVRzZXBdYuymCcLu85vjYnDheDbyqECN_psBneA7neqUNQfTndX',
     }
 }

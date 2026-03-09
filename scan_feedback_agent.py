@@ -174,11 +174,19 @@ def _discord_color(event: str) -> int:
     }.get(event, 0x888888)
 
 def _send_discord_alerts(alerts: list[dict]) -> None:
-    """Post one Discord embed per alert event."""
+    """Post one Discord embed per alert event to the 'alerts' webhook."""
     try:
         cfg = NOTIFICATIONS.get('discord', {})
-        if not cfg.get('enabled') or not cfg.get('webhook_url'):
-            logger.debug("Discord not configured — skipping alert")
+        if not cfg.get('enabled'):
+            logger.debug("Discord not enabled — skipping alert")
+            return
+        
+        # Get 'alerts' webhook from new webhooks dict, fallback to legacy webhook_url
+        webhooks = cfg.get('webhooks', {})
+        webhook_url = webhooks.get('alerts') or cfg.get('webhook_url')
+        
+        if not webhook_url:
+            logger.debug("No Discord alerts webhook configured — skipping")
             return
     except Exception:
         return
@@ -238,12 +246,12 @@ def _send_discord_alerts(alerts: list[dict]) -> None:
         }
         try:
             r = requests.post(
-                cfg['webhook_url'],
+                webhook_url,
                 json={'embeds': [embed]},
                 timeout=8,
             )
             if r.status_code == 204:
-                logger.info(f"Discord alert sent: {title}")
+                logger.info(f"Discord alert sent to 'alerts' webhook: {title}")
             else:
                 logger.warning(f"Discord returned {r.status_code} for {symbol}")
         except Exception as e:

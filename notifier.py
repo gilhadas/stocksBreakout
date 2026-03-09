@@ -78,7 +78,7 @@ class Notifier:
         return subject
     
     def send_all(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
-                 csv_path: Optional[str] = None):
+                 csv_path: Optional[str] = None, notification_type: str = 'signals'):
         """Send notification via all enabled channels (prevents duplicates)
         
         Args:
@@ -86,6 +86,7 @@ class Notifier:
             message: Body message
             signals: List of signal dictionaries
             csv_path: Optional path to CSV file to attach to email
+            notification_type: Type of notification ('signals', 'exits', 'errors', 'alerts')
         """
         # Check if already sent
         cache_key = self._generate_cache_key(subject, signals)
@@ -110,7 +111,7 @@ class Notifier:
             results.append(('Telegram', self.send_telegram(message, signals)))
         
         if self.discord_enabled:
-            results.append(('Discord', self.send_discord(subject, message, signals)))
+            results.append(('Discord', self.send_discord(subject, message, signals, notification_type)))
         
         if self.mac_native_enabled:
             results.append(('Mac Native', self.send_mac_notification(subject, message, signals)))
@@ -216,16 +217,45 @@ class Notifier:
             logger.error(f"Telegram notification failed: {e}")
             return False
     
-    def send_discord(self, subject: str, message: str, signals: Optional[List[Dict]] = None) -> bool:
-        """Send Discord notification via webhook"""
+    def send_discord(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
+                     notification_type: str = 'signals') -> bool:
+        """Send Discord notification via webhook
+        
+        Args:
+            subject: Notification title
+            message: Notification body
+            signals: List of signal dictionaries
+            notification_type: Type of notification ('signals', 'exits', 'errors', 'alerts')
+        """
         try:
             config = NOTIFICATIONS['discord']
+            
+            # Select webhook based on notification type
+            webhooks = config.get('webhooks', {})
+            if notification_type in webhooks:
+                webhook_url = webhooks[notification_type]
+            else:
+                # Fallback to legacy single webhook or default
+                webhook_url = config.get('webhook_url')
+            
+            if not webhook_url:
+                logger.error(f"No Discord webhook configured for type '{notification_type}'")
+                return False
+            
+            # Build embed with color based on notification type
+            color_map = {
+                'signals': 0x00ff00,    # Green
+                'exits': 0xff9900,      # Orange
+                'errors': 0xff0000,     # Red
+                'alerts': 0xffff00,     # Yellow
+            }
+            color = color_map.get(notification_type, 0x00ff00)
             
             # Build embed
             embed = {
                 'title': subject,
                 'description': message,
-                'color': 0x00ff00 if signals else 0xffaa00,
+                'color': color,
                 'fields': []
             }
             
@@ -280,7 +310,7 @@ class Notifier:
             
             data = {'embeds': [embed]}
             
-            response = requests.post(config['webhook_url'], json=data, timeout=10)
+            response = requests.post(webhook_url, json=data, timeout=10)
             return response.status_code == 204
         
         except Exception as e:
