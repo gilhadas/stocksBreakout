@@ -5,6 +5,9 @@ Contains all mode settings and regime configurations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 
 def _load_email_recipients() -> str:
     """Load recipient emails from input/email_recipients.txt if it exists,
@@ -222,6 +225,8 @@ MODES = {
         'trend_period': None,
         'sl_mult': 0.5,
         'tp_mult': 1.0,
+        'sl_fixed_cents': 2,       # Fixed stop loss in cents (scalping: 1-2¢ from entry)
+        'tp_fixed_cents': 6,       # Fixed take profit in cents (3:1 R:R)
         'min_consolidation_bars': 1,
         'min_rr': 1.0,
         'max_spread_pct': 0.1,
@@ -349,9 +354,9 @@ NOTIFICATIONS = {
     
     # Telegram notifications
     'telegram': {
-        'enabled': False,
-        'bot_token': '',  # Get from @BotFather
-        'chat_id': '',  # Your chat ID
+        'enabled': True,
+        'bot_token': os.environ.get('TELEGRAM_BOT_TOKEN', ''),  # Get from @BotFather
+        'chat_id': os.environ.get('TELEGRAM_CHAT_ID', ''),  # Your chat ID
     },
     
     # Discord notifications via webhook
