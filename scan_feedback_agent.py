@@ -819,17 +819,20 @@ def run_once(decisions_date: Optional[str] = None,
                     f"reason={exit_reason}"
                 )
             else:
+                _ps = f'{pct_from_scan:+.2f}' if not pd.isna(pct_from_scan) else 'n/a'
+                _pl = f'{pct_since_last:+.2f}' if not pd.isna(pct_since_last) else 'n/a'
                 logger.info(
                     f"  ★ {event:<10} {symbol:<8} "
                     f"${current_price:.2f}  "
-                    f"pct_scan={pct_from_scan:+.2f}%  "
-                    f"pct_last={pct_since_last:+.2f}%  "
+                    f"pct_scan={_ps}%  "
+                    f"pct_last={_pl}%  "
                     f"[{reason_code}]"
                 )
         else:
+            _ps = f'{pct_from_scan:+.2f}' if not pd.isna(pct_from_scan) else 'n/a'
             logger.debug(
                 f"  OK         {symbol:<8} ${current_price:.2f}  "
-                f"pct_scan={pct_from_scan:+.2f}%  [{reason_code}]"
+                f"pct_scan={_ps}%  [{reason_code}]"
             )
 
     # ── Persist state ─────────────────────────────────────────────────────────

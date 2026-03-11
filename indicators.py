@@ -132,12 +132,13 @@ def check_candle_structure(latest: pd.Series, atr: float,
     open_price = latest['open']
     
     rng = max(high - low, 1e-6)
+    safe_atr = atr if (atr and not pd.isna(atr) and atr > 0) else 1e-6
     body_top = max(open_price, close)
     upper_wick = high - body_top
     body_top_pct = (high - close) / rng
-    
+
     is_valid = (
-        (upper_wick / atr) <= max_wick_atr and
+        (upper_wick / safe_atr) <= max_wick_atr and
         body_top_pct <= max_body_top_pct
     )
     
@@ -304,48 +305,39 @@ def calculate_breakout_conviction(df: pd.DataFrame) -> pd.Series:
 
 def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 20) -> tuple:
     """
-    Detect RSI divergence (bullish and bearish).
-    - Bullish: price makes lower low but RSI makes higher low
-    - Bearish: price makes higher high but RSI makes lower high
+    Detect RSI divergence (bullish and bearish) — fully vectorized.
+    - Bullish: price makes new N-bar low while RSI remains above its N-bar low
+    - Bearish: price makes new N-bar high while RSI remains below its N-bar high
+
+    Rolling windows exclude the current bar (shift(1)) so we look back into
+    prior bars — matching the original intent.
 
     Returns: (bullish_div: pd.Series[bool], bearish_div: pd.Series[bool])
     """
     rsi = calculate_rsi(df)
     close = df['close']
 
-    bullish = pd.Series(False, index=df.index)
-    bearish = pd.Series(False, index=df.index)
+    # Extremes of previous `lookback` bars (shift(1) excludes current bar)
+    roll_price_min = close.shift(1).rolling(lookback).min()
+    roll_price_max = close.shift(1).rolling(lookback).max()
+    roll_rsi_min   = rsi.shift(1).rolling(lookback).min()
+    roll_rsi_max   = rsi.shift(1).rolling(lookback).max()
 
-    for i in range(lookback, len(df)):
-        window_close = close.iloc[i - lookback:i]
-        window_rsi = rsi.iloc[i - lookback:i]
+    # Bullish: price undercuts the window low but RSI holds above its window low
+    bullish = (
+        (close < roll_price_min) &
+        (rsi > roll_rsi_min) &
+        rsi.notna() & roll_rsi_min.notna()
+    )
 
-        if window_close.empty or window_rsi.isna().all():
-            continue
+    # Bearish: price exceeds the window high but RSI stays below its window high
+    bearish = (
+        (close > roll_price_max) &
+        (rsi < roll_rsi_max) &
+        rsi.notna() & roll_rsi_max.notna()
+    )
 
-        # Find swing low in price window
-        price_low_idx = window_close.idxmin()
-        price_low = window_close[price_low_idx]
-        rsi_at_low = window_rsi.get(price_low_idx, np.nan)
-
-        # Bullish divergence: current price < prior swing low, but RSI > prior RSI at that low
-        if (not pd.isna(rsi_at_low) and not pd.isna(rsi.iloc[i])
-                and close.iloc[i] < price_low
-                and rsi.iloc[i] > rsi_at_low):
-            bullish.iloc[i] = True
-
-        # Find swing high in price window
-        price_high_idx = window_close.idxmax()
-        price_high = window_close[price_high_idx]
-        rsi_at_high = window_rsi.get(price_high_idx, np.nan)
-
-        # Bearish divergence: current price > prior swing high, but RSI < prior RSI at that high
-        if (not pd.isna(rsi_at_high) and not pd.isna(rsi.iloc[i])
-                and close.iloc[i] > price_high
-                and rsi.iloc[i] < rsi_at_high):
-            bearish.iloc[i] = True
-
-    return bullish, bearish
+    return bullish.fillna(False), bearish.fillna(False)
 
 
 def calculate_all_indicators(df: pd.DataFrame, trend_type: str,

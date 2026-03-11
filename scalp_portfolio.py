@@ -233,6 +233,7 @@ def refresh_prices() -> dict:
                 for p in data['positions']:
                     if p['symbol'] == sym:
                         p['current_price'] = round(price, 4)
+                        break
         except Exception:
             pass
 
