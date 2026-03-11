@@ -113,11 +113,18 @@ class BreakoutDetector:
             logger.scan(f"{symbol}: skip — insufficient bars ({len(df)} < {min_bars})")
             return None
 
-        # Stale data guard: reject if last bar is >5 trading days old (delisted/halted)
+        # Stale data guard: reject if last bar is >7 calendar days old.
+        # In backtest mode pass reference_date=sim_date so the guard uses the
+        # simulation date instead of today (avoids rejecting all historical data).
         if hasattr(df.index, 'date'):
-            from datetime import date, timedelta
+            from datetime import date as _date
             last_bar_date = df.index[-1].date() if hasattr(df.index[-1], 'date') else None
-            if last_bar_date and (date.today() - last_bar_date).days > 7:
+            ref_date = kwargs.get('reference_date', _date.today())
+            if isinstance(ref_date, str):
+                ref_date = _date.fromisoformat(ref_date)
+            elif hasattr(ref_date, 'date'):
+                ref_date = ref_date.date()
+            if last_bar_date and (ref_date - last_bar_date).days > 7:
                 logger.debug(f"{symbol}: stale data (last bar {last_bar_date})")
                 return None
 

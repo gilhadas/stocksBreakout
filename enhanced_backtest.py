@@ -411,6 +411,7 @@ def run_prescan(historical, start_date, end_date, modes=None, date_step: int = 5
                             use_scoring=True,
                             use_legacy_momentum=True,
                             use_v4_overextension=False,
+                            reference_date=sim_date,
                         )
                     except Exception:
                         sig = None
