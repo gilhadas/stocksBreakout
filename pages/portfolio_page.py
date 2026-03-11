@@ -48,13 +48,15 @@ def _color_pnl(val):
 
 
 def render_portfolio_page():
-    # Three tabs: Auto Portfolio is first — it is ALWAYS the active tab on load
-    tab_auto, tab_manual, tab_lists = st.tabs([
-        "📊 Auto Portfolio (V9-C)", "📋 Manual Portfolio", "📂 Watch Lists"
+    tab_auto, tab_scalp, tab_manual, tab_lists = st.tabs([
+        "📊 Auto Portfolio (V9-C)", "⚡ Scalping", "📋 Manual Portfolio", "📂 Watch Lists"
     ])
 
     with tab_auto:
         _render_auto_portfolio()
+
+    with tab_scalp:
+        _render_scalping_portfolio()
 
     with tab_manual:
         _render_manual_portfolio()
@@ -312,7 +314,7 @@ def _render_manual_portfolio():
             exit_price = st.number_input("Exit Price",
                                           value=float(pos_data['current_price']),
                                           min_value=0.01,
-                                          key="exit_price")
+                                          key=f"exit_price_{close_sym}")
 
             est_pnl = (exit_price - pos_data['entry_price']) * pos_data['shares']
             st.caption(f"Entry: ${pos_data['entry_price']:.2f} | "
@@ -615,7 +617,7 @@ def _render_auto_portfolio():
             pos_data = next(p for p in positions if p['symbol'] == sym_to_close)
             exit_px  = st.number_input(
                 "Exit Price", value=float(pos_data.get('current_price', pos_data['entry_price'])),
-                min_value=0.01, key="ap_close_price"
+                min_value=0.01, key=f"ap_close_price_{sym_to_close}"
             )
             est = round((exit_px - pos_data['entry_price']) * pos_data['shares'], 2)
             st.caption(f"Entry: ${pos_data['entry_price']:.2f} | Shares: {pos_data['shares']} | Est P&L: ${est:+,.0f}")
@@ -711,6 +713,194 @@ def _render_auto_portfolio():
             subset=[c for c in ['Chg%', 'Hyp. P&L'] if c in df_missed.columns]
         )
         st.dataframe(styled_missed, use_container_width=True, hide_index=True)
+
+
+# ── Scalping Portfolio tab ────────────────────────────────────────────────────
+
+def _render_scalping_portfolio():
+    """Scalping portfolio — auto-populated from feedback agent BREAKOUT/EXIT events."""
+    import scalp_portfolio as sp
+
+    st.subheader("⚡ Scalping Portfolio")
+    st.caption(
+        "Automatically trades on feedback agent BREAKOUT alerts. "
+        "Positions are opened on BREAKOUT and closed on EXIT (TRAIL_STOP or FAILED). "
+        "Fixed-cent stops: 2¢ fail / 3¢ trail. All positions should close by EOD."
+    )
+
+    data    = sp.load()
+    summary = sp.get_summary(data)
+    cash    = summary['cash']
+    cap     = summary['capital']
+
+    # ── Summary metrics ──
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Capital",      f"${cap:,.0f}")
+    m2.metric("Cash",         f"${cash:,.0f}",
+              delta=f"{cash/cap*100:.0f}% free" if cap else "")
+    m3.metric("Market Value", f"${summary['market_value']:,.0f}")
+    m4.metric("Unrealized",   f"${summary['unrealized']:+,.0f}")
+    m5.metric("Realized P&L", f"${summary['realized']:+,.0f}")
+    m6.metric("Open / Closed",
+              f"{summary['open_count']} / {summary['closed_count']}")
+
+    # ── Action buttons ──
+    col_refresh, col_eod, col_reset = st.columns([1.5, 1.5, 1])
+
+    with col_refresh:
+        if st.button("🔄 Refresh Prices", key="sp_refresh"):
+            with st.spinner("Fetching prices..."):
+                result = sp.refresh_prices()
+            data    = result['data']
+            summary = sp.get_summary(data)
+            st.toast(f"Prices updated ({result['updated']} symbols).")
+            st.rerun()
+
+    with col_eod:
+        if st.button("🔔 Close All (EOD)", key="sp_eod",
+                     help="Close all open scalping positions at current price"):
+            with st.spinner("Closing all positions..."):
+                result = sp.close_all_eod()
+            data    = result['data']
+            summary = sp.get_summary(data)
+            if result['closed']:
+                st.toast(f"EOD close: {', '.join(result['closed'])}")
+            else:
+                st.toast("No open positions to close.")
+            st.rerun()
+
+    with col_reset:
+        if st.button("🗑️ Reset", key="sp_reset",
+                     help="Clear all scalping portfolio positions and history"):
+            sp.reset()
+            st.toast("Scalping portfolio reset.")
+            st.rerun()
+
+    st.divider()
+
+    # ── Open Positions ──
+    positions = data.get('positions', [])
+    if positions:
+        st.markdown(f"**Open Positions ({len(positions)})**")
+        rows = []
+        for p in positions:
+            ep  = p['entry_price']
+            cur = p.get('current_price', ep)
+            chg = round((cur - ep) / ep * 100, 2) if ep else 0
+            unr = round((cur - ep) * p['shares'], 0)
+            risk_cents = round((ep - p['stop']) * 100, 1)
+            rows.append({
+                'Symbol':     p['symbol'],
+                'Time':       p['date_added'],
+                'Quality':    p.get('quality', ''),
+                'Entry $':    f"${ep:.2f}",
+                'Current $':  f"${cur:.2f}",
+                'Chg%':       chg,
+                'Unr. P&L':   unr,
+                'Stop $':     f"${p['stop']:.2f}",
+                'Risk ¢':     risk_cents,
+                'Target $':   f"${p['target']:.2f}",
+                'Vol':        f"{p.get('vol_ratio', 0):.1f}x",
+                'Shares':     p['shares'],
+                'Cost $':     f"${p['cost']:,.0f}",
+            })
+        # TOTAL row
+        total_cost = sum(p['cost'] for p in positions)
+        total_mkt  = sum(p.get('current_price', p['entry_price']) * p['shares']
+                         for p in positions)
+        total_unr  = round(total_mkt - total_cost, 0)
+        total_chg  = round((total_mkt - total_cost) / total_cost * 100, 2) if total_cost else 0
+        rows.append({
+            'Symbol':    'TOTAL',
+            'Time':      '',
+            'Quality':   '',
+            'Entry $':   f"${total_cost:,.0f}",
+            'Current $': f"${total_mkt:,.0f}",
+            'Chg%':      total_chg,
+            'Unr. P&L':  total_unr,
+            'Stop $':    '',
+            'Risk ¢':    '',
+            'Target $':  '',
+            'Vol':       '',
+            'Shares':    '',
+            'Cost $':    f"${total_cost:,.0f}",
+        })
+
+        df_open = pd.DataFrame(rows)
+        styled_open = df_open.style.applymap(
+            _color_pnl, subset=[c for c in ['Chg%', 'Unr. P&L'] if c in df_open.columns]
+        )
+        st.dataframe(styled_open, use_container_width=True, hide_index=True)
+
+        # Manual close
+        with st.expander("Close a Position Manually"):
+            sym_to_close = st.selectbox(
+                "Symbol", [p['symbol'] for p in positions], key="sp_close_sym"
+            )
+            pos_data = next(p for p in positions if p['symbol'] == sym_to_close)
+            exit_px = st.number_input(
+                "Exit Price",
+                value=float(pos_data.get('current_price', pos_data['entry_price'])),
+                min_value=0.01, key=f"sp_close_price_{sym_to_close}"
+            )
+            est = round((exit_px - pos_data['entry_price']) * pos_data['shares'], 2)
+            st.caption(
+                f"Entry: ${pos_data['entry_price']:.2f} | "
+                f"Shares: {pos_data['shares']} | Est P&L: ${est:+,.0f}"
+            )
+            if st.button("Close Position", key="sp_close_btn"):
+                sp.close_position(sym_to_close, exit_px, reason='manual')
+                st.toast(f"Closed {sym_to_close}: ${est:+,.0f}")
+                st.rerun()
+    else:
+        st.info(
+            "No open scalping positions. "
+            "Positions are added automatically when the feedback agent fires a BREAKOUT alert."
+        )
+
+    # ── Closed Positions ──
+    closed = data.get('closed', [])
+    if closed:
+        st.markdown(f"**Trade History ({len(closed)})**")
+        win_count = sum(1 for t in closed if t.get('pnl', 0) > 0)
+        total_pnl = sum(t.get('pnl', 0) for t in closed)
+        win_rate  = win_count / len(closed) * 100 if closed else 0
+        avg_win   = 0
+        avg_loss  = 0
+        winners = [t for t in closed if t.get('pnl', 0) > 0]
+        losers  = [t for t in closed if t.get('pnl', 0) <= 0]
+        if winners:
+            avg_win = sum(t['pnl_pct'] for t in winners) / len(winners)
+        if losers:
+            avg_loss = sum(t['pnl_pct'] for t in losers) / len(losers)
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total P&L", f"${total_pnl:+,.0f}")
+        c2.metric("Win Rate",  f"{win_rate:.0f}%",
+                  delta=f"{win_count}W / {len(closed)-win_count}L")
+        c3.metric("Avg Win",   f"{avg_win:+.2f}%")
+        c4.metric("Avg Loss",  f"{avg_loss:+.2f}%")
+        c5.metric("Trades",    f"{len(closed)}")
+
+        hist_rows = []
+        for t in reversed(closed):
+            hist_rows.append({
+                'Symbol':  t['symbol'],
+                'Opened':  t['date_added'],
+                'Closed':  t.get('date_closed', ''),
+                'Entry $': f"${t['entry_price']:.2f}",
+                'Exit $':  f"${t['exit_price']:.2f}",
+                'P&L $':   round(t.get('pnl', 0), 0),
+                'P&L%':    round(t.get('pnl_pct', 0), 2),
+                'Reason':  t.get('close_reason', ''),
+                'Shares':  t.get('shares', ''),
+                'Vol':     f"{t.get('vol_ratio', 0):.1f}x",
+            })
+        df_hist = pd.DataFrame(hist_rows)
+        styled_hist = df_hist.style.applymap(
+            _color_pnl, subset=[c for c in ['P&L $', 'P&L%'] if c in df_hist.columns]
+        )
+        st.dataframe(styled_hist, use_container_width=True, hide_index=True)
 
 
 # ── Watch Lists tab ───────────────────────────────────────────────────────────

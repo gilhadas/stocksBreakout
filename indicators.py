@@ -153,6 +153,29 @@ def calculate_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
+def calculate_stochastic_rsi(df: pd.DataFrame, rsi_period: int = 14,
+                             stoch_period: int = 14,
+                             k_smooth: int = 3, d_smooth: int = 3) -> tuple:
+    """
+    Calculate Stochastic RSI — momentum oscillator that measures RSI
+    relative to its own high-low range.
+
+    Returns (stoch_k, stoch_d) where:
+      stoch_k = %K line (smoothed stochastic of RSI, 0-100)
+      stoch_d = %D line (signal, SMA of %K)
+
+    Overbought > 80, Oversold < 20.
+    """
+    rsi = calculate_rsi(df, rsi_period)
+    rsi_min = rsi.rolling(stoch_period).min()
+    rsi_max = rsi.rolling(stoch_period).max()
+    rsi_range = (rsi_max - rsi_min).replace(0, 1e-10)
+    stoch_rsi = (rsi - rsi_min) / rsi_range * 100
+    stoch_k = stoch_rsi.rolling(k_smooth).mean()
+    stoch_d = stoch_k.rolling(d_smooth).mean()
+    return stoch_k, stoch_d
+
+
 def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
     """Calculate MACD, Signal line, and Histogram"""
     ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
@@ -371,6 +394,13 @@ def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
     df['MACD_Signal'] = macd_signal
     df['MACD_Hist'] = macd_hist
     df['ADX'] = calculate_adx(df)
+
+    # EMA 9 / EMA 21 — fast trend for scalping & daytrade
+    df['EMA_9']  = df['close'].ewm(span=9, adjust=False).mean()
+    df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
+
+    # Stochastic RSI — momentum oscillator (overbought > 80, oversold < 20)
+    df['StochRSI_K'], df['StochRSI_D'] = calculate_stochastic_rsi(df)
 
     # Composite scores (V2)
     df['ROC'] = calculate_roc(df)

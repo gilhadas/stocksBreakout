@@ -68,6 +68,9 @@ CONFIRM_BAND    = 0.50   # % above prev_high to count as a "confirmed" breakout
 CONFIRM_BARS    = 2      # must stay above CONFIRM_BAND for at least this many passes
 FORWARD_MINS    = [15, 30, 60]
 ROLLING_DAYS    = 15     # default rolling window for watchlist prev_high
+TRAIL_STOP_PCT  = 1.0    # % trailing stop from post-breakout high
+EXIT_BELOW_PCT  = 0.3    # % below prev_high = failed breakout exit
+CONFIRM_PASSES  = 1      # consecutive passes above prev_high before BREAKOUT fires (1 = immediate)
 
 # Exchanges to skip when parsing TradingView watchlists
 _SKIP_EXCHANGES = {
@@ -203,15 +206,17 @@ def _build_rolling_prev_high(daily_bars: dict[str, pd.DataFrame],
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-def _fetch_1min_batch(symbols: list[str], start: date, end: date) -> dict[str, pd.DataFrame]:
+def _fetch_1min_batch(symbols: list[str], start: date, end: date,
+                      bar_interval: str = '1m') -> dict[str, pd.DataFrame]:
     """
-    Fetch 1-min bars for multiple symbols over [start, end).
+    Fetch intraday bars for multiple symbols over [start, end).
+    bar_interval: '1m' (7-day limit) or '5m' (60-day limit via yfinance).
     Returns {symbol: DataFrame(index=DatetimeTZAware, columns=[Open,High,Low,Close,Volume])}.
     """
     if not symbols:
         return {}
 
-    print(f"  Fetching 1-min data for {len(symbols)} symbols "
+    print(f"  Fetching {bar_interval} data for {len(symbols)} symbols "
           f"({start} → {end}) …", flush=True)
 
     # yfinance batch download
@@ -219,7 +224,7 @@ def _fetch_1min_batch(symbols: list[str], start: date, end: date) -> dict[str, p
         symbols,
         start=start.isoformat(),
         end=(end + timedelta(days=1)).isoformat(),
-        interval='1m',
+        interval=bar_interval,
         progress=False,
         auto_adjust=True,
         group_by='ticker' if len(symbols) > 1 else None,
@@ -288,9 +293,27 @@ def _forward_returns(bars_1min: pd.DataFrame, breakout_ts: pd.Timestamp,
 # ── Per-day simulation ────────────────────────────────────────────────────────
 
 def _simulate_day(symbol: str, prev_high: float, day: date,
-                  bars_1min: pd.DataFrame, interval_min: int) -> list[dict]:
+                  bars_1min: pd.DataFrame, interval_min: int,
+                  confirm_passes: int = CONFIRM_PASSES,
+                  vol_mult: float = 1.0,
+                  min_breakout_pct: float = 0.0,
+                  trail_stop_pct: float = TRAIL_STOP_PCT,
+                  exit_below_pct: float = EXIT_BELOW_PCT,
+                  skip_first_min: int = 0) -> list[dict]:
     """
     Replay feedback-agent passes for one (symbol, day).
+    After a BREAKOUT fires, tracks the trade with a trailing stop and
+    emits an EXIT event when the trade closes.
+
+    Filters (applied at BREAKOUT detection):
+      vol_mult        : require bar volume >= vol_mult × 20-bar avg (1.0 = off)
+      min_breakout_pct: require price >= min_breakout_pct% above prev_high
+      skip_first_min  : skip breakouts in first N min after open (0 = off)
+
+    Exit params:
+      trail_stop_pct  : trailing stop % from post-breakout high
+      exit_below_pct  : % below prev_high = failed breakout
+
     Returns list of event dicts.
     """
     events: list[dict] = []
@@ -324,6 +347,13 @@ def _simulate_day(symbol: str, prev_high: float, day: date,
     last_direction = 'FLAT'
     alerted_breakout = False
     alerted_surge_at: Optional[str] = None
+    confirm_count    = 0   # consecutive passes above prev_high (pre-breakout)
+
+    # Post-breakout trade tracking
+    in_trade       = False
+    entry_price    = 0.0
+    entry_ts: Optional[pd.Timestamp] = None
+    post_bo_high   = 0.0        # trailing high since breakout
 
     # Pre-flag: already above prev_high at scan time
     if scan_price >= prev_high:
@@ -345,11 +375,82 @@ def _simulate_day(symbol: str, prev_high: float, day: date,
 
         event = 'OK'
 
-        # BREAKOUT
-        if (not alerted_breakout
-                and current_price > prev_high
-                and last_price is not None):
-            event = 'BREAKOUT'
+        # ── EXIT check (before new event detection) ──────────────────────
+        if in_trade:
+            post_bo_high = max(post_bo_high, current_price)
+            trail_stop   = post_bo_high * (1 - trail_stop_pct / 100)
+            fail_level   = prev_high * (1 - exit_below_pct / 100)
+
+            exit_reason = ''
+            if current_price < fail_level:
+                exit_reason = 'FAILED'      # dropped below prev_high
+            elif current_price < trail_stop and post_bo_high > entry_price * 1.003:
+                exit_reason = 'TRAIL_STOP'   # trailing stop hit (only after some gain)
+
+            if exit_reason:
+                trade_ret = (current_price - entry_price) / entry_price * 100
+                trade_dur = int((check_ts - entry_ts).total_seconds() / 60) if entry_ts else 0
+                events.append({
+                    'day':           day.isoformat(),
+                    'symbol':        symbol,
+                    'event':         'EXIT',
+                    'check_time':    check_ts.strftime('%H:%M'),
+                    'scan_price':    round(scan_price, 4),
+                    'prev_high':     round(prev_high, 4),
+                    'current_price': round(current_price, 4),
+                    'pct_from_scan': round((current_price - scan_price) / scan_price * 100, 2),
+                    'pct_since_last': round(pct_since_last, 2) if not np.isnan(pct_since_last) else '',
+                    'confirmed':     '',
+                    'ret_15m':       '',
+                    'ret_30m':       '',
+                    'ret_60m':       '',
+                    'max_gain_pct':  round((post_bo_high - entry_price) / entry_price * 100, 2),
+                    'max_loss_pct':  '',
+                    'exit_reason':   exit_reason,
+                    'trade_ret_pct': round(trade_ret, 2),
+                    'trade_dur_min': trade_dur,
+                    'entry_price':   round(entry_price, 4),
+                })
+                in_trade = False
+
+        # ── Detect new events ────────────────────────────────────────────
+        # BREAKOUT (with optional confirmation passes + quality filters)
+        if not alerted_breakout and last_price is not None:
+            if current_price > prev_high:
+                confirm_count += 1
+                if confirm_count >= confirm_passes:
+                    # ── Quality filters ──────────────────────────────────
+                    bo_ok = True
+
+                    # Min distance above level
+                    if min_breakout_pct > 0:
+                        dist_pct = (current_price - prev_high) / prev_high * 100
+                        if dist_pct < min_breakout_pct:
+                            bo_ok = False
+
+                    # Volume confirmation: bar volume vs 20-bar trailing avg
+                    if bo_ok and vol_mult > 1.0:
+                        trailing_v = day_bars[day_bars.index <= check_ts].tail(20)
+                        if len(trailing_v) >= 5:
+                            avg_vol = float(trailing_v['Volume'].mean())
+                            cur_vol = float(trailing_v.iloc[-1]['Volume'])
+                            if avg_vol > 0 and cur_vol < avg_vol * vol_mult:
+                                bo_ok = False
+
+                    # Time-of-day filter: skip first N minutes after open
+                    if bo_ok and skip_first_min > 0:
+                        early_cutoff = pd.Timestamp(
+                            datetime(day.year, day.month, day.day, 9, 30, tzinfo=_NY_TZ)
+                            + timedelta(minutes=skip_first_min)
+                        )
+                        if check_ts < early_cutoff:
+                            bo_ok = False
+
+                    if bo_ok:
+                        event = 'BREAKOUT'
+                    # If filters fail, keep confirm_count — price is still above
+            else:
+                confirm_count = 0   # dropped back below — reset counter
 
         # SURGE (before FLIP — higher priority)
         elif (last_price is not None
@@ -369,6 +470,10 @@ def _simulate_day(symbol: str, prev_high: float, day: date,
         # Update state
         if event == 'BREAKOUT':
             alerted_breakout = True
+            in_trade       = True
+            entry_price    = current_price
+            entry_ts       = check_ts
+            post_bo_high   = current_price
         if event == 'SURGE':
             alerted_surge_at = f'{pct_since_last:.0f}'
 
@@ -410,7 +515,39 @@ def _simulate_day(symbol: str, prev_high: float, day: date,
                 row[f'ret_{m}m'] = ''
             row.update({'max_gain_pct': '', 'max_loss_pct': '', 'confirmed': ''})
 
+        # Add trade-tracking fields for non-EXIT rows
+        row.setdefault('exit_reason', '')
+        row.setdefault('trade_ret_pct', '')
+        row.setdefault('trade_dur_min', '')
+        row.setdefault('entry_price', '')
+
         events.append(row)
+
+    # ── EOD exit: if still in trade at market close ──────────────────────────
+    if in_trade and last_price is not None:
+        trade_ret = (last_price - entry_price) / entry_price * 100
+        trade_dur = int((check_ts_list[-1] - entry_ts).total_seconds() / 60) if entry_ts else 0
+        events.append({
+            'day':           day.isoformat(),
+            'symbol':        symbol,
+            'event':         'EXIT',
+            'check_time':    '16:00',
+            'scan_price':    round(scan_price, 4),
+            'prev_high':     round(prev_high, 4),
+            'current_price': round(last_price, 4),
+            'pct_from_scan': round((last_price - scan_price) / scan_price * 100, 2),
+            'pct_since_last': '',
+            'confirmed':     '',
+            'ret_15m':       '',
+            'ret_30m':       '',
+            'ret_60m':       '',
+            'max_gain_pct':  round((post_bo_high - entry_price) / entry_price * 100, 2),
+            'max_loss_pct':  '',
+            'exit_reason':   'EOD',
+            'trade_ret_pct': round(trade_ret, 2),
+            'trade_dur_min': trade_dur,
+            'entry_price':   round(entry_price, 4),
+        })
 
     return events
 
@@ -423,6 +560,7 @@ _EVENT_COLS = [
     'pct_from_scan', 'pct_since_last',
     'confirmed', 'ret_15m', 'ret_30m', 'ret_60m',
     'max_gain_pct', 'max_loss_pct',
+    'exit_reason', 'trade_ret_pct', 'trade_dur_min', 'entry_price',
 ]
 
 
@@ -430,7 +568,14 @@ def run_backtest(date_str: Optional[str] = None,
                  n_days: int = 5,
                  interval_min: int = 5,
                  watchlist_path: Optional[str] = None,
-                 rolling_days: int = ROLLING_DAYS) -> pd.DataFrame:
+                 rolling_days: int = ROLLING_DAYS,
+                 confirm_passes: int = CONFIRM_PASSES,
+                 vol_mult: float = 1.0,
+                 min_breakout_pct: float = 0.0,
+                 trail_stop_pct: float = TRAIL_STOP_PCT,
+                 exit_below_pct: float = EXIT_BELOW_PCT,
+                 skip_first_min: int = 0,
+                 bar_interval: str = '1m') -> pd.DataFrame:
     """
     Full backtest run. Returns DataFrame of all events.
 
@@ -473,6 +618,18 @@ def run_backtest(date_str: Optional[str] = None,
     print(f"  Symbols        : {len(symbols)}")
     print(f"  Trading days   : last {n_days}")
     print(f"  Pass interval  : {interval_min} min")
+    print(f"  Confirm passes : {confirm_passes}  ({'immediate' if confirm_passes == 1 else f'{confirm_passes} consecutive passes above level'})")
+    filters = []
+    if vol_mult > 1.0:
+        filters.append(f"vol≥{vol_mult}x")
+    if min_breakout_pct > 0:
+        filters.append(f"dist≥{min_breakout_pct}%")
+    if skip_first_min > 0:
+        filters.append(f"skip first {skip_first_min}min")
+    if trail_stop_pct != TRAIL_STOP_PCT or exit_below_pct != EXIT_BELOW_PCT:
+        filters.append(f"trail={trail_stop_pct}%/fail={exit_below_pct}%")
+    if filters:
+        print(f"  Filters        : {', '.join(filters)}")
     print(f"{'═'*62}\n")
     print(f"  Days to simulate: {[str(d) for d in trade_days]}\n")
 
@@ -490,14 +647,14 @@ def run_backtest(date_str: Optional[str] = None,
         available  = sum(1 for sym in symbols if sym in rolling_ph)
         print(f"  Rolling prev_high computed for {available}/{len(symbols)} symbols.\n")
 
-    # ── Fetch 1-min bars in chunks of 50 ─────────────────────────────────────
+    # ── Fetch intraday bars in chunks of 50 ──────────────────────────────────
     CHUNK = 50
     all_bars: dict[str, pd.DataFrame] = {}
     for i in range(0, len(symbols), CHUNK):
         chunk = symbols[i:i + CHUNK]
-        chunk_bars = _fetch_1min_batch(chunk, fetch_start, fetch_end)
+        chunk_bars = _fetch_1min_batch(chunk, fetch_start, fetch_end, bar_interval)
         all_bars.update(chunk_bars)
-    print(f"\n  Fetched 1-min data for {len(all_bars)}/{len(symbols)} symbols.\n")
+    print(f"\n  Fetched {bar_interval} data for {len(all_bars)}/{len(symbols)} symbols.\n")
 
     # ── Simulate ──────────────────────────────────────────────────────────────
     all_events: list[dict] = []
@@ -517,7 +674,13 @@ def run_backtest(date_str: Optional[str] = None,
                 if ph is None:
                     continue
 
-            events = _simulate_day(sym, ph, day, bars, interval_min)
+            events = _simulate_day(
+                sym, ph, day, bars, interval_min,
+                confirm_passes=confirm_passes, vol_mult=vol_mult,
+                min_breakout_pct=min_breakout_pct,
+                trail_stop_pct=trail_stop_pct, exit_below_pct=exit_below_pct,
+                skip_first_min=skip_first_min,
+            )
             all_events.extend(events)
 
     if not all_events:
@@ -606,6 +769,40 @@ def print_report(events_df: pd.DataFrame, today_str: str,
             p(f"  {sym:<8} {days_n:>5} {conf_n:>5} "
               f"{avg30:>+9.2f}% {maxg:>+8.2f}% {maxl:>+8.2f}%")
 
+    # ── EXIT / trade analysis ──────────────────────────────────────────────────
+    exits = events_df[events_df['event'] == 'EXIT'].copy()
+    if not exits.empty:
+        exits['trade_ret_pct'] = pd.to_numeric(exits['trade_ret_pct'], errors='coerce')
+        exits['trade_dur_min'] = pd.to_numeric(exits['trade_dur_min'], errors='coerce')
+        exits['max_gain_pct']  = pd.to_numeric(exits['max_gain_pct'], errors='coerce')
+
+        wins   = exits[exits['trade_ret_pct'] > 0]
+        losses = exits[exits['trade_ret_pct'] <= 0]
+        win_rate = len(wins) / len(exits) * 100 if len(exits) else 0
+        avg_win  = wins['trade_ret_pct'].mean() if not wins.empty else 0
+        avg_loss = losses['trade_ret_pct'].mean() if not losses.empty else 0
+        expectancy = (win_rate / 100 * avg_win) + ((100 - win_rate) / 100 * avg_loss)
+
+        p(f"\n  {'─'*58}")
+        p(f"  TRADE EXITS ({len(exits)} total)")
+        p(f"  {'─'*58}")
+        p(f"  Win rate     : {win_rate:.0f}%  ({len(wins)}W / {len(losses)}L)")
+        p(f"  Avg winner   : {avg_win:+.2f}%")
+        p(f"  Avg loser    : {avg_loss:+.2f}%")
+        p(f"  Expectancy   : {expectancy:+.3f}% per trade")
+        p(f"  Avg duration : {exits['trade_dur_min'].mean():.0f} min")
+        p(f"  Max unrealized: {exits['max_gain_pct'].mean():+.2f}% avg")
+
+        # By exit reason
+        p(f"\n  {'Reason':<14} {'N':>5} {'WinRate':>8} {'AvgRet':>8} {'AvgDur':>8}")
+        p(f"  {'─'*48}")
+        for reason, grp in exits.groupby('exit_reason'):
+            n = len(grp)
+            wr = (grp['trade_ret_pct'] > 0).sum() / n * 100
+            ar = grp['trade_ret_pct'].mean()
+            ad = grp['trade_dur_min'].mean()
+            p(f"  {reason:<14} {n:>5} {wr:>7.0f}% {ar:>+7.2f}% {ad:>7.0f}m")
+
     # ── SURGE analysis ────────────────────────────────────────────────────────
     surge = events_df[events_df['event'] == 'SURGE'].copy()
     if not surge.empty:
@@ -632,13 +829,14 @@ def print_report(events_df: pd.DataFrame, today_str: str,
     p(f"\n  {'─'*58}")
     p(f"  DAILY SUMMARY")
     p(f"  {'─'*58}")
-    p(f"  {'Day':<12} {'Events':>7} {'BREAKOUT':>9} {'SURGE':>7} {'FLIP':>6}")
-    p(f"  {'─'*46}")
+    p(f"  {'Day':<12} {'Events':>7} {'BREAKOUT':>9} {'EXIT':>6} {'SURGE':>7} {'FLIP':>6}")
+    p(f"  {'─'*52}")
     for day, grp in events_df.groupby('day'):
         day_bo    = (grp['event'] == 'BREAKOUT').sum()
+        day_exit  = (grp['event'] == 'EXIT').sum()
         day_surge = (grp['event'] == 'SURGE').sum()
         day_flip  = (grp['event'] == 'FLIP').sum()
-        p(f"  {day:<12} {len(grp):>7} {day_bo:>9} {day_surge:>7} {day_flip:>6}")
+        p(f"  {day:<12} {len(grp):>7} {day_bo:>9} {day_exit:>6} {day_surge:>7} {day_flip:>6}")
 
     # ── Verdict ───────────────────────────────────────────────────────────────
     p(f"\n{'═'*62}")
@@ -665,6 +863,271 @@ def print_report(events_df: pd.DataFrame, today_str: str,
     return '\n'.join(lines)
 
 
+# ── Sweep mode ────────────────────────────────────────────────────────────────
+
+def _extract_trade_stats(events_df: pd.DataFrame) -> dict:
+    """Extract key stats from an events DataFrame for sweep comparison."""
+    exits = events_df[events_df['event'] == 'EXIT'].copy()
+    bo    = events_df[events_df['event'] == 'BREAKOUT'].copy()
+
+    if exits.empty:
+        return {
+            'breakouts': len(bo), 'trades': 0, 'win_rate': 0,
+            'avg_ret': 0, 'expectancy': 0, 'avg_dur': 0,
+        }
+
+    exits['trade_ret_pct'] = pd.to_numeric(exits['trade_ret_pct'], errors='coerce')
+    exits['trade_dur_min'] = pd.to_numeric(exits['trade_dur_min'], errors='coerce')
+    wins   = exits[exits['trade_ret_pct'] > 0]
+    losses = exits[exits['trade_ret_pct'] <= 0]
+    win_rate = len(wins) / len(exits) * 100 if len(exits) else 0
+    avg_win  = wins['trade_ret_pct'].mean() if not wins.empty else 0
+    avg_loss = losses['trade_ret_pct'].mean() if not losses.empty else 0
+    expectancy = (win_rate / 100 * avg_win) + ((100 - win_rate) / 100 * avg_loss)
+
+    return {
+        'breakouts':  len(bo),
+        'trades':     len(exits),
+        'win_rate':   round(win_rate, 1),
+        'avg_ret':    round(exits['trade_ret_pct'].mean(), 3),
+        'expectancy': round(expectancy, 3),
+        'avg_dur':    round(exits['trade_dur_min'].mean(), 0),
+        'avg_win':    round(avg_win, 3),
+        'avg_loss':   round(avg_loss, 3),
+    }
+
+
+def run_sweep(watchlist_path: str, date_str: Optional[str] = None,
+              n_days: int = 5, interval_min: int = 5,
+              rolling_range: tuple[int, int] = (3, 25),
+              confirm_passes: int = CONFIRM_PASSES,
+              vol_mult: float = 1.0,
+              min_breakout_pct: float = 0.0,
+              trail_stop_pct: float = TRAIL_STOP_PCT,
+              exit_below_pct: float = EXIT_BELOW_PCT,
+              skip_first_min: int = 0,
+              bar_interval: str = '1m') -> None:
+    """
+    Sweep --rolling-days from rolling_range[0]..rolling_range[1] and print a
+    comparison table showing which window maximises win rate / expectancy.
+
+    Data is fetched ONCE for the max window, then the simulation is re-run
+    per window value (only the rolling prev_high computation changes).
+    """
+    today_str   = _today_str(date_str)
+    anchor_date = datetime.strptime(today_str, '%Y%m%d').date()
+    trade_days  = _last_n_trading_days(n_days, anchor=anchor_date)
+    symbols     = _load_tv_watchlist(watchlist_path)
+
+    fetch_start = trade_days[0]
+    fetch_end   = trade_days[-1]
+    max_roll    = rolling_range[1]
+
+    print(f"\n{'═'*70}")
+    print(f"  ROLLING-DAYS SWEEP  ({rolling_range[0]}–{rolling_range[1]})")
+    print(f"  Watchlist : {watchlist_path}  ({len(symbols)} symbols)")
+    print(f"  Days      : {n_days}  ({trade_days[0]} → {trade_days[-1]})")
+    print(f"{'═'*70}\n")
+
+    # ── Fetch data once ──────────────────────────────────────────────────────
+    daily_start = fetch_start - timedelta(days=max_roll * 2)
+    print("  Fetching daily bars …", flush=True)
+    daily_bars = _fetch_daily_bars(symbols, daily_start, fetch_end)
+
+    CHUNK = 50
+    all_bars: dict[str, pd.DataFrame] = {}
+    for i in range(0, len(symbols), CHUNK):
+        chunk = symbols[i:i + CHUNK]
+        chunk_bars = _fetch_1min_batch(chunk, fetch_start, fetch_end, bar_interval)
+        all_bars.update(chunk_bars)
+    print(f"  Fetched {bar_interval} data for {len(all_bars)}/{len(symbols)} symbols.\n")
+
+    # ── Sweep ────────────────────────────────────────────────────────────────
+    results: list[dict] = []
+    for rd in range(rolling_range[0], rolling_range[1] + 1):
+        rolling_ph = _build_rolling_prev_high(daily_bars, trade_days, rd)
+        all_events: list[dict] = []
+        for sym in symbols:
+            bars = all_bars.get(sym)
+            if bars is None or bars.empty:
+                continue
+            for day in trade_days:
+                ph = rolling_ph.get(sym, {}).get(day)
+                if ph is None:
+                    continue
+                evts = _simulate_day(
+                    sym, ph, day, bars, interval_min,
+                    confirm_passes=confirm_passes, vol_mult=vol_mult,
+                    min_breakout_pct=min_breakout_pct,
+                    trail_stop_pct=trail_stop_pct, exit_below_pct=exit_below_pct,
+                    skip_first_min=skip_first_min,
+                )
+                all_events.extend(evts)
+
+        if all_events:
+            edf = pd.DataFrame(all_events)
+            stats = _extract_trade_stats(edf)
+        else:
+            stats = {'breakouts': 0, 'trades': 0, 'win_rate': 0,
+                     'avg_ret': 0, 'expectancy': 0, 'avg_dur': 0,
+                     'avg_win': 0, 'avg_loss': 0}
+        stats['rolling_days'] = rd
+        results.append(stats)
+        bo_n = stats['breakouts']
+        tr_n = stats['trades']
+        wr   = stats['win_rate']
+        exp  = stats['expectancy']
+        print(f"  rolling={rd:>2}d  breakouts={bo_n:>3}  trades={tr_n:>3}  "
+              f"win={wr:>5.1f}%  expectancy={exp:>+.3f}%")
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    res_df = pd.DataFrame(results)
+    # Only consider configs with at least 5 trades
+    viable = res_df[res_df['trades'] >= 5]
+
+    print(f"\n{'═'*70}")
+    if viable.empty:
+        print("  Not enough trades to determine best config.")
+    else:
+        best_wr  = viable.loc[viable['win_rate'].idxmax()]
+        best_exp = viable.loc[viable['expectancy'].idxmax()]
+        print(f"  BEST WIN RATE   : rolling={int(best_wr['rolling_days'])}d  "
+              f"win={best_wr['win_rate']:.1f}%  exp={best_wr['expectancy']:+.3f}%  "
+              f"trades={int(best_wr['trades'])}")
+        print(f"  BEST EXPECTANCY : rolling={int(best_exp['rolling_days'])}d  "
+              f"win={best_exp['win_rate']:.1f}%  exp={best_exp['expectancy']:+.3f}%  "
+              f"trades={int(best_exp['trades'])}")
+    print(f"{'═'*70}\n")
+
+    # Save sweep CSV
+    sweep_path = _SCAN_DIR / f'feedback_sweep_{today_str}.csv'
+    res_df.to_csv(sweep_path, index=False)
+    print(f"  Sweep data saved → {sweep_path}")
+
+
+# ── Filter comparison ─────────────────────────────────────────────────────────
+
+# Predefined filter configurations to test
+_FILTER_CONFIGS = [
+    # label, {filter_kwargs}
+    # ── Round 1: isolate each filter ──────────────────────────────────────
+    ('A  baseline',          dict(vol_mult=1.0, min_breakout_pct=0.0, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=1)),
+    ('B  vol≥1.5x',         dict(vol_mult=1.5, min_breakout_pct=0.0, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=1)),
+    ('C  vol≥2.0x',         dict(vol_mult=2.0, min_breakout_pct=0.0, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=1)),
+    ('D  dist≥0.2%',        dict(vol_mult=1.0, min_breakout_pct=0.2, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=1)),
+    ('E  dist≥0.5%',        dict(vol_mult=1.0, min_breakout_pct=0.5, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=1)),
+    ('F  confirm2',         dict(vol_mult=1.0, min_breakout_pct=0.0, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=2)),
+    ('G  skip30m',          dict(vol_mult=1.0, min_breakout_pct=0.0, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=30, confirm_passes=1)),
+    # ── Round 2: moderate stop tuning ─────────────────────────────────────
+    ('H  trail1.5/exit0.5', dict(vol_mult=1.0, min_breakout_pct=0.0, trail_stop_pct=1.5, exit_below_pct=0.5, skip_first_min=0,  confirm_passes=1)),
+    ('I  trail0.7/exit0.2', dict(vol_mult=1.0, min_breakout_pct=0.0, trail_stop_pct=0.7, exit_below_pct=0.2, skip_first_min=0,  confirm_passes=1)),
+    # ── Round 3: best combos ──────────────────────────────────────────────
+    ('J  vol1.5+dist0.2',   dict(vol_mult=1.5, min_breakout_pct=0.2, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=1)),
+    ('K  vol2+dist0.2',     dict(vol_mult=2.0, min_breakout_pct=0.2, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=1)),
+    ('L  vol1.5+cfm2',      dict(vol_mult=1.5, min_breakout_pct=0.0, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=0,  confirm_passes=2)),
+    ('M  vol1.5+skip30',    dict(vol_mult=1.5, min_breakout_pct=0.0, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=30, confirm_passes=1)),
+    ('N  BEST COMBO',       dict(vol_mult=1.5, min_breakout_pct=0.2, trail_stop_pct=1.0, exit_below_pct=0.3, skip_first_min=30, confirm_passes=2)),
+]
+
+
+def run_filter_comparison(watchlist_path: str, date_str: Optional[str] = None,
+                          n_days: int = 5, interval_min: int = 5,
+                          rolling_days: int = 8,
+                          bar_interval: str = '1m') -> None:
+    """
+    Test all predefined filter configurations on the same data.
+    Fetches data ONCE, then re-runs simulation per config.
+    Uses rolling_days=8 by default (previously best expectancy window).
+    """
+    today_str   = _today_str(date_str)
+    anchor_date = datetime.strptime(today_str, '%Y%m%d').date()
+    trade_days  = _last_n_trading_days(n_days, anchor=anchor_date)
+    symbols     = _load_tv_watchlist(watchlist_path)
+
+    fetch_start = trade_days[0]
+    fetch_end   = trade_days[-1]
+
+    print(f"\n{'═'*80}")
+    print(f"  FILTER COMPARISON")
+    print(f"  Watchlist    : {watchlist_path}  ({len(symbols)} symbols)")
+    print(f"  Days         : {n_days}  ({trade_days[0]} → {trade_days[-1]})")
+    print(f"  Rolling high : {rolling_days}d")
+    print(f"  Configs      : {len(_FILTER_CONFIGS)}")
+    print(f"{'═'*80}\n")
+
+    # ── Fetch data once ──────────────────────────────────────────────────────
+    daily_start = fetch_start - timedelta(days=rolling_days * 2)
+    print("  Fetching daily bars …", flush=True)
+    daily_bars = _fetch_daily_bars(symbols, daily_start, fetch_end)
+    rolling_ph = _build_rolling_prev_high(daily_bars, trade_days, rolling_days)
+
+    CHUNK = 50
+    all_bars: dict[str, pd.DataFrame] = {}
+    for i in range(0, len(symbols), CHUNK):
+        chunk = symbols[i:i + CHUNK]
+        chunk_bars = _fetch_1min_batch(chunk, fetch_start, fetch_end, bar_interval)
+        all_bars.update(chunk_bars)
+    print(f"  Fetched {bar_interval} data for {len(all_bars)}/{len(symbols)} symbols.\n")
+
+    # ── Run each config ──────────────────────────────────────────────────────
+    results: list[dict] = []
+    header = (f"  {'Config':<22} {'BO':>4} {'Trades':>6} {'Win%':>6} "
+              f"{'AvgWin':>7} {'AvgLoss':>8} {'Expect':>8} {'AvgDur':>7}")
+    print(header)
+    print(f"  {'─'*74}")
+
+    for label, fkw in _FILTER_CONFIGS:
+        all_events: list[dict] = []
+        for sym in symbols:
+            bars = all_bars.get(sym)
+            if bars is None or bars.empty:
+                continue
+            for day_d in trade_days:
+                ph = rolling_ph.get(sym, {}).get(day_d)
+                if ph is None:
+                    continue
+                evts = _simulate_day(sym, ph, day_d, bars, interval_min, **fkw)
+                all_events.extend(evts)
+
+        if all_events:
+            edf = pd.DataFrame(all_events)
+            stats = _extract_trade_stats(edf)
+        else:
+            stats = {'breakouts': 0, 'trades': 0, 'win_rate': 0,
+                     'avg_ret': 0, 'expectancy': 0, 'avg_dur': 0,
+                     'avg_win': 0, 'avg_loss': 0}
+        stats['config'] = label
+        results.append(stats)
+
+        print(f"  {label:<22} {stats['breakouts']:>4} {stats['trades']:>6} "
+              f"{stats['win_rate']:>5.1f}% {stats.get('avg_win',0):>+6.2f}% "
+              f"{stats.get('avg_loss',0):>+7.2f}% {stats['expectancy']:>+7.3f}% "
+              f"{stats['avg_dur']:>5.0f}m")
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    res_df = pd.DataFrame(results)
+    viable = res_df[res_df['trades'] >= 5]
+
+    print(f"\n{'═'*80}")
+    if viable.empty:
+        print("  Not enough trades to determine best config.")
+    else:
+        best_wr  = viable.loc[viable['win_rate'].idxmax()]
+        best_exp = viable.loc[viable['expectancy'].idxmax()]
+        print(f"  BEST WIN RATE   : {best_wr['config']}  "
+              f"win={best_wr['win_rate']:.1f}%  exp={best_wr['expectancy']:+.3f}%  "
+              f"trades={int(best_wr['trades'])}")
+        print(f"  BEST EXPECTANCY : {best_exp['config']}  "
+              f"win={best_exp['win_rate']:.1f}%  exp={best_exp['expectancy']:+.3f}%  "
+              f"trades={int(best_exp['trades'])}")
+    print(f"{'═'*80}\n")
+
+    # Save comparison CSV
+    comp_path = _SCAN_DIR / f'feedback_filter_comparison_{today_str}.csv'
+    res_df.to_csv(comp_path, index=False)
+    print(f"  Comparison saved → {comp_path}")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -684,10 +1147,68 @@ def main() -> None:
                         help=f'Rolling window for prev_high in watchlist mode (default {ROLLING_DAYS})')
     parser.add_argument('--report',       action='store_true',
                         help='Load existing backtest CSV and just print report')
+    parser.add_argument('--sweep',        action='store_true',
+                        help='Sweep rolling-days 3–25 to find optimal (requires --watchlist)')
+    parser.add_argument('--sweep-min',     type=int, default=3,
+                        help='Sweep start (default 3)')
+    parser.add_argument('--sweep-max',     type=int, default=25,
+                        help='Sweep end (default 25)')
+    parser.add_argument('--confirm-passes', type=int, default=CONFIRM_PASSES,
+                        help=f'Consecutive passes above prev_high required before BREAKOUT fires (default {CONFIRM_PASSES}; use 2 to test confirmation filter)')
+    # Filter params
+    parser.add_argument('--vol-mult',       type=float, default=1.0,
+                        help='Require breakout bar volume >= X × 20-bar avg (default 1.0 = off; try 1.5)')
+    parser.add_argument('--min-breakout-pct', type=float, default=0.0,
+                        help='Min %% above prev_high to fire BREAKOUT (default 0.0; try 0.3)')
+    parser.add_argument('--trail-stop',     type=float, default=TRAIL_STOP_PCT,
+                        help=f'Trailing stop %% from post-breakout high (default {TRAIL_STOP_PCT}; try 2.0)')
+    parser.add_argument('--exit-below',     type=float, default=EXIT_BELOW_PCT,
+                        help=f'%% below prev_high = failed exit (default {EXIT_BELOW_PCT}; try 1.0)')
+    parser.add_argument('--skip-first-min', type=int, default=0,
+                        help='Skip breakouts in first N min after open (default 0; try 30)')
+    parser.add_argument('--compare-filters', action='store_true',
+                        help='Test 10 predefined filter combos on the same data (requires --watchlist)')
+    parser.add_argument('--bar-interval',   type=str, default='1m',
+                        help='Bar size for intraday data: 1m (7-day limit) or 5m (60-day limit). Default: 1m')
     args = parser.parse_args()
 
     today_str      = _today_str(args.date)
     watchlist_mode = args.watchlist is not None
+
+    # ── Filter comparison mode ────────────────────────────────────────────────
+    if args.compare_filters:
+        if not args.watchlist:
+            print("ERROR: --compare-filters requires --watchlist <file>")
+            return
+        run_filter_comparison(
+            watchlist_path=args.watchlist,
+            date_str=args.date,
+            n_days=args.days,
+            interval_min=args.interval,
+            rolling_days=args.rolling_days,
+            bar_interval=args.bar_interval,
+        )
+        return
+
+    if args.sweep:
+        if not args.watchlist:
+            print("ERROR: --sweep requires --watchlist <file>")
+            return
+        run_sweep(
+            watchlist_path=args.watchlist,
+            date_str=args.date,
+            n_days=args.days,
+            interval_min=args.interval,
+            rolling_range=(args.sweep_min, args.sweep_max),
+            confirm_passes=args.confirm_passes,
+            vol_mult=args.vol_mult,
+            min_breakout_pct=args.min_breakout_pct,
+            trail_stop_pct=args.trail_stop,
+            exit_below_pct=args.exit_below,
+            skip_first_min=args.skip_first_min,
+            bar_interval=args.bar_interval,
+        )
+        return
 
     if args.report:
         suffix       = '_watchlist' if watchlist_mode else ''
@@ -705,6 +1226,13 @@ def main() -> None:
         interval_min=args.interval,
         watchlist_path=args.watchlist,
         rolling_days=args.rolling_days,
+        confirm_passes=args.confirm_passes,
+        vol_mult=args.vol_mult,
+        min_breakout_pct=args.min_breakout_pct,
+        trail_stop_pct=args.trail_stop,
+        exit_below_pct=args.exit_below,
+        skip_first_min=args.skip_first_min,
+        bar_interval=args.bar_interval,
     )
     print_report(events_df, today_str, watchlist_mode=watchlist_mode)
 

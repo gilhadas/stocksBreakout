@@ -41,6 +41,7 @@ import requests
 import yfinance as yf
 
 from config import NOTIFICATIONS, OUTPUT_DIR
+import scalp_portfolio as sp
 from zoneinfo import ZoneInfo
 
 _NY_TZ       = ZoneInfo('America/New_York')
@@ -49,9 +50,18 @@ _DEFAULT_INT = 300   # seconds
 _DEFAULT_RESCAN_INT = 900  # 15 min
 
 # Alert thresholds
-SURGE_THRESHOLD = 2.0   # % move since last check that triggers SURGE alert
-MISS_THRESHOLD  = 2.0   # % above scan_price considered a missed opportunity
-FLAT_BAND       = 0.3   # % band for FLAT classification
+SURGE_THRESHOLD    = 2.0   # % move since last check that triggers SURGE alert
+MISS_THRESHOLD     = 2.0   # % above scan_price considered a missed opportunity
+FLAT_BAND          = 0.3   # % band for FLAT classification
+TRAIL_STOP_PCT     = 1.0   # % trailing stop from post-breakout high (swing/daytrade)
+EXIT_BELOW_PCT     = 0.3   # % below prev_high = failed breakout exit (swing/daytrade)
+# Scalping: fixed-cent stops (overrides % stops when > 0)
+SCALP_TRAIL_CENTS  = 3     # ¢ trailing stop from post-breakout high
+SCALP_FAIL_CENTS   = 2     # ¢ below prev_high = failed breakout exit
+CONFIRM_PASSES     = 1     # consecutive passes above prev_high (1 = immediate; backtest showed 2 adds no value)
+VOL_MULT           = 2.0   # require bar volume ≥ Xx 20-bar avg at BREAKOUT (backtest: +6 pts WR)
+MIN_BREAKOUT_PCT   = 0.2   # min % above prev_high before firing BREAKOUT
+MIN_STAGE_BREAKOUT = 5     # only fire BREAKOUT for symbols rejected at stage ≥ this (0=off)
 
 # Pipeline stage depth — higher number = symbol got further through the scanner.
 # Matches the actual gate order in orchestrator.py → scanner.py.
@@ -123,33 +133,49 @@ def _save_state(date_str: str, state: dict) -> None:
 
 # ── Price fetching ────────────────────────────────────────────────────────────
 
-def _fetch_prices(symbols: list[str]) -> dict[str, float]:
-    """Batch-fetch latest prices via yfinance. Returns {symbol: price}."""
+def _fetch_prices(symbols: list[str]) -> tuple[dict[str, float], dict[str, float]]:
+    """Batch-fetch latest prices and volume ratios via yfinance.
+
+    Returns (prices, vol_ratios) where:
+      prices     = {symbol: float}
+      vol_ratios = {symbol: float}  — last bar volume / 20-bar avg volume
+    """
     if not symbols:
-        return {}
+        return {}, {}
     try:
         raw = yf.download(
             symbols, period='1d', interval='1m',
             progress=False, auto_adjust=True,
             group_by='ticker' if len(symbols) > 1 else None,
         )
-        prices: dict[str, float] = {}
+        prices:     dict[str, float] = {}
+        vol_ratios: dict[str, float] = {}
         if len(symbols) == 1:
             sym = symbols[0]
             if not raw.empty:
-                prices[sym] = float(raw['Close'].dropna().iloc[-1])
+                closes = raw['Close'].dropna()
+                if not closes.empty:
+                    prices[sym] = float(closes.iloc[-1])
+                vols = raw['Volume'].dropna()
+                if len(vols) >= 5:
+                    avg_v = float(vols.iloc[-20:].mean()) if len(vols) >= 20 else float(vols.mean())
+                    vol_ratios[sym] = float(vols.iloc[-1]) / avg_v if avg_v > 0 else 0.0
         else:
             for sym in symbols:
                 try:
                     col = raw[sym]['Close'].dropna()
                     if not col.empty:
                         prices[sym] = float(col.iloc[-1])
+                    vols = raw[sym]['Volume'].dropna()
+                    if len(vols) >= 5:
+                        avg_v = float(vols.iloc[-20:].mean()) if len(vols) >= 20 else float(vols.mean())
+                        vol_ratios[sym] = float(vols.iloc[-1]) / avg_v if avg_v > 0 else 0.0
                 except Exception:
                     pass
-        return prices
+        return prices, vol_ratios
     except Exception as e:
         logger.debug(f"Batch price fetch failed: {e}")
-        return {}
+        return {}, {}
 
 
 # ── Direction ─────────────────────────────────────────────────────────────────
@@ -171,6 +197,7 @@ def _discord_color(event: str) -> int:
         'ACCEPTED': 0x2ecc71,   # bright green
         'SURGE':    0xffaa00,   # orange
         'FLIP':     0xff4444,   # red-ish
+        'EXIT':     0x9b59b6,   # purple
     }.get(event, 0x888888)
 
 def _send_discord_alerts(alerts: list[dict]) -> None:
@@ -229,6 +256,20 @@ def _send_discord_alerts(alerts: list[dict]) -> None:
                 f"**Current:** ${cur:.2f}",
             ]
 
+        elif event == 'EXIT':
+            exit_reason  = alert.get('exit_reason', '?')
+            entry_price  = alert.get('entry_price', 0)
+            trade_ret    = alert.get('trade_ret_pct', 0)
+            post_bo_high = alert.get('post_bo_high', 0)
+            result_emoji = '✓ WIN' if trade_ret > 0 else '✗ LOSS'
+            lines = [
+                f"**{result_emoji}** — {exit_reason}",
+                f"**Entry:** ${entry_price:.2f}  →  **Exit:** ${cur:.2f}",
+                f"**Return:** {trade_ret:+.2f}%",
+            ]
+            if post_bo_high and post_bo_high > 0:
+                lines.append(f"**Peak:** ${post_bo_high:.2f}  (unrealized {((post_bo_high - entry_price) / entry_price * 100):+.1f}%)")
+
         else:
             lines = [
                 f"**Current:** ${cur:.2f}",
@@ -237,7 +278,8 @@ def _send_discord_alerts(alerts: list[dict]) -> None:
                 f"**Rejected for:** {reason}",
             ]
             if prev_h and event == 'BREAKOUT':
-                lines.append(f"**Prev high:** ${prev_h:.2f} ← crossed ✓")
+                vol_info = f"  vol={alert.get('vol_ratio', 0):.1f}x" if alert.get('vol_ratio') else ''
+                lines.append(f"**Prev high:** ${prev_h:.2f} ← crossed ✓{vol_info}")
 
         embed = {
             'title':       title,
@@ -258,13 +300,61 @@ def _send_discord_alerts(alerts: list[dict]) -> None:
             logger.error(f"Discord post failed for {symbol}: {e}")
 
 
+# ── Telegram notification ────────────────────────────────────────────────────
+
+def _send_telegram_alerts(alerts: list[dict]) -> None:
+    """Send scalp BREAKOUT alerts to Telegram."""
+    try:
+        cfg = NOTIFICATIONS.get('telegram', {})
+        if not cfg.get('enabled'):
+            return
+        bot_token = cfg.get('bot_token', '')
+        chat_id   = cfg.get('chat_id', '')
+        if not bot_token or not chat_id:
+            return
+    except Exception:
+        return
+
+    for alert in alerts:
+        symbol = alert['symbol']
+        cur    = alert['current_price']
+        prev_h = alert.get('prev_high')
+        vol    = alert.get('vol_ratio', 0)
+
+        lines = [
+            f"SCALP BREAKOUT: {symbol}",
+            f"Price: ${cur:.2f}",
+        ]
+        if prev_h:
+            lines.append(f"Prev High: ${prev_h:.2f}")
+        if vol:
+            lines.append(f"Vol: {vol:.1f}x")
+        lines.append(f"Stop: ${cur - SCALP_FAIL_CENTS / 100:.2f} | Target: ${cur + SCALP_TRAIL_CENTS * 2 / 100:.2f}")
+
+        text = '\n'.join(lines)
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            r = requests.post(url, data={
+                'chat_id': chat_id,
+                'text': text,
+            }, timeout=8)
+            if r.status_code == 200:
+                logger.info(f"Telegram alert sent: {symbol}")
+            else:
+                logger.warning(f"Telegram returned {r.status_code} for {symbol}: {r.text[:200]}")
+        except Exception as e:
+            logger.error(f"Telegram post failed for {symbol}: {e}")
+
+
 # ── Scanner runner ────────────────────────────────────────────────────────────
 
 _SCANNER_CMD = [
     sys.executable, 'breakout_scanner.py',
     './input/1_26_Setups.txt',
-    '--mock', '--notify', '--bounce',
+    '--mock', '--bounce',
     '--mode', 'scalping', '--debug',
+    # --notify removed: feedback agent handles its own BREAKOUT notifications.
+    # Scanner --notify was causing duplicate/noisy alerts for every rescan.
 ]
 
 def _run_scanner(dec_path: Path, label: str = "initial") -> bool:
@@ -294,6 +384,59 @@ def _run_scanner(dec_path: Path, label: str = "initial") -> bool:
         return False
 
 
+# ── Signal file cleanup ──────────────────────────────────────────────────────
+
+_SIGNALS_DIR = Path(OUTPUT_DIR) / 'signals'
+_KEEP_DAYS   = 7  # keep last N days of signal files
+
+def _cleanup_signal_files():
+    """
+    Remove duplicate signal CSV files: keep only the LATEST file per mode per
+    day, and delete all files older than _KEEP_DAYS.
+    Pattern: signals_{mode}_{YYYYMMDD}_{HHMMSS}.csv
+    """
+    import re
+    if not _SIGNALS_DIR.exists():
+        return
+
+    # Group files by (mode, date)
+    groups: dict[tuple[str, str], list[Path]] = {}
+    pattern = re.compile(r'signals_(\w+)_(\d{8})_\d{6}\.csv$')
+
+    for f in _SIGNALS_DIR.glob('signals_*.csv'):
+        m = pattern.match(f.name)
+        if not m:
+            continue
+        mode, date_str = m.group(1), m.group(2)
+        groups.setdefault((mode, date_str), []).append(f)
+
+    # Cutoff date for age-based cleanup
+    cutoff = datetime.now(_NY_TZ).strftime('%Y%m%d')
+    try:
+        from datetime import timedelta
+        cutoff_dt = datetime.now(_NY_TZ) - timedelta(days=_KEEP_DAYS)
+        cutoff = cutoff_dt.strftime('%Y%m%d')
+    except Exception:
+        pass
+
+    removed = 0
+    for (mode, date_str), files in groups.items():
+        if date_str < cutoff:
+            # Old files: delete all
+            for f in files:
+                f.unlink(missing_ok=True)
+                removed += 1
+        elif len(files) > 1:
+            # Same day: keep only the newest, delete the rest
+            files.sort(key=lambda p: p.name)
+            for f in files[:-1]:  # delete all but last (newest timestamp)
+                f.unlink(missing_ok=True)
+                removed += 1
+
+    if removed:
+        logger.info(f"Cleaned up {removed} old/duplicate signal file(s)")
+
+
 # ── Core run ──────────────────────────────────────────────────────────────────
 
 def run_once(decisions_date: Optional[str] = None,
@@ -314,6 +457,7 @@ def run_once(decisions_date: Optional[str] = None,
     did_rescan = False
     if not state:
         did_rescan = _run_scanner(dec_path, label="initial")
+        _cleanup_signal_files()
         # Record rescan time so the next run doesn't immediately re-scan
         state.setdefault('_meta', {})['last_rescan_ts'] = time.time()
     else:
@@ -322,6 +466,7 @@ def run_once(decisions_date: Optional[str] = None,
         last_rescan = meta.get('last_rescan_ts', 0)
         if time.time() - last_rescan >= rescan_interval:
             did_rescan = _run_scanner(dec_path, label="re-scan")
+            _cleanup_signal_files()
             state.setdefault('_meta', {})['last_rescan_ts'] = time.time()
 
     check_ts = datetime.now(_NY_TZ)
@@ -379,8 +524,8 @@ def run_once(decisions_date: Optional[str] = None,
                 state[sym]['prev_reason_code'] = prev_reason
                 state[sym]['reason_code'] = 'ACCEPTED'
 
-    # ── Fetch current prices (batch) ──────────────────────────────────────────
-    prices = _fetch_prices(symbols)
+    # ── Fetch current prices + volume ratios (batch) ────────────────────────
+    prices, vol_ratios = _fetch_prices(symbols)
 
     for _, row in dec_df.iterrows():
         symbol      = str(row.get('symbol', '')).strip()
@@ -422,13 +567,21 @@ def run_once(decisions_date: Optional[str] = None,
         # base_price: always the real market price at FIRST observation.
         base_price = prev.get('base_price') if not is_first_check else current_price
 
-        # prev_high from CSV is only valid when it's in the same ballpark as
-        # the real current price (within 30%).
+        # prev_high from CSV: reject if >20% away from current price (bad data)
         prev_high_raw = prev_high
-        if not pd.isna(prev_high_raw) and abs(prev_high_raw - current_price) / current_price > 0.30:
+        if not pd.isna(prev_high_raw) and abs(prev_high_raw - current_price) / current_price > 0.20:
             prev_high_raw = float('nan')
 
-        live_prev_high = prev_high_raw if not pd.isna(prev_high_raw) else prev.get('prev_high')
+        # Lock prev_high: once set, never let a rescan lower it (prevents
+        # false breakouts from yfinance data instability — see MPC 2026-03-10).
+        saved_prev_high = prev.get('prev_high')
+        if not pd.isna(prev_high_raw):
+            if saved_prev_high and saved_prev_high > 0:
+                live_prev_high = max(saved_prev_high, prev_high_raw)
+            else:
+                live_prev_high = prev_high_raw
+        else:
+            live_prev_high = saved_prev_high
 
         pct_from_scan = (
             (current_price - base_price) / base_price * 100
@@ -469,17 +622,79 @@ def run_once(decisions_date: Optional[str] = None,
             score_str = f"{row_score}/{row_score_max}" if row_score_max else str(row_score)
             progress_detail = f"score improved {prev_best_score} -> {score_str}"
 
+        # ── Compute confirmation pass count ──────────────────────────────────
+        # Tracks how many consecutive 5-min passes price has been above prev_high
+        # (only relevant before first BREAKOUT alert)
+        prev_confirm_count = prev.get('confirm_count', 0)
+        if (not is_first_check
+                and live_prev_high is not None
+                and not prev.get('alerted_breakout', False)):
+            if current_price > live_prev_high:
+                confirm_count = prev_confirm_count + 1
+            else:
+                confirm_count = 0   # dropped back below — reset
+        else:
+            confirm_count = prev_confirm_count  # already alerted or first check
+
+        # ── Detect EXIT (post-breakout trade tracking) ─────────────────────
+        exit_reason   = ''
+        exit_trade_ret = 0.0
+        prev_in_trade   = prev.get('in_trade', False)
+        prev_entry      = prev.get('entry_price', 0)
+        prev_bo_high    = prev.get('post_bo_high', 0)
+
+        if prev_in_trade and prev_entry and prev_entry > 0:
+            cur_bo_high  = max(prev_bo_high, current_price)
+            # Scalping: fixed-cent stops; otherwise percentage-based
+            if SCALP_TRAIL_CENTS > 0:
+                trail_stop = cur_bo_high - (SCALP_TRAIL_CENTS / 100.0)
+                fail_level = (live_prev_high or prev_entry) - (SCALP_FAIL_CENTS / 100.0)
+            else:
+                trail_stop = cur_bo_high * (1 - TRAIL_STOP_PCT / 100)
+                fail_level = (live_prev_high or prev_entry) * (1 - EXIT_BELOW_PCT / 100)
+
+            if current_price < fail_level:
+                exit_reason = 'FAILED'
+            elif current_price < trail_stop and cur_bo_high > prev_entry * 1.003:
+                exit_reason = 'TRAIL_STOP'
+
+            if exit_reason:
+                exit_trade_ret = (current_price - prev_entry) / prev_entry * 100
+
         # ── Detect events ─────────────────────────────────────────────────────
         event = 'OK'
 
-        breakout_crossed = (
+        if exit_reason:
+            event = 'EXIT'
+        elif (
             not is_first_check
             and live_prev_high is not None
-            and current_price > live_prev_high
             and not prev.get('alerted_breakout', False)
-        )
-        if breakout_crossed:
-            event = 'BREAKOUT'
+            and confirm_count >= CONFIRM_PASSES
+        ):
+            # ── Quality filters (data-driven from backtest comparison) ────
+            bo_ok = True
+
+            # Pipeline-stage filter: skip early-stage rejections (no setup context)
+            if MIN_STAGE_BREAKOUT > 0:
+                sym_stage = STAGE_DEPTH.get(reason_code, -1)
+                if sym_stage < MIN_STAGE_BREAKOUT:
+                    bo_ok = False
+
+            # Min distance above level
+            if bo_ok and MIN_BREAKOUT_PCT > 0 and live_prev_high > 0:
+                dist_pct = (current_price - live_prev_high) / live_prev_high * 100
+                if dist_pct < MIN_BREAKOUT_PCT:
+                    bo_ok = False
+
+            # Volume confirmation: last bar vol vs 20-bar trailing avg
+            if bo_ok and VOL_MULT > 1.0:
+                vr = vol_ratios.get(symbol, 0)
+                if vr < VOL_MULT:
+                    bo_ok = False
+
+            if bo_ok:
+                event = 'BREAKOUT'
         elif progress_detected:
             event = 'PROGRESS'
         elif (
@@ -513,6 +728,29 @@ def run_once(decisions_date: Optional[str] = None,
         if progress_detected and prev_reason and reason_code:
             progress_alerted_list.append(f"{prev_reason}->{reason_code}")
 
+        # ── Trade tracking state + Scalp Portfolio auto-trade ────────────
+        if event == 'BREAKOUT':
+            in_trade     = True
+            entry_price  = current_price
+            post_bo_high = current_price
+            # Auto-buy into scalp portfolio
+            stop_px   = current_price - (SCALP_FAIL_CENTS / 100.0)
+            target_px = current_price + (SCALP_TRAIL_CENTS * 2 / 100.0)
+            sp.add_position(
+                symbol, current_price, stop_px, target_px,
+                vol_ratio=vol_ratios.get(symbol, 0),
+            )
+        elif event == 'EXIT':
+            in_trade     = False
+            entry_price  = 0
+            post_bo_high = 0
+            # Auto-sell from scalp portfolio
+            sp.close_position(symbol, current_price, reason=exit_reason.lower())
+        else:
+            in_trade     = prev_in_trade
+            entry_price  = prev_entry
+            post_bo_high = max(prev_bo_high, current_price) if prev_in_trade else 0
+
         state[symbol] = {
             'base_price':        base_price,
             'prev_high':         live_prev_high,
@@ -526,6 +764,10 @@ def run_once(decisions_date: Optional[str] = None,
             'alerted_surge_at':  f'{pct_since_last:.0f}' if event == 'SURGE' else prev.get('alerted_surge_at', ''),
             'best_score':        new_best_score,
             'progress_alerted':  progress_alerted_list,
+            'in_trade':          in_trade,
+            'entry_price':       entry_price,
+            'post_bo_high':      post_bo_high,
+            'confirm_count':     0 if (event == 'BREAKOUT' or already_above) else confirm_count,
         }
 
         # ── Build CSV row ─────────────────────────────────────────────────────
@@ -559,9 +801,23 @@ def run_once(decisions_date: Optional[str] = None,
                 'progress_detail':  progress_detail,
                 'score':            f'{row_score}/{row_score_max}' if row_score else None,
             }
+            # Add EXIT-specific fields
+            if event == 'EXIT':
+                alert['exit_reason']   = exit_reason
+                alert['trade_ret_pct'] = exit_trade_ret
+                alert['entry_price']   = prev_entry
+                alert['post_bo_high']  = prev_bo_high
+            if event == 'BREAKOUT':
+                alert['vol_ratio'] = vol_ratios.get(symbol, 0)
             alerts.append(alert)
             if event == 'PROGRESS':
                 logger.info(f"  ★ PROGRESS   {symbol:<8} {progress_detail}")
+            elif event == 'EXIT':
+                logger.info(
+                    f"  ★ EXIT       {symbol:<8} "
+                    f"${current_price:.2f}  ret={exit_trade_ret:+.2f}%  "
+                    f"reason={exit_reason}"
+                )
             else:
                 logger.info(
                     f"  ★ {event:<10} {symbol:<8} "
@@ -591,9 +847,11 @@ def run_once(decisions_date: Optional[str] = None,
         f"{', '.join(a['event'] + ':' + a['symbol'] for a in alerts) or 'none'}"
     )
 
-    # ── Send Discord ──────────────────────────────────────────────────────────
-    if alerts:
-        _send_discord_alerts(alerts)
+    # ── Send Discord + Telegram (only actionable BREAKOUT alerts) ──────────
+    notify_alerts = [a for a in alerts if a['event'] == 'BREAKOUT']
+    if notify_alerts:
+        _send_discord_alerts(notify_alerts)
+        _send_telegram_alerts(notify_alerts)
 
     return alerts
 
@@ -621,6 +879,7 @@ def print_summary(date_str: Optional[str] = None) -> None:
     print(f'  Total checks : {len(df)}')
     print(f'  Events       : {(df["event"] != "OK").sum()}')
     print(f'  BREAKOUTs    : {(df["event"] == "BREAKOUT").sum()}')
+    print(f'  EXITs        : {(df["event"] == "EXIT").sum()}')
     print(f'  PROGRESSes   : {(df["event"] == "PROGRESS").sum()}')
     print(f'  ACCEPTEDs    : {(df["event"] == "ACCEPTED").sum()}')
     print(f'  SURGEs       : {(df["event"] == "SURGE").sum()}')

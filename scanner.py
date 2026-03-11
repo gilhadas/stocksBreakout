@@ -553,6 +553,11 @@ class BreakoutDetector:
         
         if mode_name == 'scalping' and spread_pct is not None:
             signal['Spread%'] = round(spread_pct, 2)
+        if mode_name in ('scalping', 'daytrade'):
+            signal['EMA9']      = round(float(latest.get('EMA_9', 0)), 2) if not pd.isna(latest.get('EMA_9', np.nan)) else ''
+            signal['EMA21']     = round(float(latest.get('EMA_21', 0)), 2) if not pd.isna(latest.get('EMA_21', np.nan)) else ''
+            signal['StochRSI_K'] = round(float(latest.get('StochRSI_K', 0)), 1) if not pd.isna(latest.get('StochRSI_K', np.nan)) else ''
+            signal['StochRSI_D'] = round(float(latest.get('StochRSI_D', 0)), 1) if not pd.isna(latest.get('StochRSI_D', np.nan)) else ''
         
         logger.info(
             f"🚀 {symbol} {mode_name.upper()} @ ${latest['close']:.2f} | "
@@ -564,11 +569,18 @@ class BreakoutDetector:
     def _check_trend(self, latest, df, cfg, mode_name: str) -> bool:
         """Check trend condition"""
         if cfg['trend_type'] == 'VWAP':
-            return (
+            vwap_ok = (
                 not pd.isna(latest.get('vwap')) and
                 latest['close'] > latest['vwap'] and
                 latest['vwap'] > df['vwap'].iloc[-2]
             )
+            # Scalping: also require EMA 9 > EMA 21 (fast uptrend)
+            if mode_name == 'scalping':
+                ema9  = latest.get('EMA_9', np.nan)
+                ema21 = latest.get('EMA_21', np.nan)
+                if not pd.isna(ema9) and not pd.isna(ema21):
+                    return vwap_ok and ema9 > ema21
+            return vwap_ok
         return latest['close'] > latest['Trend_Line']
     
     def _check_vwap_position(self, latest, mode_name: str) -> bool:
@@ -625,6 +637,21 @@ class BreakoutDetector:
                       pattern_target: float = 0.0,
                       vcp_data: dict = None) -> tuple:
         """Calculate stop loss, target, and risk/reward ratio"""
+        # Scalping: fixed-cent stops (1-2¢) instead of ATR-based
+        sl_fixed = cfg.get('sl_fixed_cents', 0)
+        tp_fixed = cfg.get('tp_fixed_cents', 0)
+        if mode_name == 'scalping' and sl_fixed > 0:
+            sl = latest['close'] - (sl_fixed / 100.0)
+            tp = latest['close'] + (tp_fixed / 100.0) if tp_fixed > 0 else latest['close'] + (sl_fixed * 3 / 100.0)
+            if spread_pct is not None:
+                spread_price = latest['close'] * (spread_pct / 100.0)
+                entry_eff = latest['close'] + spread_price * 0.5
+                sl_eff = sl - spread_price * 0.5
+                rr = (tp - entry_eff) / max(entry_eff - sl_eff, 1e-6)
+            else:
+                rr = (tp - latest['close']) / max(latest['close'] - sl, 1e-6)
+            return sl, tp, rr
+
         atr_stop = latest['close'] - (cfg['sl_mult'] * latest['ATR'])
 
         # Structural stop: use swing low of last 20 bars (take the higher/tighter stop)
@@ -662,7 +689,7 @@ class BreakoutDetector:
             rr = (tp - entry_eff) / max(entry_eff - sl_eff, 1e-6)
         else:
             rr = (tp - latest['close']) / max(latest['close'] - sl, 1e-6)
-        
+
         return sl, tp, rr
     
     def _collect_rejections(self, price_break, vol_confirm, trend_ok, rs_ok,
@@ -713,9 +740,19 @@ class BreakoutDetector:
             if len(df['vwap']) >= 5 and not pd.isna(df['vwap'].iloc[-5]):
                 vwap_momentum = (latest['vwap'] - df['vwap'].iloc[-5]) / max(latest['ATR'], 1e-6)
                 if latest['Vol_Ratio'] > 3.0 and vwap_momentum > 0.5:
+                    # Bonus: Stochastic RSI not overbought → cleaner entry
+                    stoch_k = latest.get('StochRSI_K', 50)
+                    if not pd.isna(stoch_k) and stoch_k < 80:
+                        return 'GOLD'
                     return 'PREMIUM'
-            return 'HIGH'
-        
+            # EMA 9 > EMA 21 + vol expansion → HIGH+
+            ema9  = latest.get('EMA_9', np.nan)
+            ema21 = latest.get('EMA_21', np.nan)
+            if (not pd.isna(ema9) and not pd.isna(ema21)
+                    and ema9 > ema21 and latest['Vol_Ratio'] > 1.5):
+                return 'HIGH'
+            return 'STANDARD'
+
         return 'PREMIUM' if has_gap_up else 'HIGH'
 
     # --- Scoring weights for each check ---

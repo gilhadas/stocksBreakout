@@ -379,6 +379,9 @@ def refresh_prices() -> dict:
             still_open.append(p)
 
     data['positions'] = still_open
+    # Realized P&L flows back into capital
+    for t in data['closed'][-len(closed_now):]:
+        data['capital'] += t['pnl']
     _save(data)
     return {'closed': closed_now, 'updated': len(prices), 'data': data}
 
@@ -535,6 +538,9 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
             still_open.append(p)
 
     data['positions'] = still_open
+    # Realized P&L flows back into capital
+    for t in data['closed'][-len(closed_now):] if closed_now else []:
+        data['capital'] += t['pnl']
     _save(data)
     return {'closed': closed_now, 'checked': len(data['positions']) + len(closed_now),
             'data': data}
@@ -660,6 +666,8 @@ def close_position(symbol: str, exit_price: float, reason: str = 'manual') -> di
             still_open.append(p)
 
     data['positions'] = still_open
+    if closed_rec:
+        data['capital'] += closed_rec['pnl']  # realized P&L flows back into capital
     _save(data)
     return closed_rec or {}
 
