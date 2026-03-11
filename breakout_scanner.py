@@ -440,13 +440,22 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             and s.get('Type') == 'BOUNCE'
             and s not in v9c_signals
         ]
-        notify_signals = v9c_signals + bounce_signals
+        # CONTINUATION and SMA20_CROSS signals (no Minervini requirement)
+        alt_signals = [
+            s for s in results
+            if s.get('Quality') in ('GOLD', 'PREMIUM')
+            and s.get('Type') in ('CONTINUATION', 'SMA20_CROSS')
+            and s not in v9c_signals and s not in bounce_signals
+        ]
+        notify_signals = v9c_signals + bounce_signals + alt_signals
         if notify_signals:
             n_v9c   = len(v9c_signals)
             n_bnc   = len(bounce_signals)
+            n_alt   = len(alt_signals)
             tag_parts = []
             if n_v9c:  tag_parts.append(f"{n_v9c} V9-C")
             if n_bnc:  tag_parts.append(f"{n_bnc} BOUNCE")
+            if n_alt:  tag_parts.append(f"{n_alt} ALT")
             tag = ' + '.join(tag_parts)
             notifier.send_all(
                 subject=f"{subject_prefix}{args.mode.upper()} Signals [{watchlist_name}]"
@@ -775,7 +784,9 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
         }
         dashboard.append(row)
 
-        if status != 'OK':
+        # Only alert on actionable statuses (HIT_STOP, NEAR_STOP)
+        # FALLING is logged in dashboard but doesn't trigger notification
+        if status in ('HIT_STOP', 'NEAR_STOP'):
             alerts.append(row)
 
     # Display dashboard
@@ -793,10 +804,17 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
         print(df_display.to_string(index=False))
 
     # Send alerts if positions need attention
-    # Track which alerts we've already sent to avoid spam
+    # Track which alerts we've already sent to avoid spam (daily reset)
     from pathlib import Path
-    alert_history_file = Path('scanner_output/.monitor_alerts.txt')
+    from zoneinfo import ZoneInfo
+    _today_str = datetime.now(ZoneInfo('America/New_York')).strftime('%Y%m%d')
+    alert_history_file = Path(f'scanner_output/.monitor_alerts_{_today_str}.txt')
     alert_history_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Cleanup old alert history files (keep today only)
+    for old_f in Path('scanner_output').glob('.monitor_alerts*.txt'):
+        if old_f.name != alert_history_file.name:
+            old_f.unlink(missing_ok=True)
 
     # Load history of previously alerted symbols
     alerted_symbols = set()
@@ -1237,6 +1255,12 @@ Examples:
         action='store_true',
         help='Enable DEBUG logging — prints per-ticker skip reasons to the log'
     )
+    parser.add_argument(
+        '--cache-file',
+        type=str,
+        metavar='PATH',
+        help='Load market data from cache file (used by job_launcher.py for batch execution)'
+    )
 
     args = parser.parse_args()
 
@@ -1266,6 +1290,21 @@ Examples:
 
     # Attach structured CSV handler for SCAN-level decisions (learning loop)
     attach_scan_csv_handler()
+
+    # Load cached market data if provided (from job_launcher.py batch execution)
+    cached_market_data = None
+    if args.cache_file:
+        import pickle
+        try:
+            with open(args.cache_file, 'rb') as f:
+                cached_market_data = pickle.load(f)
+            logger.info(f"✓ Loaded cached market data from {args.cache_file}")
+            logger.info(f"  Cached at: {cached_market_data.timestamp}")
+            logger.info(f"  Market condition: {cached_market_data.market_condition.upper()}")
+            logger.info(f"  Symbols available: {len(cached_market_data.symbols)}")
+        except Exception as e:
+            logger.warning(f"Failed to load cache from {args.cache_file}: {e}")
+            logger.info("Will proceed with fresh data fetch")
 
     # Get timeframe
     if args.tf:
@@ -1393,6 +1432,10 @@ Examples:
     try:
         # Create orchestrator with yfinance fallback if IB unavailable
         orchestrator = ScannerOrchestrator(ib, yf_fallback=yf_fallback)
+
+        # Inject cached market data if provided (from job_launcher.py batch execution)
+        if cached_market_data:
+            orchestrator.market_data.set_cached_data(cached_market_data)
 
         # Load exit positions from portfolio.json when:
         # 1. --exit-from-portfolio is explicitly set, OR

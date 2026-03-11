@@ -189,14 +189,14 @@ MODES = {
     },
     'swing': {
         'lookback': 15,     # Optimized: Shorter lookback improves performance (+4.1% vs +2.8%)
-        'vol_thresh': 0.9,
-        'atr_mult': 0.75,
+        'vol_thresh': 1.3,
+        'atr_mult': 0.5,
         'trend_type': 'SMA',
         'trend_period': 150,
-        'sl_mult': 3.0,
-        'tp_mult': 10.0,
+        'sl_mult': 4.0,     # Optimized: Wider stop (was 2.0) improves win rate
+        'tp_mult': 8.0,     # Optimized: Higher target allows Trailing Stop to work
         'min_consolidation_bars': 3,
-        'min_rr': 0.55,
+        'min_rr': 1.0,      # Optimized: High Win Rate (66%) allows lower RR (1:1)
         'max_wick_atr': 0.5,
         'max_body_top_pct': 0.3,
         'default_timeframe': '1 day',

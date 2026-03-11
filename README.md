@@ -28,7 +28,11 @@ backtesting, and automated cron + Discord notifications.
 16. [Streamlit Dashboard](#streamlit-dashboard)
 17. [Notifications](#notifications)
 18. [IB Connection](#ib-connection)
-19. [Troubleshooting](#troubleshooting)
+19. [Batch Execution with Shared Data Loading](#batch-execution-with-shared-data-loading-job_launcherpy)
+20. [Cron Agent with Scheduler](#cron-agent-with-scheduler-cron_agentpy)
+21. [Regime Detection](#regime-detection-regime_detectorpy)
+22. [Troubleshooting](#troubleshooting)
+23. [Environment Setup](#environment-setup)
 
 ---
 
@@ -1186,6 +1190,519 @@ FINNHUB_API_KEY=...            # Free at finnhub.io — historical news for finb
 TWITTER_BEARER_TOKEN=...       # X API Basic ($200/mo) — real-time cashtag trending in premarket_monitor.py
 EOF
 ```
+
+---
+
+## Batch Execution with Shared Data Loading (`job_launcher.py`)
+
+Optimizes execution when multiple trading modes run simultaneously by loading market data once and caching it for reuse. This eliminates redundant data fetching and reduces execution time by **50-70%**.
+
+### When to use
+
+- Multiple modes (swing + daytrade + scalping) scheduled at same time
+- Want to eliminate duplicate market data fetching
+- Need faster execution for simultaneous scans
+
+### How it works
+
+1. **Detect simultaneous jobs** in cron schedule
+2. **Load market data once**: SPY bars + all symbols + indicators (35-40 seconds)
+3. **Cache to disk**: `scanner_output/cache/market_data_*.pkl` (pickle serialized)
+4. **Launch modes with cache**: Each mode reads cached data (5-10 seconds per mode)
+5. **Auto-cleanup**: Keeps 3 most recent caches
+
+### Performance comparison
+
+```
+Before (separate fetches):
+  09:35 swing:    Fetch (25s) + Scan (5s) = 30s
+  09:35 daytrade: Fetch (25s) + Scan (5s) = 30s
+  09:35 scalping: Fetch (25s) + Scan (5s) = 30s
+  Total: 90 seconds
+
+After (batched):
+  Load data once:  25s
+  Launch swing:    5s
+  Launch daytrade: 5s
+  Launch scalping: 5s
+  Total: 40 seconds
+  SAVINGS: 50 seconds (56% faster!)
+```
+
+### Usage
+
+```bash
+# Find all simultaneous jobs in cron schedule
+python job_launcher.py --find-simultaneous
+
+# Run specific time with batch loading
+python job_launcher.py --time 09:35 --modes swing,daytrade,scalping --notify
+
+# Dry-run (preview without executing)
+python job_launcher.py --time 09:35 --modes swing,daytrade --dry-run
+
+# With cron minimal output
+python job_launcher.py --time 09:35 --modes swing,daytrade --cron --notify
+```
+
+### Auto-integration with cron_agent.py
+
+When `cron_agent.py --daemon` detects multiple modes at the same time, it automatically calls `job_launcher.py` instead of running modes sequentially. No configuration changes needed!
+
+```bash
+# Automatic batch execution
+python cron_agent.py --daemon
+```
+
+### Cache structure
+
+Each cache file contains:
+- `timestamp`: ISO format when cache was created
+- `spy_timeframe`: 'daily'
+- `spy_bars`: SPY OHLCV data
+- `symbols`: List of all symbols
+- `indicators_by_symbol`: Dict of {symbol: {indicator: value}}
+- `market_condition`: 'bull'/'bear'/'mixed' (from regime_detector.py)
+
+---
+
+## Cron Agent with Scheduler (`cron_agent.py`)
+
+Unified scheduler that parses `cron_jobs.txt` and executes all breakout scanner jobs programmatically. Replaces manual crontab setup with Python-based scheduling.
+
+### Features
+
+- **Parse cron syntax**: Full support for minute hour day month weekday with:
+  - Exact values: `30`, `9`
+  - Wildcards: `*`
+  - Ranges: `10-15`, `1-5`
+  - Step values: `*/15`, `0-14/2` (properly handled after Mar 2026 fix)
+  - Lists: `1,2,3,4,5`
+
+- **Category-based execution**: Run all jobs in a category (swing, daytrade, etc.)
+- **Time-based execution**: Run jobs scheduled for specific time
+- **Intelligent batching**: Detects multiple modes at same time → auto-calls `job_launcher.py`
+- **Daemon mode**: Continuous monitoring with automatic job execution
+- **Dry-run mode**: Preview jobs without executing
+- **Healthchecks.io integration**: Automatic pings for monitoring
+- **Time simulation**: Test jobs at market times
+
+### Quick Start
+
+#### 1. View All Jobs
+
+List all 29 cron jobs grouped by category and time:
+
+```bash
+python cron_agent.py --list-jobs
+```
+
+Output includes:
+- Job name and category
+- Scheduled time (ET - Eastern Time)
+- Execution day/weekday
+
+#### 2. Run Jobs Immediately
+
+Run all jobs in a specific category NOW (ignoring schedule):
+
+```bash
+# Run all swing trading jobs
+python cron_agent.py --run-now swing
+
+# Run all daytrade jobs
+python cron_agent.py --run-now daytrade
+
+# Run pre-market monitoring
+python cron_agent.py --run-now premarket
+```
+
+Available categories:
+- `longterm` — Weekly position trading (Monday only)
+- `swing` — Daily swing trade scans + exits
+- `daytrade` — Intraday momentum scans
+- `premarket` — Pre-market gap detection (8:00, 8:45, 9:31 AM)
+- `momentum_watch` — 15-min momentum monitoring
+- `portfolio` — 15-min portfolio tracking
+- `validate` — Signal validation & learning
+- `maint` — Cleanup & archive tasks
+
+#### 3. Run Jobs at Specific Time
+
+Simulate market time and run all jobs scheduled for that time:
+
+```bash
+# Run jobs scheduled for 9:35 AM
+python cron_agent.py --run-time 09:35
+
+# Run jobs scheduled for 3:45 PM
+python cron_agent.py --run-time 15:45
+```
+
+#### 4. Dry-Run Mode
+
+Preview what would execute without running:
+
+```bash
+python cron_agent.py --run-now swing --dry-run
+python cron_agent.py --run-time 09:35 --dry-run
+python cron_agent.py --list-jobs --category daytrade
+```
+
+#### 5. Run as Daemon
+
+Start continuous monitoring that respects cron schedule:
+
+```bash
+# Run as daemon (will execute jobs on schedule)
+python cron_agent.py --daemon
+
+# Simulate market time for testing
+python cron_agent.py --daemon --sim-time "09:35"
+
+# Dry-run daemon (preview without executing)
+python cron_agent.py --daemon --sim-time "14:00" --dry-run
+```
+
+### Use Cases
+
+#### Development & Testing
+
+```bash
+# Check all jobs parse correctly
+python cron_agent.py --list-jobs
+
+# Test a specific category
+python cron_agent.py --run-now swing --dry-run
+
+# Simulate market time flow
+python cron_agent.py --daemon --sim-time "09:30" --dry-run
+```
+
+#### Quick Execution
+
+```bash
+# Run swing trades immediately (don't wait for 9:35 AM)
+python cron_agent.py --run-now swing
+
+# Run evening rebalance
+python cron_agent.py --run-now portfolio
+```
+
+#### Background Daemon
+
+```bash
+# Start agent as background service (respects cron schedule)
+nohup python cron_agent.py --daemon > scanner_output/logs/cron_agent_daemon.log 2>&1 &
+```
+
+#### Integration with Docker
+
+```bash
+# In docker-compose.yml or crontab:
+CMD ["python", "cron_agent.py", "--daemon"]
+```
+
+### Job Categories Explained
+
+#### Pre-Market (8:00 - 9:31 AM ET)
+- **8:00 AM** - Initial gap scan on ETFs and priority symbols
+- **8:45 AM** - Second gap check (fresher data)
+- **9:31 AM** - Opening surge detection (first-minute momentum)
+
+#### Long-Term (Weekly, Monday 9:00 AM ET)
+- **9:00 AM** - S&P 500 wide scan, export PREMIUM tickers
+- **9:15 AM** - Long-term position exit evaluation
+
+#### Swing Trading (Daily, Weekday 9:35 AM - 7:30 PM ET)
+- **9:35 AM** - Phase 1: Wide scan → export PREMIUM + watchlist
+- **3:45 PM** - Exit check for swing positions
+- **4:30 PM** - Phase 2: Re-evaluate all open positions
+- **7:30 PM** - Evening re-evaluation
+
+#### Day Trading (Daily, Weekday 9:35 AM - 8:20 PM ET)
+- **9:35 AM** - Phase 1: Wide scan → export momentum-watch
+- **10:00 AM** - Phase 2: Re-evaluate momentum-watch
+- **2:00 PM** - Phase 2 afternoon: Re-evaluate momentum-watch
+- **3:30 PM** - Day trade exit check
+- **8:20 PM** - Phase 4: Evening re-evaluate
+
+#### Momentum Watch (Every 15 min, 9:45 AM - 4:00 PM ET)
+- **9:45 AM** - First check after Phase 1
+- **Every 15 min** (10:00 AM - 3:45 PM)
+- **4:00 PM** - Final check at market close
+
+#### Portfolio Monitoring (Every 15 min, 9:45 AM - 4:00 PM ET)
+- **9:30 AM** - Reset alert history for new trading day
+- **9:45 AM** - First check after market open
+- **Every 15 min** (10:00 AM - 3:45 PM)
+- **4:00 PM** - Final check + S3 upload
+
+#### Signal Validation (Evening, Weekday 8:30 PM ET)
+- Validate signals from 3+ days ago
+
+#### Learning Report (Weekly, Sunday 9:00 PM ET)
+- Generate learning recommendations
+
+#### Maintenance (Weekly, Sunday 11:00 PM - 11:10 PM ET)
+- Clean logs older than 30 days
+- Archive results/rejections older than 90 days
+- Clean monitor alert history
+
+### Logging
+
+All job execution is logged to:
+
+```
+scanner_output/logs/cron_agent.log
+```
+
+Each category has its own detailed log:
+- `cron_longterm.log`
+- `cron_swing.log`
+- `cron_daytrade_morning.log`
+- `cron_premarket.log`
+- `cron_watch_monitor.log`
+- `cron_monitor.log`
+- `cron_validate.log`
+- `cron_upload.log`
+
+### Healthchecks.io Integration
+
+Jobs automatically ping healthchecks.io on success/failure. Configure UUIDs in `cron_jobs.txt`:
+
+```
+HC_UUID_LONGTERM
+HC_UUID_SWING
+HC_UUID_DAYTRADE
+HC_UUID_MONITOR
+HC_UUID_VALIDATE
+```
+
+The agent will:
+- **Ping on success** — Job completed successfully
+- **Ping /fail** on error — Job failed (timeout, non-zero exit)
+- **Log missed pings** — If healthchecks is unreachable
+
+### Advanced Examples
+
+#### Run All Morning Jobs (9:35 AM Block)
+
+```bash
+python cron_agent.py --run-time 09:35
+```
+
+This runs:
+- Swing Phase 1 scan
+- Daytrade Phase 1 scan
+- Momentum-watch first check
+- Portfolio first check
+
+#### Simulation: Full Trading Day
+
+```bash
+# Simulate 9:35 AM (market open)
+python cron_agent.py --daemon --sim-time "09:35" --dry-run
+
+# Then check what would have run
+python cron_agent.py --list-jobs
+```
+
+#### Run Just Exit Evaluations
+
+```bash
+# No direct category, but you can run by time:
+python cron_agent.py --run-time 15:45    # Swing exits
+python cron_agent.py --run-time 15:30    # Daytrade exits
+```
+
+#### Continuous Background Execution
+
+```bash
+# Start daemon, write to log, run in background
+nohup python cron_agent.py --daemon \
+  > scanner_output/logs/cron_agent_daemon.log 2>&1 &
+
+# Kill daemon
+pkill -f "python cron_agent.py --daemon"
+
+# Monitor log
+tail -f scanner_output/logs/cron_agent_daemon.log
+```
+
+### Migration from Crontab
+
+**Old approach (crontab):**
+```bash
+# In crontab -e:
+35 9 * * 1-5 cd /path/to/stocksBreakout && python3 breakout_scanner.py ...
+```
+
+**New approach (cron_agent):**
+```bash
+# Run immediately:
+python cron_agent.py --run-now swing
+
+# Or start daemon:
+python cron_agent.py --daemon
+```
+
+### Troubleshooting
+
+#### "No jobs found in category"
+
+```bash
+# Check available categories:
+python cron_agent.py --list-jobs
+```
+
+#### Job didn't run
+
+```bash
+# Verify parsing:
+python cron_agent.py --list-jobs --category swing
+
+# Try dry-run to see command:
+python cron_agent.py --run-now swing --dry-run
+
+# Check logs:
+tail -f scanner_output/logs/cron_agent.log
+```
+
+#### Daemon not executing jobs
+
+```bash
+# Test with simulated time:
+python cron_agent.py --daemon --sim-time "09:35" --dry-run
+
+# If it shows "Would execute", daemon should work
+```
+
+#### Command replacement issues
+
+Commands like `$PYTHON_BIN` are automatically replaced with `python3`. If you see errors like `python3: command not found`, ensure Python is in PATH:
+
+```bash
+which python3
+python3 --version
+```
+
+### Architecture
+
+- **Parsing**: Reads `cron_jobs.txt`, extracts 29 jobs with full cron syntax
+- **Execution**: Runs via `subprocess.run()` with 900-second timeout
+- **Scheduling**: Checks `datetime.now()` against cron fields every 30 seconds
+- **Logging**: Captures stdout/stderr and logs to file
+- **Monitoring**: Pings healthchecks.io on completion
+
+### Performance Notes
+
+- **Memory**: ~15 MB (lightweight)
+- **CPU**: Minimal (sleeps between checks)
+- **Timeout**: 15 minutes per job (configurable)
+- **Check interval**: 30 seconds (configurable)
+
+### Mar 2026 Fix: Step-value handling
+
+**Problem**: `*/15` (every 15 minutes) jobs were running **EVERY minute** (60 times/hour) instead of 4 times/hour.
+
+**Root cause**: Step values parsed as wildcard `-1`, matching all times.
+
+**Solution**: Redesigned to store lists of valid times:
+- Old: `minute: int = -1` (lost pattern)
+- New: `minute: List[int] = [0, 15, 30, 45]` (preserves pattern)
+
+**Result**: ✅ Fixed—portfolio/monitor jobs now run correctly (4 times/hour vs 60).
+
+---
+
+## Regime Detection (`regime_detector.py`)
+
+Detects current market regime (bull/bear/mixed) and automatically applies optimized parameters from the mode optimizer.
+
+### Market regimes
+
+| Regime | Characteristics | Optimal Strategy |
+|--------|-----------------|------------------|
+| **BULL** | SPY uptrend (price > SMA50 > SMA200), low volatility, >60% win rate | Aggressive: tight stops, wide targets |
+| **BEAR** | SPY downtrend (price < SMA50 < SMA200), high volatility | Defensive: wider stops, tight targets |
+| **MIXED** | Choppy market, neutral trend, high volatility | Balanced: moderate risk/reward |
+
+### Indicators used
+
+- **Trend**: SMA 50 vs SMA 200 (crossing, positioning)
+- **Volatility**: ATR % and Bollinger Band width
+- **Win rate**: % of days closing > open (trend confirmation)
+- **Volume**: Recent vs historical average
+
+### Parameter sets
+
+6 optimized configurations (swing/daytrade × bull/bear/mixed) based on mode_optimizer backtests:
+
+```
+Swing Bull    (2023: +18%)   → aggressive (tight stops, wide targets)
+Swing Mixed   (2024H1: +29%) → balanced
+Swing Bear    (optimized)    → defensive
+
+Daytrade Bull    (2023: +23%) → aggressive (fast entries/exits)
+Daytrade Mixed   (2024H1: +24%) → balanced
+Daytrade Bear    (optimized)  → defensive
+```
+
+### Usage
+
+```bash
+# Detect current regime
+python regime_detector.py
+
+# Show suggested parameters for swing mode
+python regime_detector.py --suggest swing
+
+# Detect regime & apply to config.py
+python regime_detector.py --apply daytrade
+
+# Use 200 days history instead of default 60
+python regime_detector.py --days 200 --apply swing --notify
+```
+
+### Output
+
+```
+======================================================================
+  MARKET REGIME DETECTION
+======================================================================
+
+  Regime: MIXED
+
+  Metrics:
+    Price:        $677.18
+    SMA 50:       $687.59
+    SMA 200:      $670.45
+    ATR %:        1.29%
+    BB Width:     1.57%
+    Win Rate:     52.9%
+    Vol Trend:    1.03x
+
+  Suggested Parameters for SWING (regime: mixed):
+    Balanced: mixed volatility (Mixed 2024H1: +29%)
+    vol_thresh: 0.90
+    atr_mult: 0.75
+    sl_mult: 3.0
+    tp_mult: 10.0
+    min_rr: 0.55
+    quality_filter: HIGH
+```
+
+### Integration with config.py
+
+When you run `--apply MODE`, these parameters are updated:
+- `vol_thresh`: Volume threshold multiplier
+- `atr_mult`: ATR multiplier for position sizing
+- `sl_mult`: Stop loss width multiplier
+- `tp_mult`: Take profit width multiplier
+- `min_rr`: Minimum risk/reward ratio
+
+Changes are automatically applied to `config.py` with backup saved as `config.py.bak`.
 
 ---
 

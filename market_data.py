@@ -22,6 +22,7 @@ class MarketDataHandler:
         self.ib_available = ib_connection is not None
         self.yf_fallback = yf_fallback
         self.spy_cache = {}
+        self.cached_market_data = None  # Set via set_cached_data() from job_launcher
 
         if yf_fallback:
             # Prefer Alpaca (real-time free data) over yfinance (15-min delayed)
@@ -37,7 +38,13 @@ class MarketDataHandler:
                 logger.info("📊 Fallback data source: yfinance")
         else:
             self.data_source_name = "Interactive Brokers"
-    
+
+    def set_cached_data(self, cached_data):
+        """Set cached market data from job_launcher.py batch execution."""
+        self.cached_market_data = cached_data
+        if cached_data:
+            logger.info(f"✓ Market data cache activated: {len(cached_data.symbols)} symbols")
+
     async def get_historical_data(self, symbol: str, timeframe: str,
                                   exchange: str = 'SMART',
                                   currency: str = 'USD') -> Optional[pd.DataFrame]:

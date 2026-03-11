@@ -323,10 +323,19 @@ def simulate(
     scan_start: str,
     scan_end: str,
     tp_as_trail: bool = False,
+    initial_capital: int = 1_000_000,
 ) -> dict | None:
     """
     Thin wrapper around run_simulation from enhanced_backtest.
     Returns the report dict or None if no signals.
+
+    Capital is set to $1M by default so the optimizer never hits the
+    "insufficient capital" constraint on any single trial — otherwise
+    whichever signals happen to fire first consume the budget and later
+    ones are silently skipped, biasing the objective score.
+    The 10% position sizing still applies (so max 10 concurrent positions),
+    but with $1M each position is $100K which is realistic for a fund.
+    Real-world simulations should use 100_000 instead.
     """
     if not signals:
         return None
@@ -336,7 +345,7 @@ def simulate(
     return run_simulation(
         signals, scan_start, scan_end,
         end_prices, historical,
-        initial_capital=100_000,
+        initial_capital=initial_capital,
         tp_as_trail=tp_as_trail,
         tp_trail_atr_mult=2.0,
     )

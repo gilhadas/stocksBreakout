@@ -193,22 +193,46 @@ STATUS_ICON = {
 
 NOTIFY_ON_TRANSITION = {
     # (prev_status, new_status): alert level
+    # Only notify on DOWNWARD transitions (actionable: consider closing)
     ('HOLDING',    'FADING'):    'warn',
     ('HOLDING',    'FAILED'):    'crit',
-    ('RECOVERING', 'FADING'):    'warn',
     ('RECOVERING', 'FAILED'):    'crit',
     ('FADING',     'FAILED'):    'crit',
-    # Recovery (positive transitions) — notify too so you don't close early
-    ('FADING',     'HOLDING'):   'info',
-    ('FAILED',     'HOLDING'):   'info',
-    ('FAILED',     'RECOVERING'): 'info',
+    # Recovery transitions removed — not actionable, caused 30%+ of noise
+    # ('RECOVERING', 'FADING'):  'warn',   # minor oscillation
+    # ('FADING',     'HOLDING'): 'info',   # bounce-back noise
+    # ('FAILED',     'HOLDING'): 'info',
+    # ('FAILED',  'RECOVERING'): 'info',
 }
 
+# Cooldown: suppress re-alerting the same symbol within N minutes
+ALERT_COOLDOWN_MINUTES = 60
 
-def should_notify(prev_status: str, new_status: str) -> tuple[bool, str]:
-    """Returns (should_notify, alert_level)."""
+
+def should_notify(prev_status: str, new_status: str,
+                  sym_state: dict | None = None,
+                  now_et: datetime | None = None) -> tuple[bool, str]:
+    """Returns (should_notify, alert_level). Applies cooldown check."""
     level = NOTIFY_ON_TRANSITION.get((prev_status, new_status))
-    return (level is not None, level or '')
+    if level is None:
+        return (False, '')
+
+    # Cooldown: skip if this symbol was alerted recently
+    if sym_state and now_et:
+        last_alert = sym_state.get('last_alerted_at')
+        if last_alert:
+            try:
+                last_dt = datetime.strptime(
+                    f"{now_et.strftime('%Y-%m-%d')} {last_alert}",
+                    '%Y-%m-%d %H:%M'
+                ).replace(tzinfo=NY_TZ)
+                elapsed = (now_et - last_dt).total_seconds() / 60
+                if elapsed < ALERT_COOLDOWN_MINUTES:
+                    return (False, '')
+            except (ValueError, TypeError):
+                pass
+
+    return (True, level)
 
 
 def build_discord_message(sym: str, info: dict, prev_status: str,
@@ -298,8 +322,8 @@ def main() -> None:
             f'{info["n_bars"]:>4}'
         )
 
-        # Detect transitions that warrant alerts
-        do_alert, level = should_notify(prev_status, status)
+        # Detect transitions that warrant alerts (with cooldown)
+        do_alert, level = should_notify(prev_status, status, prev_state, now_et)
         if do_alert:
             alerts.append({
                 'symbol':      sym,
@@ -312,6 +336,9 @@ def main() -> None:
         state[sym] = {
             'status':         status,
             'checked_at':     now_et.strftime('%H:%M'),
+            'last_alerted_at': (now_et.strftime('%H:%M')
+                                if do_alert
+                                else prev_state.get('last_alerted_at')),
             **info,
         }
 
@@ -329,17 +356,35 @@ def main() -> None:
             )
         print()
 
-    # ── Send Discord notifications ───────────────────────────────────────────
+    # ── Send Discord notifications (batched into ONE message) ────────────────
     send_notifications = args.notify and not args.dry_run
     if alerts and send_notifications:
         try:
             notifier = Notifier()
-            for a in alerts:
-                subject, body, color = build_discord_message(
-                    a['symbol'], a, a['prev_status'], now_et
+            # Group alerts by level for summary
+            crit_alerts = [a for a in alerts if a['level'] == 'crit']
+            warn_alerts = [a for a in alerts if a['level'] == 'warn']
+
+            time_str = now_et.strftime('%H:%M ET')
+            subject = f"📊 Watch Monitor: {len(alerts)} status change(s)  [{time_str}]"
+            if crit_alerts:
+                subject = f"🔴 Watch Monitor: {len(crit_alerts)} FAILED + {len(warn_alerts)} FADING  [{time_str}]"
+            elif warn_alerts:
+                subject = f"⚠️  Watch Monitor: {len(warn_alerts)} FADING  [{time_str}]"
+
+            # Build batched body: one line per symbol
+            lines = []
+            for a in sorted(alerts, key=lambda x: x['level'] == 'warn'):
+                icon = STATUS_ICON.get(a['status'], '?')
+                lines.append(
+                    f"{icon} **{a['symbol']}** {a['prev_status']}→{a['status']}  "
+                    f"${a['current']:.2f}  vsOpen {a['from_open_pct']:+.1f}%  "
+                    f"Fib {a.get('fib_label', 'n/a')}"
                 )
-                notifier.send_discord(subject, body)
-                print(f'  📢 Notified: {subject}')
+            body = '\n'.join(lines)
+
+            notifier.send_discord(subject, body)
+            print(f'  📢 Sent 1 batched notification ({len(alerts)} alerts)')
         except Exception as e:
             print(f'  ⚠️  Notification error: {e}')
     elif alerts and args.dry_run:

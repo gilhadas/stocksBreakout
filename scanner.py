@@ -1082,9 +1082,12 @@ class BreakoutDetector:
             return None
         
         # --- QUALITY ---
-        if passed >= 7:
+        # Bounce quality is more lenient than breakout — deep pullback recoveries
+        # often start on low volume (vol_strong rarely true at bounce start).
+        # Compensate by weighting the recovery indicators more.
+        if passed >= 6:
             quality = 'PREMIUM'
-        elif passed >= 6:
+        elif passed >= 5:
             quality = 'HIGH'
         else:
             quality = 'STANDARD'
@@ -1109,5 +1112,268 @@ class BreakoutDetector:
             f"🔄 BOUNCE {symbol} @ ${latest['close']:.2f} (+{daily_gain:.1%}) | "
             f"Down {drawdown:.0%} from high | Vol: {vol_ratio:.1f}x | RSI: {rsi:.0f} | {quality}"
         )
-        
+
+        return signal
+
+    def detect_continuation(self, df: pd.DataFrame, symbol: str, mode_name: str,
+                            timeframe: str, spy_perf: float = 0.0,
+                            **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        Detect multi-day continuation surges (Day 2/3 follow-through).
+
+        Catches stocks that already broke out and are surging for consecutive
+        days with sustained volume — the pattern the standard breakout detector
+        misses because prev_high keeps moving up.
+
+        Criteria:
+          1. 3+ consecutive green candles (closes > opens)
+          2. Each close higher than prior close (staircase pattern)
+          3. Cumulative move >= 8% over the streak
+          4. Sustained volume >= 1.2x average across the streak
+          5. Price above SMA 20 (short-term trend intact)
+          6. RSI not extremely overbought (< 80)
+        """
+        cfg = MODES.get(mode_name, MODES['swing'])
+
+        if len(df) < 50:
+            return None
+
+        if 'ATR' not in df.columns:
+            df = calculate_all_indicators(
+                df, cfg['trend_type'], cfg.get('trend_period'), timeframe
+            )
+
+        # Count consecutive green candles from the latest bar backward
+        streak = 0
+        for i in range(len(df) - 1, max(len(df) - 10, 0), -1):
+            bar = df.iloc[i]
+            prev_bar = df.iloc[i - 1] if i > 0 else None
+            green = bar['close'] > bar['open']
+            higher_close = prev_bar is not None and bar['close'] > prev_bar['close']
+            if green and (streak == 0 or higher_close):
+                streak += 1
+            else:
+                break
+
+        if streak < 3:
+            return None
+
+        # Cumulative move over the streak
+        streak_start = df.iloc[-(streak + 1)]  # bar before streak began
+        latest = df.iloc[-1]
+        cum_move_pct = (latest['close'] - streak_start['close']) / streak_start['close'] * 100
+
+        if cum_move_pct < 8.0:
+            return None
+
+        # Average volume ratio across the streak
+        streak_bars = df.iloc[-streak:]
+        vol_avg_20 = df['volume'].rolling(20).mean().iloc[-(streak + 1)]
+        if vol_avg_20 > 0:
+            streak_vol_ratio = streak_bars['volume'].mean() / vol_avg_20
+        else:
+            streak_vol_ratio = 1.0
+
+        if streak_vol_ratio < 1.2:
+            return None
+
+        # SMA 20 check — price must be above short-term trend
+        sma_20 = df['close'].rolling(20).mean().iloc[-1]
+        if pd.isna(sma_20) or latest['close'] < sma_20:
+            return None
+
+        # RSI guard — avoid chasing into extreme overbought
+        rsi = latest.get('RSI', 50)
+        if not pd.isna(rsi) and rsi > 80:
+            return None
+
+        # Relative strength vs SPY (optional bonus)
+        stock_perf = cum_move_pct / 100
+        rs_ok = stock_perf > spy_perf if mode_name != 'scalping' else True
+
+        # Risk/Reward
+        atr = latest['ATR']
+        # Stop below streak start or 1.5 ATR below current
+        sl = max(streak_start['low'], latest['close'] - 1.5 * atr)
+        # Target: project the streak's average daily gain forward
+        avg_daily_gain = cum_move_pct / streak
+        tp = latest['close'] * (1 + avg_daily_gain * 2 / 100)  # 2 more days projected
+        risk = latest['close'] - sl
+        reward = tp - latest['close']
+        rr = reward / max(risk, 1e-6)
+
+        if rr < 1.0:
+            return None
+
+        # Quality scoring
+        checks = {
+            'streak_long': streak >= 4,
+            'cum_move_big': cum_move_pct >= 12,
+            'vol_strong': streak_vol_ratio >= 1.8,
+            'rs_ok': rs_ok,
+            'rsi_healthy': 50 <= rsi <= 70 if not pd.isna(rsi) else True,
+            'above_sma20': True,  # already validated
+        }
+        passed = sum(checks.values())
+
+        if passed >= 5:
+            quality = 'PREMIUM'
+        elif passed >= 3:
+            quality = 'HIGH'
+        else:
+            quality = 'STANDARD'
+
+        signal = {
+            'Symbol': symbol,
+            'Price': round(latest['close'], 2),
+            'Vol': round(streak_vol_ratio, 2),
+            'Dist': round(cum_move_pct, 1),
+            'SMA_Dist%': round(((latest['close'] - sma_20) / sma_20) * 100, 1),
+            'Stop': round(sl, 2),
+            'Target': round(tp, 2),
+            'R:R': round(rr, 2),
+            'Gap%': round(avg_daily_gain, 1),
+            'Mode': mode_name,
+            'Quality': quality,
+            'Type': 'CONTINUATION',
+            'RSI': round(rsi, 1) if not pd.isna(rsi) else 0,
+            'Streak': streak,
+        }
+
+        logger.info(
+            f"🚀 CONTINUATION {symbol} @ ${latest['close']:.2f} | "
+            f"{streak}-day streak +{cum_move_pct:.1f}% | "
+            f"Vol: {streak_vol_ratio:.1f}x | RSI: {rsi:.0f} | {quality}"
+        )
+
+        return signal
+
+    def detect_sma20_cross(self, df: pd.DataFrame, symbol: str, mode_name: str,
+                           timeframe: str, spy_perf: float = 0.0,
+                           **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        Detect price crossing above SMA 20 for the first time in N days.
+
+        Catches stocks transitioning from downtrend to uptrend at the
+        earliest possible signal — before a full breakout develops.
+        Example: SNDK crossing above SMA 20 after multi-day decline.
+
+        Criteria:
+          1. Price closed ABOVE SMA 20 today
+          2. Price was BELOW SMA 20 for at least 3 of the last 5 days
+          3. Volume >= 1.3x on the crossing day
+          4. SMA 20 slope is flattening or turning up (not steeply falling)
+          5. RSI between 40-65 (recovering, not overbought)
+          6. Price above SMA 50 (broader trend support) — optional bonus
+        """
+        cfg = MODES.get(mode_name, MODES['swing'])
+
+        if len(df) < 50:
+            return None
+
+        if 'ATR' not in df.columns:
+            df = calculate_all_indicators(
+                df, cfg['trend_type'], cfg.get('trend_period'), timeframe
+            )
+
+        latest = df.iloc[-1]
+        sma_20 = df['close'].rolling(20).mean()
+
+        if sma_20.iloc[-1] is None or pd.isna(sma_20.iloc[-1]):
+            return None
+
+        # 1. Price above SMA 20 today
+        price_above = latest['close'] > sma_20.iloc[-1]
+        if not price_above:
+            return None
+
+        # 2. Was below SMA 20 for at least 3 of last 5 days (before today)
+        days_below = 0
+        for i in range(-6, -1):
+            if abs(i) <= len(df) and not pd.isna(sma_20.iloc[i]):
+                if df['close'].iloc[i] < sma_20.iloc[i]:
+                    days_below += 1
+        if days_below < 3:
+            return None
+
+        # 3. Volume confirmation
+        vol_ratio = latest.get('Vol_Ratio', 1.0)
+        if vol_ratio < 1.3:
+            return None
+
+        # 4. SMA 20 slope — must be flattening or turning up
+        sma_slope = (sma_20.iloc[-1] - sma_20.iloc[-5]) / sma_20.iloc[-5] * 100
+        sma_turning_up = sma_slope > -1.0  # Not steeply declining
+
+        if not sma_turning_up:
+            return None
+
+        # 5. RSI in recovery zone
+        rsi = latest.get('RSI', 50)
+        rsi_ok = 40 <= rsi <= 65 if not pd.isna(rsi) else True
+        if not rsi_ok:
+            return None
+
+        # 6. SMA 50 bonus
+        sma_50 = df['close'].rolling(50).mean().iloc[-1]
+        above_sma50 = latest['close'] > sma_50 if not pd.isna(sma_50) else False
+
+        # 7. Bullish candle on the cross
+        bullish_candle = latest['close'] > latest['open']
+
+        # 8. Distance from SMA 20 (freshness of cross — closer = better)
+        cross_dist_pct = ((latest['close'] - sma_20.iloc[-1]) / sma_20.iloc[-1]) * 100
+
+        # Risk/Reward
+        atr = latest['ATR']
+        sl = max(sma_20.iloc[-1] - 0.5 * atr, latest['low'] - 0.3 * atr)
+        # Target: SMA 50 or 2.5x risk
+        risk = latest['close'] - sl
+        tp_rr = latest['close'] + risk * 2.5
+        tp_sma50 = sma_50 if not pd.isna(sma_50) and sma_50 > latest['close'] else tp_rr
+        tp = max(tp_rr, tp_sma50)
+        rr = (tp - latest['close']) / max(risk, 1e-6)
+
+        if rr < 1.5:
+            return None
+
+        # Quality scoring
+        checks = {
+            'bullish_candle': bullish_candle,
+            'vol_strong': vol_ratio >= 1.8,
+            'above_sma50': above_sma50,
+            'fresh_cross': cross_dist_pct < 2.0,
+            'sma_slope_positive': sma_slope > 0,
+        }
+        passed = sum(checks.values())
+
+        if passed >= 4:
+            quality = 'PREMIUM'
+        elif passed >= 2:
+            quality = 'HIGH'
+        else:
+            quality = 'STANDARD'
+
+        signal = {
+            'Symbol': symbol,
+            'Price': round(latest['close'], 2),
+            'Vol': round(vol_ratio, 2),
+            'Dist': round(cross_dist_pct, 1),
+            'SMA_Dist%': round(cross_dist_pct, 1),
+            'Stop': round(sl, 2),
+            'Target': round(tp, 2),
+            'R:R': round(rr, 2),
+            'Gap%': 0,
+            'Mode': mode_name,
+            'Quality': quality,
+            'Type': 'SMA20_CROSS',
+            'RSI': round(rsi, 1) if not pd.isna(rsi) else 0,
+        }
+
+        logger.info(
+            f"📈 SMA20 CROSS {symbol} @ ${latest['close']:.2f} | "
+            f"Vol: {vol_ratio:.1f}x | RSI: {rsi:.0f} | "
+            f"SMA slope: {sma_slope:+.1f}% | {quality}"
+        )
+
         return signal

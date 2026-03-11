@@ -108,9 +108,39 @@ class ScannerOrchestrator:
         tasks = [_scan_one((i, sym)) for i, sym in enumerate(watchlist, 1)]
         results_raw = await asyncio.gather(*tasks)
         results = [r for r in results_raw if r]
-        
+
         print()  # Clear progress line
-        
+
+        # Missed-movers summary: log symbols that moved ≥5% but were not signaled
+        signaled_symbols = {r['Symbol'] for r in results}
+        missed_movers = []
+        for symbol in watchlist:
+            if symbol in signaled_symbols:
+                continue
+            try:
+                df = await self.market_data.get_historical_data(symbol, timeframe)
+                if df is not None and len(df) >= 2:
+                    prev_close = df['close'].iloc[-2]
+                    cur_close = df['close'].iloc[-1]
+                    if prev_close > 0:
+                        daily_pct = (cur_close - prev_close) / prev_close * 100
+                        if daily_pct >= 5.0:
+                            vol_ratio = df.iloc[-1].get('Vol_Ratio', 0)
+                            if pd.isna(vol_ratio):
+                                vol_avg = df['volume'].rolling(20).mean().iloc[-1]
+                                vol_ratio = df['volume'].iloc[-1] / vol_avg if vol_avg > 0 else 0
+                            missed_movers.append((symbol, daily_pct, cur_close, vol_ratio))
+            except Exception:
+                pass
+
+        if missed_movers:
+            missed_movers.sort(key=lambda x: x[1], reverse=True)
+            logger.warning(
+                f"📋 MISSED MOVERS: {len(missed_movers)} symbol(s) moved ≥5% but were NOT signaled:"
+            )
+            for sym, pct, price, vol in missed_movers[:15]:
+                logger.warning(f"   {sym:8} +{pct:.1f}%  ${price:.2f}  vol={vol:.1f}x")
+
         return results
     
     async def _scan_symbol(self, symbol: str, mode: str, timeframe: str,
@@ -207,12 +237,22 @@ class ScannerOrchestrator:
                             signal['Quality'] = 'PREMIUM'
                             logger.info(f"   ⭐ {symbol} upgraded to PREMIUM (Level 2)")
                 
-                # If no breakout signal but bounce detection enabled, try bounce
+                # If no breakout signal, try alternative detectors (cascade)
                 if signal is None and detect_bounces:
                     signal = self.detector.detect_bounce(
                         df, symbol, mode, timeframe
                     )
-                
+
+                if signal is None:
+                    signal = self.detector.detect_continuation(
+                        df, symbol, mode, timeframe, spy_perf
+                    )
+
+                if signal is None:
+                    signal = self.detector.detect_sma20_cross(
+                        df, symbol, mode, timeframe, spy_perf
+                    )
+
                 return signal
             
             except Exception as e:
