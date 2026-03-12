@@ -2,7 +2,7 @@
 """
 automated_test_agent.py
 ───────────────────────
-Tomorrow's testing scheduler (March 13, 2026).
+Daily trading day scheduler — runs for today's date (NY time).
 
 Schedules all cron_agent commands at NY times, captures results,
 sends email with grep output + Telegram notification.
@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 NY_TZ = ZoneInfo('America/New_York')
 OUTPUT_DIR = Path('scanner_output')
 
+# Compute today's date in NY time at startup — used in grep patterns and CronTrigger
+_TODAY_ET = datetime.now(NY_TZ)
+TODAY_YYYYMMDD = _TODAY_ET.strftime('%Y%m%d')   # e.g. "20260313"
+TODAY_YYYY_MM_DD = _TODAY_ET.strftime('%Y-%m-%d')  # e.g. "2026-03-13"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SCHEDULE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +59,7 @@ SCHEDULE = [
         'label': 'Premarket Gap Check #1',
         'command': 'python cron_agent.py --run-now premarket --notify',
         'checks': [
-            ('Gap alerts', 'scanner_output/logs/cron_premarket.log'),
+            ('Gap alerts', 'tail -20 scanner_output/logs/cron_premarket.log'),
         ]
     },
     {
@@ -62,7 +67,7 @@ SCHEDULE = [
         'label': 'Premarket Gap Check #2',
         'command': 'python cron_agent.py --run-now premarket --notify',
         'checks': [
-            ('Gap alerts', 'scanner_output/logs/cron_premarket.log'),
+            ('Gap alerts', 'tail -20 scanner_output/logs/cron_premarket.log'),
         ]
     },
     {
@@ -70,7 +75,7 @@ SCHEDULE = [
         'label': 'Opening Surge Check',
         'command': 'python cron_agent.py --run-now premarket --notify',
         'checks': [
-            ('Opening surge alerts', 'scanner_output/logs/cron_premarket.log'),
+            ('Opening surge alerts', 'tail -20 scanner_output/logs/cron_premarket.log'),
         ]
     },
     {
@@ -78,7 +83,7 @@ SCHEDULE = [
         'label': 'Phase 1: Daytrade Scan',
         'command': 'python cron_agent.py --run-now daytrade --notify',
         'checks': [
-            ('New signal types', 'grep "CONTINUATION\\|SMA20_CROSS" scanner_output/signals/*20260313*.csv 2>/dev/null | head -10'),
+            ('New signal types', f'grep "CONTINUATION\\|SMA20_CROSS" scanner_output/signals/*{TODAY_YYYYMMDD}*.csv 2>/dev/null | head -10'),
             ('Scan summary', 'tail -20 scanner_output/logs/cron_daytrade*.log'),
         ]
     },
@@ -87,7 +92,7 @@ SCHEDULE = [
         'label': 'Phase 1: Swing Scan',
         'command': 'python cron_agent.py --run-now swing --notify',
         'checks': [
-            ('New signal types', 'grep "CONTINUATION\\|SMA20_CROSS" scanner_output/signals/*20260313*.csv 2>/dev/null | head -10'),
+            ('New signal types', f'grep "CONTINUATION\\|SMA20_CROSS" scanner_output/signals/*{TODAY_YYYYMMDD}*.csv 2>/dev/null | head -10'),
             ('Scan summary', 'tail -20 scanner_output/logs/cron_swing*.log'),
         ]
     },
@@ -97,7 +102,7 @@ SCHEDULE = [
         'command': 'python cron_agent.py --run-now momentum_watch --notify',
         'checks': [
             ('Watch monitor alerts', 'tail -10 scanner_output/logs/cron_watch_monitor.log'),
-            ('Alert count', 'grep "Sent" scanner_output/logs/cron_watch_monitor.log | grep "2026-03-13" | wc -l'),
+            ('Alert count', f'grep "Sent" scanner_output/logs/cron_watch_monitor.log | grep "{TODAY_YYYY_MM_DD}" | wc -l'),
         ]
     },
     {
@@ -106,16 +111,77 @@ SCHEDULE = [
         'command': 'python cron_agent.py --run-now portfolio --notify',
         'checks': [
             ('Portfolio alerts', 'tail -10 scanner_output/logs/cron_monitor.log'),
-            ('Alert count', 'grep "Sent" scanner_output/logs/cron_monitor.log | grep "2026-03-13" | wc -l'),
+            ('Alert count', f'grep "Sent" scanner_output/logs/cron_monitor.log | grep "{TODAY_YYYY_MM_DD}" | wc -l'),
         ]
     },
     {
         'time': '11:00',
-        'label': 'Mid-morning Summary',
-        'command': None,  # No command, just grep check
+        'label': 'Hourly Monitor 11:00',
+        'command': 'python cron_agent.py --run-now momentum_watch --notify && python cron_agent.py --run-now portfolio --notify',
         'checks': [
-            ('Missed movers', 'grep "MISSED MOVERS" scanner_output/logs/cron_*.log | tail -15'),
-            ('Total signals so far', 'find scanner_output/signals -name "*20260313*.csv" -exec wc -l {} \\; | tail -5'),
+            ('Watch alerts', 'tail -10 scanner_output/logs/cron_watch_monitor.log'),
+            ('Portfolio alerts', 'tail -10 scanner_output/logs/cron_monitor.log'),
+            ('Missed movers', 'grep "MISSED MOVERS" scanner_output/logs/cron_*.log | tail -10'),
+            ('Total signals so far', f'find scanner_output/signals -name "*{TODAY_YYYYMMDD}*.csv" -exec wc -l {{}} \\; | tail -5'),
+        ]
+    },
+    {
+        'time': '12:00',
+        'label': 'Hourly Monitor 12:00',
+        'command': 'python cron_agent.py --run-now momentum_watch --notify && python cron_agent.py --run-now portfolio --notify',
+        'checks': [
+            ('Watch alerts', 'tail -10 scanner_output/logs/cron_watch_monitor.log'),
+            ('Portfolio alerts', 'tail -10 scanner_output/logs/cron_monitor.log'),
+            ('Alert count today', f'grep "Sent" scanner_output/logs/cron_watch_monitor.log | grep "{TODAY_YYYY_MM_DD}" | wc -l'),
+        ]
+    },
+    {
+        'time': '13:00',
+        'label': 'Hourly Monitor 13:00',
+        'command': 'python cron_agent.py --run-now momentum_watch --notify && python cron_agent.py --run-now portfolio --notify',
+        'checks': [
+            ('Watch alerts', 'tail -10 scanner_output/logs/cron_watch_monitor.log'),
+            ('Portfolio alerts', 'tail -10 scanner_output/logs/cron_monitor.log'),
+            ('Alert count today', f'grep "Sent" scanner_output/logs/cron_watch_monitor.log | grep "{TODAY_YYYY_MM_DD}" | wc -l'),
+        ]
+    },
+    {
+        'time': '14:00',
+        'label': 'Phase 2: Daytrade Re-evaluation (2 PM)',
+        'command': 'python cron_agent.py --run-now daytrade --notify',
+        'checks': [
+            ('New signals since 9:35', f'grep "CONTINUATION\\|SMA20_CROSS" scanner_output/signals/*{TODAY_YYYYMMDD}*.csv 2>/dev/null | tail -10'),
+            ('Daytrade log', 'tail -15 scanner_output/logs/cron_daytrade*.log'),
+        ]
+    },
+    {
+        'time': '15:30',
+        'label': 'Daytrade Exit Check (3:30 PM)',
+        'command': 'python cron_agent.py --run-now daytrade --notify',
+        'checks': [
+            ('Exit evaluation', 'tail -10 scanner_output/logs/cron_daytrade_exit*.log'),
+            ('Positions closed', 'grep -i "closed\\|exit" scanner_output/logs/cron_daytrade*.log | tail -5'),
+        ]
+    },
+    {
+        'time': '16:00',
+        'label': 'Market Close: Final Monitoring',
+        'command': 'python cron_agent.py --run-now momentum_watch --notify && python cron_agent.py --run-now portfolio --notify',
+        'checks': [
+            ('Watch monitor final', 'tail -10 scanner_output/logs/cron_watch_monitor.log'),
+            ('Portfolio final', 'tail -10 scanner_output/logs/cron_monitor.log'),
+        ]
+    },
+    {
+        'time': '16:15',
+        'label': 'End-of-Day Summary Report',
+        'command': None,  # No command, just summary
+        'checks': [
+            ('Total CONTINUATION signals', f'grep -c "CONTINUATION" scanner_output/signals/*{TODAY_YYYYMMDD}*.csv 2>/dev/null || echo "0"'),
+            ('Total SMA20_CROSS signals', f'grep -c "SMA20_CROSS" scanner_output/signals/*{TODAY_YYYYMMDD}*.csv 2>/dev/null || echo "0"'),
+            ('Total watch alerts sent', f'grep "Sent" scanner_output/logs/cron_watch_monitor.log | grep "{TODAY_YYYY_MM_DD}" | wc -l'),
+            ('Total portfolio alerts', f'grep "Sent" scanner_output/logs/cron_monitor.log | grep "{TODAY_YYYY_MM_DD}" | wc -l'),
+            ('Missed movers final', 'grep "MISSED MOVERS" scanner_output/logs/cron_*.log | tail -10'),
         ]
     },
 ]
@@ -176,6 +242,7 @@ def execute_job(job_config: dict, dry_run: bool = False):
         return
 
     # ─ Run main command ─
+    stdout = ''
     if cmd:
         logger.info(f"Running: {cmd}")
         rc, stdout, stderr = run_command(cmd)
@@ -230,7 +297,7 @@ Check your dashboard or logs for full details.
 def schedule_jobs(scheduler: BackgroundScheduler, dry_run: bool = False):
     """Add all jobs to scheduler."""
     logger.info(f"\n{'='*70}")
-    logger.info(f"📅 SCHEDULING JOBS FOR TOMORROW (March 13, 2026 ET)")
+    logger.info(f"📅 SCHEDULING JOBS FOR {TODAY_YYYY_MM_DD} (NY time)")
     logger.info(f"{'='*70}\n")
 
     for job_config in SCHEDULE:
@@ -240,7 +307,11 @@ def schedule_jobs(scheduler: BackgroundScheduler, dry_run: bool = False):
 
         scheduler.add_job(
             execute_job,
-            CronTrigger(hour=hour, minute=minute, day=13, month=3, second=0, timezone=NY_TZ),
+            CronTrigger(
+                hour=hour, minute=minute,
+                day=_TODAY_ET.day, month=_TODAY_ET.month,
+                second=0, timezone=NY_TZ
+            ),
             args=[job_config, dry_run],
             id=f"job_{job_time.replace(':', '')}",
             name=label,
@@ -253,7 +324,7 @@ def schedule_jobs(scheduler: BackgroundScheduler, dry_run: bool = False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Automated testing scheduler for tomorrow')
+    parser = argparse.ArgumentParser(description='Automated testing scheduler for today')
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview schedule without executing')
     args = parser.parse_args()
