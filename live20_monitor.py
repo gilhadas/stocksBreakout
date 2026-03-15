@@ -72,21 +72,28 @@ MARKET_OPEN_HOUR, MARKET_OPEN_MIN = 9, 30
 MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN = 16, 0
 
 # Breakout tolerance: price must exceed level by this % to trigger
-BREAK_TOLERANCE_PCT = 0.15
+# 1.0% = industry standard for "confirmed breakout" (filters noise, catches early moves)
+BREAK_TOLERANCE_PCT = 1.0
 # Bounce proximity: price within this % of bounce value triggers alert
 BOUNCE_TOLERANCE_PCT = 0.5
+
+# Volume annotation thresholds (pace-adjusted IB cumulative volume)
+VOL_SURGE_RATIO = 2.0     # >= 2x pace-adjusted avg = HIGH VOL
+VOL_NORMAL_RATIO = 0.8    # >= 0.8x = NORMAL, below = LOW VOL
+VOL_MIN_MINUTES = 15      # skip vol annotation in first 15 min (extrapolation unreliable)
+TRADING_MINUTES = 390     # 6.5 hours (9:30-4:00)
+VOL_ROLLING_BARS = 20     # rolling window for 1-min bar vol ratio
 
 # Discord webhook
 DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL_LIVE20', '')
 
 # yfinance symbol mapping (non-standard tickers)
-_YF_SYMBOL_MAP = {
-    'BTCUSD': 'BTC-USD',
-    'ETHUSD': 'ETH-USD',
-}
+# Note: IBIT and ETHA are regular ETFs, no special mapping needed
+_YF_SYMBOL_MAP = {}
 
 # IB contract overrides for crypto / non-stock symbols
-_IB_CRYPTO_SYMBOLS = {'BTCUSD', 'ETHUSD'}
+# Note: Switched from BTC-USD/ETH-USD to IBIT/ETHA ETFs
+_IB_CRYPTO_SYMBOLS = set()
 
 
 # ── CSV Loader ───────────────────────────────────────────────────────────────
@@ -126,6 +133,7 @@ def load_forecast(csv_path: Path) -> list[dict]:
         if not ticker:
             continue
 
+        current_price = _to_float_or_none(row.get('current price', None))
         sr_val = _to_float_or_none(row.get('support/ressist', None))
 
         bullish_raw = str(row.get('Bullish', '')).strip().upper()
@@ -141,6 +149,7 @@ def load_forecast(csv_path: Path) -> list[dict]:
 
         records.append({
             'ticker': ticker,
+            'current_price': current_price,
             'sr_level': sr_val,
             'bullish': bullish,
             'wait_direction': wait_direction,
@@ -206,14 +215,21 @@ def disconnect_ib(ib) -> None:
 
 # ── Price fetching ───────────────────────────────────────────────────────────
 
-async def fetch_prices_ib(ib, tickers: list[str]) -> dict[str, float]:
-    """Fetch current prices from IB for all tickers. Returns {ticker: price}."""
+async def fetch_prices_ib(ib, tickers: list[str]) -> tuple[dict[str, float], dict[str, float]]:
+    """Fetch current prices and pace-adjusted volume ratios from IB.
+    Returns (prices, vol_ratios) dicts keyed by ticker.
+    """
     from ib_insync import Stock, Crypto
     prices = {}
+    vol_ratios = {}
+    now_et = datetime.now(NY_TZ)
+    market_open = now_et.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MIN,
+                                 second=0, microsecond=0)
+    mins_elapsed = max((now_et - market_open).total_seconds() / 60, 1)
+
     for ticker in tickers:
         try:
             if ticker in _IB_CRYPTO_SYMBOLS:
-                # Crypto pairs on IB use Crypto contract
                 base = ticker.replace('USD', '')
                 contract = Crypto(base, 'PAXOS', 'USD')
             else:
@@ -225,9 +241,47 @@ async def fetch_prices_ib(ib, tickers: list[str]) -> dict[str, float]:
             ib.cancelMktData(contract)
             if price and price > 0:
                 prices[ticker] = float(price)
+            # Pace-adjusted volume ratio from IB cumulative volume
+            cum_vol = getattr(md, 'volume', None)
+            avg_vol = getattr(md, 'avVolume', None)
+            if cum_vol and avg_vol and avg_vol > 0 and mins_elapsed >= VOL_MIN_MINUTES:
+                day_fraction = mins_elapsed / TRADING_MINUTES
+                projected_vol = cum_vol / day_fraction
+                vol_ratios[ticker] = round(projected_vol / avg_vol, 2)
         except Exception as e:
             logger.debug(f"IB price failed for {ticker}: {e}")
-    return prices
+    return prices, vol_ratios
+
+
+def _parse_yfinance_ticker_df(ticker_df) -> tuple[float | None, float | None]:
+    """Extract (last_close, vol_ratio) from a single-ticker yfinance 1-min DataFrame.
+    vol_ratio is bar-relative: latest 1-min bar vs rolling 20-bar mean.
+    Note: yfinance free data has ~15-min delay. vol_ratio is marked delayed but still valid
+    as a relative measure.
+    """
+    if hasattr(ticker_df.columns, 'levels'):
+        ticker_df = ticker_df.copy()
+        ticker_df.columns = ticker_df.columns.get_level_values(-1)
+
+    last_close = None
+    vol_ratio = None
+
+    close_col = [c for c in ticker_df.columns if 'close' in str(c).lower()]
+    if close_col:
+        series = ticker_df[close_col[0]].dropna()
+        if len(series) > 0:
+            last_close = float(series.iloc[-1])
+
+    vol_col = [c for c in ticker_df.columns if 'volume' in str(c).lower()]
+    if vol_col:
+        vol_series = ticker_df[vol_col[0]].dropna()
+        if len(vol_series) >= VOL_ROLLING_BARS:
+            rolling_avg = vol_series.rolling(VOL_ROLLING_BARS).mean().iloc[-1]
+            latest_vol = float(vol_series.iloc[-1])
+            if rolling_avg > 0:
+                vol_ratio = round(latest_vol / rolling_avg, 2)
+
+    return last_close, vol_ratio
 
 
 def fetch_prices_yfinance(tickers: list[str]) -> dict[str, float]:
@@ -247,42 +301,72 @@ def fetch_prices_yfinance(tickers: list[str]) -> dict[str, float]:
     for yf_sym in yf_tickers:
         orig = yf_to_orig[yf_sym]
         try:
-            if len(yf_tickers) == 1:
-                ticker_df = data
-            else:
-                ticker_df = data[yf_sym]
+            ticker_df = data if len(yf_tickers) == 1 else data[yf_sym]
             if ticker_df.empty:
                 continue
-            if hasattr(ticker_df.columns, 'levels'):
-                ticker_df.columns = ticker_df.columns.get_level_values(-1)
-            close_col = [c for c in ticker_df.columns if 'close' in str(c).lower()]
-            if close_col:
-                last_close = ticker_df[close_col[0]].dropna().iloc[-1]
-                prices[orig] = float(last_close)
+            last_close, _ = _parse_yfinance_ticker_df(ticker_df)
+            if last_close is not None:
+                prices[orig] = last_close
         except Exception:
             continue
     return prices
 
 
-async def fetch_current_prices(ib, tickers: list[str]) -> tuple[dict[str, float], str]:
+def fetch_vol_ratios_yfinance(tickers: list[str]) -> dict[str, float]:
+    """Fetch bar-relative 1-min volume ratios from yfinance (delayed ~15 min).
+    Compares latest 1-min bar volume against rolling 20-bar mean — inherently
+    pace-adjusted (apples-to-apples bar comparison).
+    Used as fallback when IB is not connected.
+    """
+    import yfinance as yf
+    vol_ratios = {}
+    yf_tickers = [_YF_SYMBOL_MAP.get(t, t) for t in tickers]
+    yf_to_orig = {_YF_SYMBOL_MAP.get(t, t): t for t in tickers}
+
+    try:
+        data = yf.download(yf_tickers, period='1d', interval='1m', progress=False,
+                           group_by='ticker', threads=True)
+    except Exception as e:
+        logger.warning(f"yfinance vol fetch failed: {e}")
+        return vol_ratios
+
+    for yf_sym in yf_tickers:
+        orig = yf_to_orig[yf_sym]
+        try:
+            ticker_df = data if len(yf_tickers) == 1 else data[yf_sym]
+            if ticker_df.empty:
+                continue
+            _, vr = _parse_yfinance_ticker_df(ticker_df)
+            if vr is not None:
+                vol_ratios[orig] = vr
+        except Exception:
+            continue
+    logger.info(f"  yfinance vol ratios for {len(vol_ratios)}/{len(tickers)} tickers (delayed ~15m)")
+    return vol_ratios
+
+
+async def fetch_current_prices(ib, tickers: list[str]) -> tuple[dict[str, float], dict[str, float], str]:
     """
     Fetch prices: IB first, yfinance fallback for any missing tickers.
-    Returns (prices_dict, source_label).
+    Returns (prices_dict, vol_ratios_dict, source_label).
+    vol_ratios only populated from IB (real-time); yfinance has 15-min delay.
     """
     prices = {}
+    vol_ratios = {}
     source = 'yfinance'
 
     # Try IB first
     if ib is not None:
         try:
-            prices = await fetch_prices_ib(ib, tickers)
+            prices, vol_ratios = await fetch_prices_ib(ib, tickers)
             if prices:
                 source = 'IB Live'
-                logger.info(f"  IB returned prices for {len(prices)}/{len(tickers)} tickers")
+                logger.info(f"  IB returned prices for {len(prices)}/{len(tickers)} tickers"
+                            f" (vol ratios: {len(vol_ratios)})")
         except Exception as e:
             logger.warning(f"  IB price fetch error: {e}")
 
-    # Fallback to yfinance for missing tickers
+    # Fallback to yfinance for missing tickers (no vol_ratios from yfinance)
     missing = [t for t in tickers if t not in prices]
     if missing:
         yf_prices = fetch_prices_yfinance(missing)
@@ -294,16 +378,17 @@ async def fetch_current_prices(ib, tickers: list[str]) -> tuple[dict[str, float]
         elif source != 'IB Live':
             source = 'yfinance'
 
-    return prices, source
+    return prices, vol_ratios, source
 
 
 # ── Alert logic ──────────────────────────────────────────────────────────────
 
 def check_forecasts(records: list[dict], prices: dict[str, float],
+                    vol_ratios: dict[str, float],
                     state: dict) -> list[dict]:
     """
     Compare current prices against forecast levels.
-    Returns list of alert dicts.
+    Returns list of alert dicts. BREAKING alerts are annotated with volume.
     """
     alerts = []
 
@@ -340,6 +425,18 @@ def check_forecasts(records: list[dict], prices: dict[str, float],
                 prev_direction = state.get(break_key, {}).get('direction')
                 # Fire on first break OR when direction flips (UP→DOWN or DOWN→UP)
                 if prev_direction != direction:
+                    # Volume annotation (soft — does not gate the alert)
+                    vr = vol_ratios.get(ticker)
+                    if vr is not None:
+                        if vr >= VOL_SURGE_RATIO:
+                            vol_label = 'HIGH VOL'
+                        elif vr >= VOL_NORMAL_RATIO:
+                            vol_label = 'NORMAL'
+                        else:
+                            vol_label = 'LOW VOL'
+                    else:
+                        vol_label = None
+
                     alerts.append({
                         'type': 'BREAKING',
                         'ticker': ticker,
@@ -347,6 +444,8 @@ def check_forecasts(records: list[dict], prices: dict[str, float],
                         'level': sr,
                         'direction': direction,
                         'as_predicted': as_predicted,
+                        'vol_ratio': vr,
+                        'vol_label': vol_label,
                         'remarks': rec['remarks'],
                     })
                     state[break_key] = {
@@ -412,13 +511,18 @@ def send_discord_alert(alerts: list[dict], source: str = '',
         return True
 
     now_et = datetime.now(NY_TZ)
-    title = f"📊 Live20 Monitor — {now_et.strftime('%H:%M ET')} ({now_et.strftime('%Y-%m-%d')})"
+    is_backtest = source.startswith('BACKTEST')
+    if is_backtest:
+        title = f"🔁 Live20 BACKTEST — {source}"
+    else:
+        title = f"📊 Live20 Monitor — {now_et.strftime('%H:%M ET')} ({now_et.strftime('%Y-%m-%d')})"
 
     fields = []
     for a in alerts:
+        bar_time = f" @ {a['bar_time']}" if a.get('bar_time') else ''
         if a['type'] == 'BREAKING':
             emoji = '🚀' if a.get('direction') == 'UP' else '📉'
-            name = f"{emoji} BREAKING: {a['ticker']}"
+            name = f"{emoji} BREAKING: {a['ticker']}{bar_time}"
             as_predicted = a.get('as_predicted')
             predicted_tag = (
                 '✅ As Predicted' if as_predicted is True
@@ -429,13 +533,16 @@ def send_discord_alert(alerts: list[dict], source: str = '',
                 f"Price: **${a['price']:.2f}** | Level: ${a['level']:.2f}\n"
                 f"Direction: {a.get('direction', 'N/A')}  |  {predicted_tag}"
             )
+            if a.get('vol_label'):
+                vol_emoji = '🔥' if a['vol_label'] == 'HIGH VOL' else ''
+                value += f"\nVolume: {vol_emoji} **{a['vol_label']}** ({a['vol_ratio']:.1f}x avg)"
         elif a['type'] == 'BOUNCING':
-            name = f"🔄 BOUNCING: {a['ticker']}"
+            name = f"🔄 BOUNCING: {a['ticker']}{bar_time}"
             value = (
                 f"Price: **${a['price']:.2f}** | Bounce target: ${a['level']:.2f}"
             )
         elif a['type'] == 'DIRECTION_CHANGE':
-            name = f"⚠️ DIRECTION CHANGE: {a['ticker']}"
+            name = f"⚠️ DIRECTION CHANGE: {a['ticker']}{bar_time}"
             value = (
                 f"Price: **${a['price']:.2f}** | Level: ${a['level']:.2f}\n"
                 f"Reversal: {a.get('direction', 'N/A')}"
@@ -449,16 +556,26 @@ def send_discord_alert(alerts: list[dict], source: str = '',
         fields.append({'name': name, 'value': value, 'inline': False})
 
     footer_text = f"Live20 Forecast Monitor | Data: {source}" if source else 'Live20 Forecast Monitor'
-    embed = {
-        'title': title,
-        'color': 0x00FF88,
-        'fields': fields,
-        'footer': {'text': footer_text},
-    }
-    data = {'embeds': [embed]}
+    color = 0xFFA500 if is_backtest else 0x00FF88
+
+    # Discord limit: 25 fields per embed — split into batches
+    MAX_FIELDS = 25
+    field_batches = [fields[i:i + MAX_FIELDS] for i in range(0, max(len(fields), 1), MAX_FIELDS)]
+
+    embeds = []
+    for i, batch in enumerate(field_batches):
+        embed = {
+            'title': title if i == 0 else f"{title} (cont.)",
+            'color': color,
+            'fields': batch,
+        }
+        if i == len(field_batches) - 1:
+            embed['footer'] = {'text': footer_text}
+        embeds.append(embed)
 
     if dry_run:
-        logger.info(f"[DRY-RUN] Would send Discord alert with {len(alerts)} alerts:")
+        logger.info(f"[DRY-RUN] Would send Discord alert with {len(alerts)} alerts "
+                    f"({len(embeds)} embed(s)):")
         for a in alerts:
             logger.info(f"  {a['type']}: {a['ticker']} @ ${a['price']:.2f} (level=${a['level']:.2f})")
         return True
@@ -467,17 +584,25 @@ def send_discord_alert(alerts: list[dict], source: str = '',
         logger.warning("DISCORD_WEBHOOK_URL_LIVE20 not set, skipping notification")
         return True  # not a failure — webhook simply not configured
 
-    try:
-        resp = requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=10)
-        if resp.status_code == 204:
-            logger.info(f"Discord alert sent ({len(alerts)} alerts)")
-            return True
-        else:
-            logger.error(f"Discord returned {resp.status_code}: {resp.text[:200]}")
-            return False
-    except Exception as e:
-        logger.error(f"Discord send failed: {e}")
-        return False
+    # Discord allows up to 10 embeds per message — send in batches of 10
+    MAX_EMBEDS = 10
+    success = True
+    for i in range(0, len(embeds), MAX_EMBEDS):
+        payload = {'embeds': embeds[i:i + MAX_EMBEDS]}
+        try:
+            resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+            if resp.status_code == 204:
+                logger.info(f"Discord batch {i // MAX_EMBEDS + 1} sent OK")
+            else:
+                logger.error(f"Discord returned {resp.status_code}: {resp.text[:200]}")
+                success = False
+        except Exception as e:
+            logger.error(f"Discord send failed: {e}")
+            success = False
+
+    if success:
+        logger.info(f"Discord alert sent ({len(alerts)} alerts)")
+    return success
 
 
 # ── Market hours check ───────────────────────────────────────────────────────
@@ -514,17 +639,46 @@ async def run_check(csv_path: Path, ib, dry_run: bool = False,
         return 0
     logger.info(f"Loaded {len(records)} tickers from forecast")
 
-    tickers = [r['ticker'] for r in records]
-    logger.info(f"Fetching prices for {len(tickers)} tickers...")
-    prices, source = await fetch_current_prices(ib, tickers)
-    logger.info(f"Got prices for {len(prices)}/{len(tickers)} tickers [{source}]")
+    # Start with CSV prices, fill gaps from IB/yfinance
+    prices = {}
+    csv_price_count = 0
+    for rec in records:
+        if rec['current_price'] is not None:
+            prices[rec['ticker']] = rec['current_price']
+            csv_price_count += 1
+
+    logger.info(f"Using {csv_price_count}/{len(records)} prices from CSV")
+
+    # Fetch missing prices from IB/yfinance
+    missing_tickers = [r['ticker'] for r in records if r['ticker'] not in prices]
+    vol_ratios = {}
+    source = 'CSV'
+    if missing_tickers:
+        logger.info(f"Fetching {len(missing_tickers)} missing prices from market data...")
+        live_prices, vol_ratios, live_source = await fetch_current_prices(ib, missing_tickers)
+        prices.update(live_prices)
+        if csv_price_count > 0:
+            source = f"CSV ({csv_price_count}) + {live_source}" if live_prices else 'CSV'
+        else:
+            source = live_source
+    else:
+        # All prices from CSV — fetch vol_ratios separately
+        all_tickers = [r['ticker'] for r in records]
+        if ib is not None:
+            _, vol_ratios = await fetch_prices_ib(ib, all_tickers)
+            if vol_ratios:
+                logger.info(f"  IB vol ratios for {len(vol_ratios)}/{len(all_tickers)} tickers")
+        else:
+            # IB not connected — fall back to yfinance 1-min bar-relative ratio (delayed ~15m)
+            vol_ratios = fetch_vol_ratios_yfinance(all_tickers)
+    logger.info(f"Got prices for {len(prices)}/{len(records)} tickers [{source}]")
 
     state = load_state(date_str)
-    alerts = check_forecasts(records, prices, state)
+    alerts = check_forecasts(records, prices, vol_ratios, state)
 
     # Print status table
-    print(f"\n  {'Ticker':<8} {'Price':>10} {'S/R Level':>10} {'Bull':>5} {'Status':<15}")
-    print(f"  {'─'*8} {'─'*10} {'─'*10} {'─'*5} {'─'*15}")
+    print(f"\n  {'Ticker':<8} {'Price':>10} {'S/R Level':>10} {'Bull':>5} {'Vol':>6} {'Status':<15}")
+    print(f"  {'─'*8} {'─'*10} {'─'*10} {'─'*5} {'─'*6} {'─'*15}")
     for rec in records:
         ticker = rec['ticker']
         price = prices.get(ticker)
@@ -542,7 +696,9 @@ async def run_check(csv_path: Path, ib, dry_run: bool = False,
                 status = f"{'✅ BELOW' if price <= sr else '⏳ ABOVE'} ({diff_pct:+.1f}%)"
         price_str = f"${price:.2f}" if price else 'N/A'
         sr_str = f"${sr:.2f}" if sr else '—'
-        print(f"  {ticker:<8} {price_str:>10} {sr_str:>10} {bull:>5} {status:<15}")
+        vr = vol_ratios.get(ticker)
+        vol_str = f"{vr:.1f}x" if vr is not None else '—'
+        print(f"  {ticker:<8} {price_str:>10} {sr_str:>10} {bull:>5} {vol_str:>6} {status:<15}")
 
     if alerts:
         logger.info(f"🔔 {len(alerts)} alert(s) triggered!")
@@ -596,6 +752,185 @@ async def daemon_loop(csv_path: Path, dry_run: bool = False, force: bool = False
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
+def _prev_trading_day(from_date=None) -> str:
+    """Return the most recent trading day (Mon-Fri) before or on from_date as YYYY-MM-DD."""
+    from datetime import date, timedelta
+    d = from_date or date.today()
+    # Step back until we land on a weekday
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d -= timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
+def run_backtest(csv_path: Path, date_str: str, dry_run: bool = False) -> int:
+    """
+    Replay previous trading day bar-by-bar using yfinance 1-min data.
+    Checks every bar for S/R breaks, bounces, and direction changes.
+    Sends Discord notifications with volume annotation.
+    Returns total number of alerts triggered.
+    """
+    import yfinance as yf
+    from datetime import date
+
+    logger.info(f"{'='*60}")
+    logger.info(f"BACKTEST — {date_str} — {csv_path.name}")
+    logger.info(f"{'='*60}")
+
+    records = load_forecast(csv_path)
+    if not records:
+        logger.warning("No records found in CSV")
+        return 0
+    logger.info(f"Loaded {len(records)} tickers from forecast")
+
+    tickers = [r['ticker'] for r in records]
+    yf_tickers = [_YF_SYMBOL_MAP.get(t, t) for t in tickers]
+    yf_to_orig = {_YF_SYMBOL_MAP.get(t, t): t for t in tickers}
+
+    # Download 5 days of 1-min bars (needed to have enough history for vol ratio)
+    logger.info(f"Downloading 1-min bars for {len(tickers)} tickers...")
+    try:
+        data = yf.download(yf_tickers, period='5d', interval='1m', progress=False,
+                           group_by='ticker', threads=True)
+    except Exception as e:
+        logger.error(f"yfinance download failed: {e}")
+        return 0
+
+    # Auto-detect available dates and resolve target_date
+    # yfinance index is UTC — convert to ET to find actual trading dates
+    target_date = date.fromisoformat(date_str)
+    try:
+        _probe = data if len(yf_tickers) == 1 else data[yf_tickers[0]]
+        _idx_et = _probe.index.tz_convert('America/New_York') if _probe.index.tz else \
+                  _probe.index.tz_localize('America/New_York')
+        available_dates = sorted(set(_idx_et.date))
+    except Exception:
+        available_dates = []
+
+    if available_dates and target_date not in available_dates:
+        latest = available_dates[-1]
+        logger.warning(f"No data for {date_str}. Latest available: {latest}. Using {latest}.")
+        target_date = latest
+        date_str = str(latest)
+
+    # Build per-ticker DataFrames filtered to the backtest date (index in UTC, dates match ET dates)
+    ticker_bars: dict[str, pd.DataFrame] = {}
+
+    for yf_sym in yf_tickers:
+        orig = yf_to_orig[yf_sym]
+        try:
+            df = data if len(yf_tickers) == 1 else data[yf_sym]
+            if df.empty:
+                continue
+            if hasattr(df.columns, 'levels'):
+                df = df.copy()
+                df.columns = df.columns.get_level_values(-1)
+            df.columns = [c.lower() for c in df.columns]
+            # Convert index to ET so all date/hour comparisons are consistent
+            df.index = df.index.tz_convert('America/New_York') if df.index.tz else \
+                       df.index.tz_localize('America/New_York')
+            df_day = df[df.index.date == target_date].copy()
+            if df_day.empty:
+                logger.warning(f"  {orig}: no data for {date_str}")
+                continue
+            ticker_bars[orig] = df_day
+        except Exception as e:
+            logger.debug(f"  {orig}: {e}")
+            continue
+
+    if not ticker_bars:
+        logger.error(f"No bar data found for {date_str}.")
+        return 0
+
+    logger.info(f"Got bars for {len(ticker_bars)}/{len(tickers)} tickers on {date_str}")
+
+    # Get all unique bar timestamps (market hours only: 9:30-16:00 ET)
+    # Index is already in ET after the conversion above
+    all_timestamps = set()
+    for df in ticker_bars.values():
+        for ts in df.index:
+            if (ts.hour > 9 or (ts.hour == 9 and ts.minute >= 30)) and ts.hour < 16:
+                all_timestamps.add(ts)
+
+    timestamps = sorted(all_timestamps)
+    if not timestamps:
+        logger.error(f"No market-hours bars found for {date_str}")
+        return 0
+
+    logger.info(f"Replaying {len(timestamps)} bars from "
+                f"{timestamps[0].strftime('%H:%M')} to {timestamps[-1].strftime('%H:%M')} ET")
+
+    # Pre-seed state from CSV current_price to avoid false alerts for tickers
+    # already past S/R on the CSV date (prevent 42 spurious "already past" breaks)
+    state = {}
+    for rec in records:
+        ticker = rec['ticker']
+        if rec['current_price'] is not None and rec['sr_level'] is not None:
+            price = rec['current_price']
+            sr = rec['sr_level']
+            bullish = rec['bullish']
+            threshold_up = sr * (1 + BREAK_TOLERANCE_PCT / 100)
+            threshold_down = sr * (1 - BREAK_TOLERANCE_PCT / 100)
+
+            # Determine which side of SR the CSV price is on
+            # (regardless of forecast direction, to catch surprise breaks already in progress)
+            direction = None
+            if price >= threshold_up:
+                direction = 'UP'
+            elif price <= threshold_down:
+                direction = 'DOWN'
+
+            if direction:
+                state[f"{ticker}_break"] = {
+                    'direction': direction,
+                    'price': price,
+                }
+    logger.info(f"Pre-seeded state for {len(state)} tickers from CSV baseline prices")
+
+    all_alerts = []
+
+    for ts in timestamps:
+        # Build prices and vol_ratios at this exact bar
+        prices = {}
+        vol_ratios = {}
+        for ticker, df in ticker_bars.items():
+            # Index is already in ET — filter up to and including current bar
+            bars_so_far = df[df.index <= ts]
+            if bars_so_far.empty:
+                continue
+            close_col = [c for c in bars_so_far.columns if 'close' in c]
+            vol_col   = [c for c in bars_so_far.columns if 'volume' in c]
+            if close_col:
+                prices[ticker] = float(bars_so_far[close_col[0]].iloc[-1])
+            if vol_col and len(bars_so_far) >= VOL_ROLLING_BARS:
+                vol_series = bars_so_far[vol_col[0]].astype(float)
+                rolling_avg = vol_series.rolling(VOL_ROLLING_BARS).mean().iloc[-1]
+                latest_vol  = vol_series.iloc[-1]
+                if rolling_avg > 0:
+                    vol_ratios[ticker] = round(latest_vol / rolling_avg, 2)
+
+        bar_alerts = check_forecasts(records, prices, vol_ratios, state)
+        if bar_alerts:
+            ts_str = ts.strftime('%H:%M')
+            for a in bar_alerts:
+                a['bar_time'] = ts_str
+            all_alerts.extend(bar_alerts)
+            logger.info(f"  [{ts_str}] {len(bar_alerts)} alert(s): "
+                        + ", ".join(f"{a['ticker']} {a['type']}" for a in bar_alerts))
+
+    logger.info(f"{'='*60}")
+    logger.info(f"Backtest complete — {len(all_alerts)} total alerts on {date_str}")
+
+    if all_alerts:
+        # Annotate source label with backtest date for Discord
+        source = f"BACKTEST {date_str}"
+        send_discord_alert(all_alerts, source=source, dry_run=dry_run)
+    else:
+        logger.info("No alerts triggered — no notification sent")
+
+    return len(all_alerts)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Live20 forecast monitor')
     parser.add_argument('--file', help='Path to forecast CSV')
@@ -604,11 +939,18 @@ def main():
                         help='Run single check then exit (instead of daemon)')
     parser.add_argument('--force', action='store_true',
                         help='Run even outside market hours')
+    parser.add_argument('--backtest', metavar='DATE',
+                        help='Replay a trading day (YYYY-MM-DD). '
+                             'Omit for previous trading day.')
     args = parser.parse_args()
 
     csv_path = find_csv(args.file)
 
-    if args.once:
+    if args.backtest is not None:
+        # Backtest mode
+        date_str = args.backtest if args.backtest else _prev_trading_day()
+        run_backtest(csv_path, date_str, dry_run=args.dry_run)
+    elif args.once:
         # Single check mode
         async def _once():
             ib = await connect_ib()
