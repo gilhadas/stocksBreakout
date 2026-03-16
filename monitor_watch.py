@@ -268,6 +268,15 @@ def main() -> None:
     now_et  = datetime.now(NY_TZ)
     today   = now_et.strftime('%Y-%m-%d')
 
+    # Market-hours guard: skip silently outside 9:30–16:15 ET.
+    # Pre-market runs fetch 400+ symbols from yfinance and return "NO TODAY DATA" for all —
+    # pure wasted compute. Analysis: 48 pre-market runs, 0 status changes detected.
+    market_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=15, second=0, microsecond=0)
+    if not (market_open <= now_et <= market_close):
+        print(f'\n Monitor skipped — outside market hours ({now_et.strftime("%H:%M ET")})')
+        return
+
     watch_file = args.file or WATCH_FILES.get(args.mode, WATCH_FILES['daytrade'])
     symbols    = load_watch_list(watch_file)
 
@@ -332,15 +341,36 @@ def main() -> None:
                 **info,
             })
 
-        # Update state
+        # Update state — track consecutive FAILED count for auto-prune
+        consecutive_failed = prev_state.get('consecutive_failed', 0)
+        if status == 'FAILED':
+            consecutive_failed += 1
+        else:
+            consecutive_failed = 0
+
         state[sym] = {
-            'status':         status,
-            'checked_at':     now_et.strftime('%H:%M'),
+            'status':             status,
+            'checked_at':         now_et.strftime('%H:%M'),
+            'consecutive_failed': consecutive_failed,
             'last_alerted_at': (now_et.strftime('%H:%M')
                                 if do_alert
                                 else prev_state.get('last_alerted_at')),
             **info,
         }
+
+    # Auto-prune: remove symbols that have been FAILED for 3+ consecutive checks.
+    # The watch list grows to 400-470 symbols without pruning, slowing every run.
+    # FAILED = stop was hit; no reason to keep monitoring.
+    prune_threshold = 3
+    to_prune = {sym for sym, s in state.items()
+                if s.get('consecutive_failed', 0) >= prune_threshold}
+    if to_prune:
+        remaining = [s for s in symbols if s not in to_prune]
+        if len(remaining) < len(symbols):
+            watch_path = Path(watch_file)
+            watch_path.write_text('\n'.join(remaining))
+            print(f' Auto-pruned {len(to_prune)} persistently FAILED symbols from watch list '
+                  f'({len(symbols)} → {len(remaining)}): {", ".join(sorted(to_prune))}')
 
     save_state(state, today)
     print()

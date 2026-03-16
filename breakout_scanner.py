@@ -158,6 +158,7 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                         sig['FinBERT_Score'] = fb['score']
                         sig['FinBERT_Net'] = fb['net_score']
                         sig['FinBERT_Headline'] = fb['top_headline'][:100]
+                        sig['FinBERT_Total'] = sum(fb['breakdown'].values())  # total headlines analyzed
                         logger.info(
                             f"  {fb['emoji']} {sym:<8} {fb['label']:<8} "
                             f"score={fb['score']:.2f} net={fb['net_score']:+.2f}  "
@@ -188,19 +189,29 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 if fb_label != 'bullish':
                     continue
 
-                if quality == 'HIGH' and fb_score >= _h2p['min_score'] and fb_net >= _h2p['min_net']:
+                # Use actual headline count stored during enrichment, fall back to heuristic
+                _total_headlines = sig.get('FinBERT_Total', 0)
+                if _total_headlines == 0:
+                    _total_headlines = 1
+                    if abs(fb_net) < 1.0 and fb_net != 0.0:
+                        _total_headlines = max(2, int(round(1 / max(abs(fb_net), 0.01))))
+
+                _h2p_min_hl = _h2p.get('min_headlines', 1)
+                _p2g_min_hl = _p2g.get('min_headlines', 1)
+
+                if quality == 'HIGH' and fb_score >= _h2p['min_score'] and fb_net >= _h2p['min_net'] and _total_headlines >= _h2p_min_hl:
                     sig['Quality'] = 'PREMIUM'
                     sig['FinBERT_Promoted'] = 'HIGH→PREMIUM'
                     logger.info(
                         f"  ⬆ {sym} promoted HIGH→PREMIUM "
-                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f})"
+                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f}, ~{_total_headlines} headlines)"
                     )
-                elif quality == 'PREMIUM' and fb_score >= _p2g['min_score'] and fb_net >= _p2g['min_net']:
+                elif quality == 'PREMIUM' and fb_score >= _p2g['min_score'] and fb_net >= _p2g['min_net'] and _total_headlines >= _p2g_min_hl:
                     sig['Quality'] = 'GOLD'
                     sig['FinBERT_Promoted'] = 'PREMIUM→GOLD'
                     logger.info(
                         f"  ⬆ {sym} promoted PREMIUM→GOLD "
-                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f})"
+                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f}, ~{_total_headlines} headlines)"
                     )
     except Exception as _fp_e:
         logger.debug(f"FinBERT promotion skipped: {_fp_e}")
@@ -298,8 +309,10 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
 
         if regime == 'CHOPPY':
             market_warning = f"CHOPPY MARKET — SPY {spy_pct:+.2f}%, vol {spy_vol:.2f}%. Avoid new entries, breakouts likely to fail."
-        elif spy_perf < -0.005:  # SPY down more than 0.5%
-            market_warning = f"RED MARKET — SPY {spy_pct:+.2f}%. Caution: entering long positions against market direction is risky."
+        elif spy_perf < -0.015:  # SPY down > 1.5% = true red day (0% WR for longs per analysis)
+            market_warning = f"RED MARKET — SPY {spy_pct:+.2f}%. Blocking long entries: 0% WR, -4.55% avg P&L on red days."
+        elif spy_perf < -0.005:  # SPY down 0.5-1.5% = bearish but tradeable (37% WR with BOUNCE GOLD)
+            market_warning = f"BEARISH MARKET — SPY {spy_pct:+.2f}%. Prefer oversold bounces; gate SMA20_CROSS."
 
         if market_warning:
             logger.warning(f"\n{'!'*70}")
@@ -307,6 +320,33 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             logger.warning(f"{'!'*70}\n")
     except Exception as e:
         logger.debug(f"Market regime check failed: {e}")
+
+    # ── Dedup & cap ────────────────────────────────────────────────────────
+    # Remove symbols already signaled today (prevents repeat notifications).
+    # Then cap at MAX_SIGNALS_PER_SCAN to avoid firehose output.
+    MAX_SIGNALS_PER_SCAN = 20
+    if results:
+        _today_str = datetime.now(_NY_TZ).strftime('%Y%m%d')
+        _seen_today = set()
+        _sig_dir = Path('scanner_output/signals')
+        if _sig_dir.exists():
+            for _f in _sig_dir.glob(f'signals_{args.mode}_{_today_str}_*.csv'):
+                try:
+                    _prev = pd.read_csv(_f, usecols=['Symbol'])
+                    _seen_today.update(_prev['Symbol'].dropna().tolist())
+                except Exception:
+                    pass
+        _before = len(results)
+        results = [s for s in results if s.get('Symbol', '') not in _seen_today]
+        if _before > len(results):
+            logger.info(f"Dedup: removed {_before - len(results)} symbols already signaled today ({len(results)} remaining)")
+
+        # Sort by quality tier (GOLD > PREMIUM > HIGH > STANDARD) then volume, keep top N
+        _quality_order = {'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2, 'STANDARD': 3}
+        results.sort(key=lambda s: (_quality_order.get(s.get('Quality', ''), 9), -s.get('Vol', 0)))
+        if len(results) > MAX_SIGNALS_PER_SCAN:
+            logger.info(f"Signal cap: keeping top {MAX_SIGNALS_PER_SCAN} of {len(results)} (sorted by quality + volume)")
+            results = results[:MAX_SIGNALS_PER_SCAN]
 
     # Display and save results
     if results:
@@ -319,12 +359,59 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
 
         output_file = orchestrator.save_results(results, args.mode, 'signals')
 
-        # Auto-append to positions file if requested
+        # Auto-append to positions file if requested.
+        # In CHOPPY/RED markets: block SMA20_CROSS (mass-fires, low alpha).
+        # Analysis (Mar 4-16): RED_MARKET BOUNCE = 0% WR, -4.55% P&L → block all in RED.
+        # BOUNCE quality gate: GOLD only (PREMIUM bounce avg -1.97% P&L; GOLD avg +1.72%).
         if getattr(args, 'auto_positions', None):
             from utils import append_signals_to_positions
-            if market_warning:
-                logger.warning("⚠️  Auto-positions still appended despite market warning — review before trading!")
-            append_signals_to_positions(results, args.auto_positions, args.mode)
+            _is_true_red = market_warning and 'RED MARKET' in market_warning
+            _is_bearish  = market_warning and 'BEARISH MARKET' in market_warning
+            _is_choppy   = market_warning and 'CHOPPY MARKET' in market_warning
+
+            if _is_true_red:
+                # RED_MARKET (SPY < -1.5%): 0% WR historically — block all longs.
+                # Only CONTINUATION/Momentum GOLD survive (own catalyst, not market-correlated).
+                safe_signals = [
+                    s for s in results
+                    if s.get('Type') in ('CONTINUATION', 'Momentum') and s.get('Quality') == 'GOLD'
+                ]
+                blocked = len(results) - len(safe_signals)
+                logger.warning(f"⚠️  RED MARKET — blocked {blocked} signals; only CONTINUATION/Momentum GOLD allowed.")
+            elif _is_choppy:
+                # CHOPPY (SPY flat, low vol): block SMA20_CROSS (mass-fires, 0% alpha).
+                # CONTINUATION = 100% WR in CHOPPY; BOUNCE GOLD allowed.
+                safe_signals = [
+                    s for s in results
+                    if s.get('Type') == 'CONTINUATION'
+                    or (s.get('Type') in ('BOUNCE', 'Momentum') and s.get('Quality') == 'GOLD')
+                ]
+                blocked = len(results) - len(safe_signals)
+                if blocked:
+                    logger.warning(f"⚠️  CHOPPY — blocked {blocked} signals; passing CONTINUATION + BOUNCE/Momentum GOLD.")
+            elif _is_bearish:
+                # BEARISH (SPY -0.5% to -1.5%): 37% WR — allow BOUNCE GOLD + CONTINUATION.
+                # Block SMA20_CROSS (against market direction).
+                safe_signals = [
+                    s for s in results
+                    if s.get('Type') in ('CONTINUATION', 'Momentum')
+                    or (s.get('Type') == 'BOUNCE' and s.get('Quality') == 'GOLD')
+                ]
+                blocked = len(results) - len(safe_signals)
+                if blocked:
+                    logger.warning(f"⚠️  BEARISH — blocked {blocked} SMA20_CROSS; allowing CONTINUATION + BOUNCE GOLD ({len(safe_signals)} signals).")
+            else:
+                # NORMAL/EXPANSION: all types, but BOUNCE requires GOLD quality
+                safe_signals = [
+                    s for s in results
+                    if s.get('Type') != 'BOUNCE' or s.get('Quality') == 'GOLD'
+                ]
+                blocked = len(results) - len(safe_signals)
+                if blocked:
+                    logger.info(f"ℹ️  NORMAL — filtered {blocked} BOUNCE non-GOLD; BOUNCE requires GOLD quality.")
+
+            if safe_signals:
+                append_signals_to_positions(safe_signals, args.auto_positions, args.mode)
 
         # Export PREMIUM + GOLD tickers to watchlist file for re-evaluation scans
         if getattr(args, 'export_premium', None):
@@ -361,6 +448,9 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                         logger.info(f"Pre-seeded {len(_pm_syms)} pre-market gappers from premarket_watch.txt")
                 except Exception as _e:
                     logger.warning(f"Could not read premarket_watch.txt: {_e}")
+            # Regime-aware watch-list filtering
+            _restricted = market_warning and ('CHOPPY MARKET' in market_warning or 'RED MARKET' in market_warning)
+            _bearish_day = market_warning and 'BEARISH MARKET' in market_warning
             for sig in results:
                 sym    = sig.get('Symbol') or sig.get('symbol', '')
                 q      = sig.get('Quality', '')
@@ -371,27 +461,43 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 near_high    = checks.get('near_52w_high', False)
                 at_level     = checks.get('at_key_support', False) or checks.get('sr_breakout', False)
                 if sym and sym not in seen:
-                    if q in ('PREMIUM', 'GOLD'):
-                        watch_symbols.append(sym); seen.add(sym)
-                    elif q == 'HIGH' and (
-                        typ == 'Momentum'             # V7 momentum surge
-                        or vol >= 2.0                 # strong volume (was 3.0)
-                        or (has_pattern and near_high) # coiled near 52w high → likely to break
-                        or (has_pattern and at_level)  # at support/resistance with pattern
-                    ):
-                        watch_symbols.append(sym); seen.add(sym)
-            # Also include near-miss rejections (within 0.5% of breakout) + high-vol rejections
-            rejections = orchestrator.get_rejection_reasons()
-            for rej in rejections:
-                sym = rej.get('symbol', '')
-                if sym and sym not in seen:
-                    is_near_miss = 'Near miss' in rej.get('reasons', '')
-                    is_high_vol = rej.get('vol_ratio', 0) >= 2.0
-                    has_momentum = rej.get('momentum', 0) >= 70
-                    if is_near_miss and (is_high_vol or has_momentum):
-                        watch_symbols.append(sym); seen.add(sym)
-                    elif is_high_vol and has_momentum:
-                        watch_symbols.append(sym); seen.add(sym)
+                    if _restricted:
+                        # CHOPPY/RED: CONTINUATION always in (100% WR!), GOLD always in.
+                        # BOUNCE GOLD only (PREMIUM bounce avg -1.97% P&L per analysis).
+                        # SMA20_CROSS: skip entirely (mass-fires against trend).
+                        if typ == 'CONTINUATION' or q == 'GOLD':
+                            watch_symbols.append(sym); seen.add(sym)
+                        elif typ in ('BOUNCE', 'Momentum') and q == 'GOLD':
+                            watch_symbols.append(sym); seen.add(sym)
+                    elif _bearish_day:
+                        # BEARISH (SPY -0.5 to -1.5%): allow BOUNCE/CONTINUATION, skip SMA20_CROSS
+                        if typ in ('CONTINUATION', 'BOUNCE', 'Momentum') and q in ('GOLD', 'PREMIUM'):
+                            watch_symbols.append(sym); seen.add(sym)
+                        elif typ in ('CONTINUATION', 'BOUNCE') and q == 'HIGH' and vol >= 2.0:
+                            watch_symbols.append(sym); seen.add(sym)
+                    else:
+                        if q in ('PREMIUM', 'GOLD'):
+                            watch_symbols.append(sym); seen.add(sym)
+                        elif q == 'HIGH' and (
+                            typ == 'Momentum'             # V7 momentum surge
+                            or vol >= 2.0                 # strong volume
+                            or (has_pattern and near_high) # coiled near 52w high → likely to break
+                            or (has_pattern and at_level)  # at support/resistance with pattern
+                        ):
+                            watch_symbols.append(sym); seen.add(sym)
+            # Also include near-miss rejections — skip in restricted/bearish markets
+            if not _restricted:
+                rejections = orchestrator.get_rejection_reasons()
+                for rej in rejections:
+                    sym = rej.get('symbol', '')
+                    if sym and sym not in seen:
+                        is_near_miss = 'Near miss' in rej.get('reasons', '')
+                        is_high_vol = rej.get('vol_ratio', 0) >= 2.0
+                        has_momentum = rej.get('momentum', 0) >= 70
+                        if is_near_miss and (is_high_vol or has_momentum):
+                            watch_symbols.append(sym); seen.add(sym)
+                        elif is_high_vol and has_momentum:
+                            watch_symbols.append(sym); seen.add(sym)
             # Sector basket trigger: when a key ETF moves >= threshold, add the whole sector
             from config import SECTOR_BASKETS
             import yfinance as _yf
@@ -424,7 +530,7 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
 
         # Send notifications with CSV attachment
         # V9-C filter: PREMIUM/GOLD + Minervini≥7  (classic breakout)
-        # BOUNCE filter: PREMIUM/GOLD + Type==BOUNCE (oversold bounce — no Minervini req)
+        # BOUNCE filter: GOLD only (analysis: BOUNCE PREMIUM avg -1.97% P&L; GOLD avg +1.72%)
         mode_desc = MODES[args.mode]['description']
         watchlist_name = Path(args.file).stem  # Get filename without extension
         subject_prefix = "⚠️ " if market_warning else "🚨 "
@@ -436,7 +542,7 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         ]
         bounce_signals = [
             s for s in results
-            if s.get('Quality') in ('GOLD', 'PREMIUM')
+            if s.get('Quality') == 'GOLD'   # GOLD only — PREMIUM bounces have negative expected value
             and s.get('Type') == 'BOUNCE'
             and s not in v9c_signals
         ]

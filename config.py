@@ -317,12 +317,14 @@ SENTIMENT = {
 FINBERT_PROMOTION = {
     'enabled': True,
     'high_to_premium': {
-        'min_score': 0.70,   # e.g. 70% confident bullish
-        'min_net':   0.25,   # e.g. 5↑/2↓ out of 8 headlines
+        'min_score': 0.80,   # raised from 0.70 — need strong confidence
+        'min_net':   0.40,   # raised from 0.25 — need clear bullish majority
+        'min_headlines': 2,  # NEW: at least 2 bullish headlines (not 1-of-1)
     },
     'premium_to_gold': {
-        'min_score': 0.82,   # higher bar — GOLD is the top tier
-        'min_net':   0.40,   # majority of headlines clearly bullish
+        'min_score': 0.88,   # raised from 0.82 — GOLD must be high-conviction
+        'min_net':   0.60,   # raised from 0.40 — strong bullish consensus
+        'min_headlines': 3,  # NEW: at least 3 headlines analyzed
     },
 }
 

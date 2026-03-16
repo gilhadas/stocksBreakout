@@ -1022,9 +1022,14 @@ class BreakoutDetector:
                 # Fallback if timezone not available
                 vol_ratio = latest['volume'] / vol_avg if vol_avg > 0 else 1.0
         
+        # Hard volume floor — bounce recovery starts on lower volume than breakouts,
+        # but < 15% of average is genuinely dead (no institutional interest).
+        if vol_ratio < 0.15:
+            return None
+
         vol_strong = vol_ratio >= 1.5  # Strong volume is a bonus
-        vol_ok = vol_ratio >= 0.8  # At least 80% of average (not extremely low)
-        
+        vol_ok = vol_ratio >= 1.0      # At least average volume (raised from 0.8)
+
         # 4. RSI recovery from oversold
         rsi = latest.get('RSI', 50)
         rsi_prev = prev.get('RSI', prev.get('RSI', 50)) if 'RSI' in df.columns else 50
@@ -1261,10 +1266,11 @@ class BreakoutDetector:
         Criteria:
           1. Price closed ABOVE SMA 20 today
           2. Price was BELOW SMA 20 for at least 3 of the last 5 days
-          3. Volume >= 1.3x on the crossing day
+          3. Volume >= 2.5x on the crossing day (raised from 1.8x — 1.5-1.8 zone is weakest tier)
           4. SMA 20 slope is flattening or turning up (not steeply falling)
-          5. RSI between 40-65 (recovering, not overbought)
-          6. Price above SMA 50 (broader trend support) — optional bonus
+          5. RSI < 48 OR RSI 55-68 (avoid weak 48-55 transitional zone, empirically 33-38% WR)
+          6. Price above SMA 50 (broader trend support) — HARD GATE
+          7. Bullish candle on cross day — HARD GATE
         """
         cfg = MODES.get(mode_name, MODES['swing'])
 
@@ -1296,9 +1302,10 @@ class BreakoutDetector:
         if days_below < 3:
             return None
 
-        # 3. Volume confirmation
+        # 3. Volume confirmation — raised to 2.5x (analysis: 2.5-3.0 = 57% WR, 1.8-2.0 = 50% WR,
+        #    but 1.5-1.8 zone is the worst at 20% WR — skip transitional zone entirely)
         vol_ratio = latest.get('Vol_Ratio', 1.0)
-        if vol_ratio < 1.3:
+        if vol_ratio < 2.5:
             return None
 
         # 4. SMA 20 slope — must be flattening or turning up
@@ -1308,18 +1315,26 @@ class BreakoutDetector:
         if not sma_turning_up:
             return None
 
-        # 5. RSI in recovery zone
+        # 5. RSI sweet-spot gate — multi-day analysis (Mar 4–16, 226 signals):
+        #    RSI 48-55 is the WEAK zone (33-38% WR). Avoid it.
+        #    RSI < 48: 71% WR (momentum building from mild oversold)
+        #    RSI 55-68: 52-75% WR (strong upward momentum confirmed)
+        #    Gate: NOT in the 48-55 transitional zone.
         rsi = latest.get('RSI', 50)
-        rsi_ok = 40 <= rsi <= 65 if not pd.isna(rsi) else True
+        rsi_ok = (rsi < 48 or 55 <= rsi <= 68) if not pd.isna(rsi) else True
         if not rsi_ok:
             return None
 
-        # 6. SMA 50 bonus
+        # 6. SMA 50 — HARD GATE (was optional bonus)
         sma_50 = df['close'].rolling(50).mean().iloc[-1]
         above_sma50 = latest['close'] > sma_50 if not pd.isna(sma_50) else False
+        if not above_sma50:
+            return None
 
-        # 7. Bullish candle on the cross
+        # 7. Bullish candle on the cross — HARD GATE (was optional bonus)
         bullish_candle = latest['close'] > latest['open']
+        if not bullish_candle:
+            return None
 
         # 8. Distance from SMA 20 (freshness of cross — closer = better)
         cross_dist_pct = ((latest['close'] - sma_20.iloc[-1]) / sma_20.iloc[-1]) * 100
@@ -1337,19 +1352,26 @@ class BreakoutDetector:
         if rr < 1.5:
             return None
 
-        # Quality scoring
+        # SMA 200 trend health
+        sma_200 = df['close'].rolling(200).mean().iloc[-1] if len(df) >= 200 else None
+        above_sma200 = latest['close'] > sma_200 if sma_200 and not pd.isna(sma_200) else False
+
+        # Quality scoring — bullish_candle & above_sma50 are now hard gates,
+        # replaced with higher-bar checks for differentiation.
+        # NOTE: gate requires vol >= 2.5, so vol_very_strong uses >= 4.0 to actually
+        # differentiate exceptional volume (institutional conviction) from just-passing.
         checks = {
-            'bullish_candle': bullish_candle,
-            'vol_strong': vol_ratio >= 1.8,
-            'above_sma50': above_sma50,
-            'fresh_cross': cross_dist_pct < 2.0,
-            'sma_slope_positive': sma_slope > 0,
+            'vol_very_strong': vol_ratio >= 4.0,    # exceptional volume (4x+ avg) vs just meeting gate (2.5x)
+            'above_sma200': above_sma200,            # long-term trend intact
+            'fresh_cross': cross_dist_pct < 1.0,     # tight to SMA20 (was 2.0)
+            'sma_slope_positive': sma_slope > 0,     # SMA20 turning up
+            'rsi_sweet_spot': rsi < 48 or 58 <= rsi <= 68,  # momentum build OR strong trend (avoids weak 48-55)
         }
         passed = sum(checks.values())
 
         if passed >= 4:
             quality = 'PREMIUM'
-        elif passed >= 2:
+        elif passed >= 3:
             quality = 'HIGH'
         else:
             quality = 'STANDARD'

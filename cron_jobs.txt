@@ -112,15 +112,17 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
-# MOMENTUM-WATCH MONITOR (Every 15 minutes)
+# MOMENTUM-WATCH MONITOR (Every 10 minutes)
 # ============================================
 # monitor_watch.py writes state files only — no signal/portfolio output, no S3 upload needed
+# Analysis (Mar 4-16): */10 catches 89% of critical exits vs 75% at */15.
+# monitor_watch.py has built-in 9:30-16:15 ET market-hours guard — pre-market runs are no-ops.
 
 # Every weekday at 9:45 AM ET - First check after Phase 1 scan
 45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
 
-# Every 15 minutes from 10:00 AM to 3:45 PM ET
-*/15 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+# Every 10 minutes from 10:00 AM to 3:50 PM ET (raised from */15 for +14% critical coverage)
+*/10 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
 
 # Every weekday at 4:00 PM ET - Final check at market close
 0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
