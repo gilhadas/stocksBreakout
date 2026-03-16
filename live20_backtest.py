@@ -16,6 +16,7 @@ Output:
 """
 
 import argparse
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -348,8 +349,9 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
             if sr is None:
                 continue
 
-            # Rule 1: Skip tickers with earnings in Remarks — unpredictable event risk
-            if any(kw in remarks.lower() for kw in ('earn', 'report', 'er ', 'eps')):
+            # Rule 1: Skip tickers with earnings in Remarks (ER = Earnings Report shortcut)
+            if re.search(r'\bER\b', remarks) or \
+               any(kw in remarks.lower() for kw in ('earn', 'report', 'eps')):
                 continue
 
             # Check for entry signals
