@@ -47,13 +47,16 @@ ONLY_PREDICTED_TRADES = True  # Only enter if direction matches forecast (test f
 class Trade:
     """Tracks a single trade from entry to exit."""
     def __init__(self, ticker: str, entry_time: datetime, entry_price: float,
-                 direction: str, is_predicted: bool, sr_level: float):
+                 direction: str, is_predicted: bool, sr_level: float,
+                 forecast_date: str | None = None, csv_is_predicted: bool = False):
         self.ticker = ticker
         self.entry_time = entry_time
         self.entry_price = entry_price
         self.direction = direction  # 'UP' or 'DOWN'
         self.is_predicted = is_predicted  # True if matches forecast
         self.sr_level = sr_level
+        self.forecast_date = forecast_date
+        self.csv_is_predicted = csv_is_predicted  # From CSV 'is predicted' column
 
         self.exit_time = None
         self.exit_price = None
@@ -86,10 +89,12 @@ class Trade:
     def to_dict(self) -> dict:
         return {
             'ticker': self.ticker,
+            'forecast_date': self.forecast_date or '—',
             'entry_time': self.entry_time.strftime('%Y-%m-%d %H:%M:%S'),
             'entry_price': f"${self.entry_price:.2f}",
             'direction': self.direction,
             'predicted': 'YES' if self.is_predicted else 'SURPRISE',
+            'csv_predicted': 'YES' if self.csv_is_predicted else 'NO',
             'exit_time': self.exit_time.strftime('%Y-%m-%d %H:%M:%S') if self.exit_time else '—',
             'exit_price': f"${self.exit_price:.2f}" if self.exit_price else '—',
             'exit_reason': self.exit_reason or '—',
@@ -108,9 +113,11 @@ class VirtualPortfolio:
 
     def open_trade(self, ticker: str, entry_time: datetime, entry_price: float,
                    direction: str, is_predicted: bool, sr_level: float,
-                   atr: float | None = None) -> Trade:
+                   atr: float | None = None, forecast_date: str | None = None,
+                   csv_is_predicted: bool = False) -> Trade:
         """Open a new position."""
-        trade = Trade(ticker, entry_time, entry_price, direction, is_predicted, sr_level)
+        trade = Trade(ticker, entry_time, entry_price, direction, is_predicted,
+                      sr_level, forecast_date, csv_is_predicted)
         if atr:
             trade.initial_atr = atr
             if direction == 'UP':
@@ -313,7 +320,7 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
     if SKIP_ALREADY_BROKEN:
         for rec in records:
             ticker = rec['ticker']
-            price = rec['current_price']
+            price = rec['start_price']  # Price at forecast creation time
             sr = rec['sr_level']
             if price is None or sr is None:
                 continue
@@ -345,6 +352,8 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
             remarks = rec.get('remarks', '')
             bounce = rec.get('bounce_value')
             wait_direction = rec.get('wait_direction', False)
+            forecast_date = rec.get('forecast_date')
+            csv_is_predicted = rec.get('is_predicted', False)
 
             if sr is None:
                 continue
@@ -381,7 +390,8 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
                         vol_avg = bars_so_far['volume'].tail(20).mean() if 'volume' in bars_so_far.columns else 1
                         vol_ratio = volume / vol_avg if vol_avg > 0 else 0
                         if vol_ratio == 0 or vol_ratio >= MIN_VOLUME_RATIO:
-                            trade = portfolio.open_trade(ticker, ts, close, 'UP', False, sr, atr)
+                            trade = portfolio.open_trade(ticker, ts, close, 'UP', False, sr, atr,
+                                                         forecast_date, csv_is_predicted)
                             entry_state[ticker]['already_entered'] = True
                             atr_str = f"{atr:.2f}" if atr else "N/A"
                             vol_str = f"{vol_ratio:.1f}x" if vol_ratio > 0 else "N/A"
@@ -399,7 +409,8 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
                         vol_avg = bars_so_far['volume'].tail(20).mean() if 'volume' in bars_so_far.columns else 1
                         vol_ratio = volume / vol_avg if vol_avg > 0 else 0
                         if vol_ratio == 0 or vol_ratio >= MIN_VOLUME_RATIO:
-                            trade = portfolio.open_trade(ticker, ts, close, 'UP', False, sr, atr)
+                            trade = portfolio.open_trade(ticker, ts, close, 'UP', False, sr, atr,
+                                                         forecast_date, csv_is_predicted)
                             entry_state[ticker]['already_entered'] = True
                             atr_str = f"{atr:.2f}" if atr else "N/A"
                             vol_str = f"{vol_ratio:.1f}x" if vol_ratio > 0 else "N/A"
@@ -449,7 +460,8 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
                 # Only enter if volume is adequate or we don't care (vol_ratio = 0 means no data)
                 if vol_ratio == 0 or vol_ratio >= MIN_VOLUME_RATIO:
                     trade = portfolio.open_trade(
-                        ticker, ts, close, direction, is_predicted, sr, atr
+                        ticker, ts, close, direction, is_predicted, sr, atr,
+                        forecast_date, csv_is_predicted
                     )
                     entry_state[ticker]['already_entered'] = True
                     pred_label = "✓" if is_predicted else "✗"
@@ -511,15 +523,27 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
             if not t.is_predicted and t.pnl > 0
         )
 
-        print(f"Prediction accuracy:")
+        print(f"Prediction accuracy (backtest-computed):")
         print(f"  Predicted ({predicted}): {predicted_correct}/{predicted} correct "
               f"({100*predicted_correct/predicted if predicted else 0:.0f}%)")
         print(f"  Surprises ({surprises}): {surprises_correct}/{surprises} correct "
               f"({100*surprises_correct/surprises if surprises else 0:.0f}%)")
+
+        # CSV 'is predicted' accuracy (from forecast author)
+        csv_pred_total = sum(1 for t in portfolio.closed_trades if t.csv_is_predicted)
+        csv_pred_correct = sum(1 for t in portfolio.closed_trades if t.csv_is_predicted and t.pnl and t.pnl > 0)
+        csv_not_pred = len(portfolio.closed_trades) - csv_pred_total
+        csv_not_pred_correct = sum(1 for t in portfolio.closed_trades if not t.csv_is_predicted and t.pnl and t.pnl > 0)
+        print(f"\nCSV 'is predicted' accuracy (from forecast):")
+        print(f"  Predicted=YES ({csv_pred_total}): {csv_pred_correct}/{csv_pred_total} profitable "
+              f"({100*csv_pred_correct/csv_pred_total if csv_pred_total else 0:.0f}%)")
+        print(f"  Predicted=NO  ({csv_not_pred}): {csv_not_pred_correct}/{csv_not_pred} profitable "
+              f"({100*csv_not_pred_correct/csv_not_pred if csv_not_pred else 0:.0f}%)")
         print()
 
-    # CSV report
-    output_file = Path('scanner_output') / 'live20_backtest_report.csv'
+    # CSV report (organized in live20 folder)
+    file_date = start_date.replace("-", "")
+    output_file = Path('scanner_output/live20') / f'backtest_{file_date}_report.csv'
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     df_trades = pd.DataFrame([t.to_dict() for t in portfolio.closed_trades])
@@ -527,7 +551,7 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
     print(f"Trade report: {output_file}")
 
     # Summary stats file
-    stats_file = Path('scanner_output') / 'live20_backtest_stats.txt'
+    stats_file = Path('scanner_output/live20') / f'backtest_{file_date}_stats.txt'
     with open(stats_file, 'w') as f:
         f.write(f"Live20 Backtest: {start_date} → {end_date}\n")
         f.write(f"Forecast: {csv_path.name}\n\n")

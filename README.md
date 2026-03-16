@@ -30,9 +30,10 @@ backtesting, and automated cron + Discord notifications.
 18. [IB Connection](#ib-connection)
 19. [Batch Execution with Shared Data Loading](#batch-execution-with-shared-data-loading-job_launcherpy)
 20. [Cron Agent with Scheduler](#cron-agent-with-scheduler-cron_agentpy)
-21. [Regime Detection](#regime-detection-regime_detectorpy)
-22. [Troubleshooting](#troubleshooting)
-23. [Environment Setup](#environment-setup)
+21. [Automated Test Agent](#automated-test-agent-automated_test_agentpy)
+22. [Regime Detection](#regime-detection-regime_detectorpy)
+23. [Troubleshooting](#troubleshooting)
+24. [Environment Setup](#environment-setup)
 
 ---
 
@@ -1613,6 +1614,152 @@ python3 --version
 - New: `minute: List[int] = [0, 15, 30, 45]` (preserves pattern)
 
 **Result**: ✅ Fixed—portfolio/monitor jobs now run correctly (4 times/hour vs 60).
+
+---
+
+## Automated Test Agent (`automated_test_agent.py`)
+
+Full trading day simulator that runs complete scanner workflow on schedule, capturing live results and sending consolidated email/Telegram reports. Ideal for backtesting production workflows, validating new features, or running end-to-end tests.
+
+### Purpose
+
+- **Simulate a complete trading day** (8:00 AM — 4:15 PM ET) with all scanner modules
+- **Run in parallel**: Breakout scanner (cron_agent) + MACD/RSI scanner + comparison reports
+- **Capture results**: Each scheduled job output is logged and grepped for signals
+- **Generate reports**: Email summary + Telegram notification with daily statistics
+- **Dry-run mode**: Preview schedule without executing (testing only)
+
+### What It Executes
+
+The agent runs a structured schedule covering:
+
+**Morning Phase (8:00–9:35 AM)**
+- Pre-market gap scans (2 runs)
+- Opening surge detection
+- Parallel MACD/RSI scans
+- Phase 1 breakout scans (daytrade + swing)
+
+**Intraday Phase (9:45 AM–4:00 PM)**
+- Hourly momentum watch monitors (every hour)
+- 15-minute portfolio tracking
+- Daytrade re-evaluation at 2 PM + 3:30 PM
+- Parallel MACD/RSI updates
+
+**Close Phase (4:00–4:15 PM)**
+- Final portfolio snapshot
+- End-of-day summary statistics
+
+### Quick Start
+
+#### 1. Dry-Run Mode (No Execution)
+
+Preview the full schedule without running any commands:
+
+```bash
+python automated_test_agent.py --dry-run
+```
+
+Output shows:
+- All scheduled jobs with timestamps (NY time)
+- Command to be executed
+- Checks/grepping rules for each job
+- Estimated duration for each phase
+
+#### 2. Run Full Day (Real Execution)
+
+Schedule and execute all jobs for today's date (NY time):
+
+```bash
+python automated_test_agent.py
+```
+
+The agent will:
+- Compute today's date in NY timezone
+- Schedule all jobs using APScheduler
+- Execute each job at its scheduled time
+- Capture stdout/stderr from each command
+- Grep output for signal counts, alerts, errors
+- Sleep until next scheduled time
+- Generate final email/Telegram report at 4:15 PM
+
+#### 3. Execution Details
+
+As the day progresses, the agent logs:
+
+```
+2026-03-13 08:00:00 | INFO     | Starting job: cron_0800 — [BREAKOUT] Premarket Gap Check #1
+2026-03-13 08:00:05 | INFO     | ✓ Gap alerts: 12 new gaps detected (grep: scanner_output/logs/cron_premarket.log)
+2026-03-13 08:00:10 | INFO     | Job completed in 5.2 seconds
+2026-03-13 08:45:00 | INFO     | Starting job: cron_0845 — [BREAKOUT] Premarket Gap Check #2
+...
+2026-03-13 16:15:00 | INFO     | ✓ Job completed — generating daily report
+2026-03-13 16:15:15 | INFO     | Report sent via email + Telegram
+```
+
+### Capture & Report
+
+Each scheduled job includes **checks** (grep queries) that extract key metrics:
+
+| Job | Checks |
+|-----|--------|
+| Premarket (8:00 AM) | Gap alerts from log, signal count |
+| Opening Surge (9:31 AM) | Surge signals, volume expansion |
+| Phase 1 Scans (9:35 AM) | CONTINUATION + SMA20_CROSS counts |
+| Hourly Monitor (10:00–4:00 PM) | Watch alerts, portfolio alerts, alert count |
+| Phase 2 Scan (2:00 PM) | New signals since 9:35 |
+| EOD Summary (4:15 PM) | Total signals by type, total alerts sent, missed movers |
+
+### Final Report
+
+At 4:15 PM, the agent generates a summary report sent via email + Telegram:
+
+```
+🔔 AUTOMATED TEST AGENT — Trading Day Summary
+Date: 2026-03-13 (Friday)
+
+BREAKOUT SCANNER (cron_agent)
+  Phase 1 (9:35 AM): 47 breakout signals
+    • CONTINUATION: 23
+    • SMA20_CROSS: 12
+    • VOLUME_SPIKE: 9
+    • Other: 3
+
+  Phase 2 (2:00 PM): 18 new signals
+
+  Total Watch Alerts Sent: 156
+  Total Portfolio Alerts: 89
+  Missed Movers: 5
+
+MACD/RSI SCANNER (parallel)
+  Daily Scan: 34 signals
+  Intraday Scans: 127 signals
+  Portfolio P&L: +2.3%
+
+COMPARISON REPORT
+  Agreement (both scanners): 18 signals
+  Divergence: 63 signals
+```
+
+### Options
+
+```bash
+# Dry-run: preview without executing
+python automated_test_agent.py --dry-run
+
+# Run real schedule
+python automated_test_agent.py
+
+# Custom log output level
+python automated_test_agent.py --log-level DEBUG
+```
+
+### When to Use
+
+✅ **Running nightly backtests** to validate production workflows
+✅ **Testing new scanner features** end-to-end before deploying
+✅ **Validating cron schedule** matches market hours
+✅ **Capturing metrics** for dashboard/reporting
+✅ **Training new systems** with realistic daily workflow
 
 ---
 

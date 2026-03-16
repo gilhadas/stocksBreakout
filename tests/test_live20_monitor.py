@@ -38,12 +38,15 @@ def _make_records(**overrides) -> list[dict]:
     """Return a single forecast record, with optional overrides."""
     base = {
         'ticker': 'AAPL',
-        'current_price': 100.0,
+        'start_price': 100.0,
         'sr_level': 100.0,
+        'current_price': None,
         'bullish': True,
+        'is_predicted': False,
         'wait_direction': False,
         'bounce_value': None,
         'remarks': '',
+        'forecast_date': None,
     }
     base.update(overrides)
     return [base]
@@ -51,15 +54,19 @@ def _make_records(**overrides) -> list[dict]:
 
 def _make_csv_text(rows: list[dict]) -> str:
     """Build a minimal CSV string from a list of row dicts."""
-    cols = ['Ticker', 'current price', 'support/ressist', 'Bullish', 'WAIT FOR CHANGE DIRECTION',
+    cols = ['Ticker', '3/13/2026', 'start price', 'forcast', 'current price',
+            'Bullish', 'is predicted', 'WAIT FOR CHANGE DIRECTION',
             'bounce Value', 'Remarks']
     lines = [','.join(cols)]
     for r in rows:
         lines.append(','.join([
             str(r.get('Ticker', '')),
+            str(r.get('date', '')),
+            str(r.get('start price', '')),
+            str(r.get('forcast', '')),
             str(r.get('current price', '')),
-            str(r.get('support/ressist', '')),
             str(r.get('Bullish', '')),
+            str(r.get('is predicted', '')),
             str(r.get('WAIT FOR CHANGE DIRECTION', '')),
             str(r.get('bounce Value', '')),
             str(r.get('Remarks', '')),
@@ -76,28 +83,35 @@ class TestLoadForecast:
         csv = tmp_path / 'test.csv'
         # Write CSV with explicit column alignment, no empty cells that become NaN
         csv.write_text(
-            'Ticker,current price,support/ressist,Bullish,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
-            'AAPL,145,150,YES,NO,,\n'
+            'Ticker,3/13/2026,start price,forcast,current price,Bullish,is predicted,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
+            'AAPL,,145,150,148,YES,TRUE,NO,,\n'
         )
         records = m.load_forecast(csv)
         assert len(records) == 1
         rec = records[0]
         assert rec['ticker'] == 'AAPL'
-        assert rec['current_price'] == 145.0
+        assert rec['start_price'] == 145.0
         assert rec['sr_level'] == 150.0
+        assert rec['current_price'] == 148.0
         assert rec['bullish'] is True
+        assert rec['is_predicted'] is True
         assert rec['wait_direction'] is False
         assert rec['bounce_value'] is None
+        assert rec['forecast_date'] == '3/13/2026'
 
     def test_parses_bearish_no(self, tmp_path):
         csv = tmp_path / 'test.csv'
-        csv.write_text(_make_csv_text([{'Ticker': 'TSLA', 'current price': '391.2', 'support/ressist': '385',
-                                        'Bullish': 'NO', 'WAIT FOR CHANGE DIRECTION': 'YES',
+        csv.write_text(_make_csv_text([{'Ticker': 'TSLA', 'start price': '391.2', 'forcast': '385',
+                                        'current price': '395', 'Bullish': 'FALSE',
+                                        'is predicted': 'FALSE',
+                                        'WAIT FOR CHANGE DIRECTION': 'YES',
                                         'bounce Value': '416', 'Remarks': 'entry'}]))
         records = m.load_forecast(csv)
         rec = records[0]
-        assert rec['current_price'] == 391.2
+        assert rec['start_price'] == 391.2
+        assert rec['current_price'] == 395.0
         assert rec['bullish'] is False
+        assert rec['is_predicted'] is False
         assert rec['wait_direction'] is True
         assert rec['bounce_value'] == 416.0
         assert rec['remarks'] == 'entry'
@@ -106,9 +120,9 @@ class TestLoadForecast:
         csv = tmp_path / 'test.csv'
         # Empty first field → pandas reads as NaN → should be skipped
         csv.write_text(
-            'Ticker,current price,support/ressist,Bullish,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
-            ',100,100,YES,,,\n'            # empty Ticker cell → NaN → skipped
-            'AMZN,207,212,YES,,,\n'
+            'Ticker,3/13/2026,start price,forcast,current price,Bullish,is predicted,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
+            ',,100,100,,YES,,,,\n'            # empty Ticker cell → NaN → skipped
+            'AMZN,,207,212,,YES,,,,\n'
         )
         records = m.load_forecast(csv)
         assert len(records) == 1
@@ -117,47 +131,48 @@ class TestLoadForecast:
     def test_sr_level_non_numeric_becomes_none(self, tmp_path):
         csv = tmp_path / 'test.csv'
         csv.write_text(
-            'Ticker,current price,support/ressist,Bullish,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
-            'X,100,n/a,NO,,,\n'
+            'Ticker,3/13/2026,start price,forcast,current price,Bullish,is predicted,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
+            'X,,100,n/a,,NO,,,,\n'
         )
         records = m.load_forecast(csv)
         assert records[0]['sr_level'] is None
 
     def test_nan_remarks_normalised_to_empty_string(self, tmp_path):
         csv = tmp_path / 'test.csv'
-        csv.write_text(_make_csv_text([{'Ticker': 'X', 'current price': '100', 'support/ressist': '',
-                                        'Bullish': 'YES', 'WAIT FOR CHANGE DIRECTION': '',
+        csv.write_text(_make_csv_text([{'Ticker': 'X', 'start price': '100', 'forcast': '',
+                                        'current price': '', 'Bullish': 'YES',
+                                        'is predicted': '', 'WAIT FOR CHANGE DIRECTION': '',
                                         'bounce Value': '', 'Remarks': 'nan'}]))
         records = m.load_forecast(csv)
         assert records[0]['remarks'] == ''
 
     def test_whitespace_trimmed_from_ticker(self, tmp_path):
         csv = tmp_path / 'test.csv'
-        csv.write_text('Ticker,current price,support/ressist,Bullish,WAIT FOR CHANGE DIRECTION,'
-                       'bounce Value,Remarks\n  aapl  ,145,100,YES,,,\n')
+        csv.write_text('Ticker,3/13/2026,start price,forcast,current price,Bullish,is predicted,'
+                       'WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n  aapl  ,,145,100,,YES,,,,\n')
         records = m.load_forecast(csv)
         assert records[0]['ticker'] == 'AAPL'
 
-    def test_current_price_loaded_from_csv(self, tmp_path):
-        """Verify current_price column is read and stored."""
+    def test_start_price_loaded_from_csv(self, tmp_path):
+        """Verify start_price column is read and stored."""
         csv = tmp_path / 'test.csv'
         csv.write_text(
-            'Ticker,current price,support/ressist,Bullish,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
-            'AAPL,145.50,150,YES,NO,,\n'
+            'Ticker,3/13/2026,start price,forcast,current price,Bullish,is predicted,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
+            'AAPL,,145.50,150,148,YES,TRUE,NO,,\n'
         )
         records = m.load_forecast(csv)
         assert len(records) == 1
-        assert records[0]['current_price'] == 145.50
+        assert records[0]['start_price'] == 145.50
 
-    def test_current_price_missing_becomes_none(self, tmp_path):
-        """When current_price is missing, it should be None."""
+    def test_start_price_missing_becomes_none(self, tmp_path):
+        """When start_price is missing, it should be None."""
         csv = tmp_path / 'test.csv'
         csv.write_text(
-            'Ticker,current price,support/ressist,Bullish,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
-            'AAPL,,150,YES,NO,,\n'
+            'Ticker,3/13/2026,start price,forcast,current price,Bullish,is predicted,WAIT FOR CHANGE DIRECTION,bounce Value,Remarks\n'
+            'AAPL,,,150,,YES,,NO,,\n'
         )
         records = m.load_forecast(csv)
-        assert records[0]['current_price'] is None
+        assert records[0]['start_price'] is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

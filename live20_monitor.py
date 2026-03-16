@@ -120,10 +120,26 @@ def _to_float_or_none(value) -> float | None:
         return None
 
 
+def _parse_bool_column(value) -> bool:
+    """Parse a boolean column that may contain YES/NO, TRUE/FALSE, or empty."""
+    raw = str(value).strip().upper()
+    return raw in ('YES', 'TRUE')
+
+
 def load_forecast(csv_path: Path) -> list[dict]:
     """Parse the forecast CSV into a list of ticker dicts."""
     df = pd.read_csv(csv_path, skipinitialspace=True)
     df.columns = df.columns.str.strip()
+
+    # Detect the date column (format like '3/13/2026' — not a standard column name)
+    date_col = None
+    for col in df.columns:
+        if '/' in col and col not in ('Ticker', 'start price', 'forcast', 'current price',
+                                       'Bullish', 'is predicted', 'WAIT FOR CHANGE DIRECTION',
+                                       'bounce Value', 'Remarks'):
+            date_col = col
+            break
+
     records = []
     for _, row in df.iterrows():
         raw_ticker = row.get('Ticker', '')
@@ -133,28 +149,34 @@ def load_forecast(csv_path: Path) -> list[dict]:
         if not ticker:
             continue
 
+        start_price = _to_float_or_none(row.get('start price', None))
+        sr_val = _to_float_or_none(row.get('forcast', None))
         current_price = _to_float_or_none(row.get('current price', None))
-        sr_val = _to_float_or_none(row.get('support/ressist', None))
 
-        bullish_raw = str(row.get('Bullish', '')).strip().upper()
-        bullish = bullish_raw == 'YES'
+        bullish = _parse_bool_column(row.get('Bullish', ''))
+        is_predicted = _parse_bool_column(row.get('is predicted', ''))
 
-        wait_dir_raw = str(row.get('WAIT FOR CHANGE DIRECTION', '')).strip().upper()
-        wait_direction = wait_dir_raw == 'YES'
+        wait_direction = _parse_bool_column(row.get('WAIT FOR CHANGE DIRECTION', ''))
 
         bounce_val = _to_float_or_none(row.get('bounce Value', None))
 
         remarks_raw = row.get('Remarks', '')
         remarks = '' if pd.isna(remarks_raw) else str(remarks_raw).strip()
 
+        # Forecast date from the date column header (same for all rows)
+        forecast_date = date_col if date_col else None
+
         records.append({
             'ticker': ticker,
-            'current_price': current_price,
+            'start_price': start_price,
             'sr_level': sr_val,
+            'current_price': current_price,
             'bullish': bullish,
+            'is_predicted': is_predicted,
             'wait_direction': wait_direction,
             'bounce_value': bounce_val,
             'remarks': remarks,
+            'forecast_date': forecast_date,
         })
     return records
 
@@ -677,13 +699,14 @@ async def run_check(csv_path: Path, ib, dry_run: bool = False,
     alerts = check_forecasts(records, prices, vol_ratios, state)
 
     # Print status table
-    print(f"\n  {'Ticker':<8} {'Price':>10} {'S/R Level':>10} {'Bull':>5} {'Vol':>6} {'Status':<15}")
-    print(f"  {'─'*8} {'─'*10} {'─'*10} {'─'*5} {'─'*6} {'─'*15}")
+    print(f"\n  {'Ticker':<8} {'Price':>10} {'S/R Level':>10} {'Bull':>5} {'Pred':>5} {'Vol':>6} {'Status':<15}")
+    print(f"  {'─'*8} {'─'*10} {'─'*10} {'─'*5} {'─'*5} {'─'*6} {'─'*15}")
     for rec in records:
         ticker = rec['ticker']
         price = prices.get(ticker)
         sr = rec['sr_level']
         bull = 'YES' if rec['bullish'] else 'NO'
+        pred = '✓' if rec.get('is_predicted') else '✗'
         if price is None:
             status = 'NO DATA'
         elif sr is None:
@@ -698,7 +721,7 @@ async def run_check(csv_path: Path, ib, dry_run: bool = False,
         sr_str = f"${sr:.2f}" if sr else '—'
         vr = vol_ratios.get(ticker)
         vol_str = f"{vr:.1f}x" if vr is not None else '—'
-        print(f"  {ticker:<8} {price_str:>10} {sr_str:>10} {bull:>5} {vol_str:>6} {status:<15}")
+        print(f"  {ticker:<8} {price_str:>10} {sr_str:>10} {bull:>5} {pred:>5} {vol_str:>6} {status:<15}")
 
     if alerts:
         logger.info(f"🔔 {len(alerts)} alert(s) triggered!")
