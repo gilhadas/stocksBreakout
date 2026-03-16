@@ -35,6 +35,12 @@ ATR_PERIOD = 14
 ATR_TRAILING_MULT = 2.0  # 2.0 ATR trailing distance (from config)
 INITIAL_CAPITAL = 10000
 
+# Entry filters (more careful entry logic)
+ENTRY_CONFIRMATION_BARS = 2  # Require 3 bars above/below threshold
+MIN_VOLUME_RATIO = 1.2  # Volume must be 20% above 20-bar average at entry
+SKIP_ALREADY_BROKEN = True  # Don't re-enter if already broken on CSV date
+ONLY_PREDICTED_TRADES = True  # Only enter if direction matches forecast (test forecast accuracy)
+
 # ── Trade tracking ───────────────────────────────────────────────────────────
 
 class Trade:
@@ -292,6 +298,29 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
     portfolio = VirtualPortfolio(INITIAL_CAPITAL)
     ticker_records = {r['ticker']: r for r in records}
 
+    # Track entry state per ticker: confirmation_bars, previous_bars_for_confirmation
+    entry_state = {
+        r['ticker']: {
+            'confirmation_bars_up': 0,
+            'confirmation_bars_down': 0,
+            'already_entered': False,  # Prevent re-entry after exit
+        }
+        for r in records
+    }
+
+    # Pre-populate entry state: if already broken on CSV date, mark as "already entered"
+    if SKIP_ALREADY_BROKEN:
+        for rec in records:
+            ticker = rec['ticker']
+            price = rec['current_price']
+            sr = rec['sr_level']
+            if price is None or sr is None:
+                continue
+            threshold_up = sr * (1 + BREAK_TOLERANCE_PCT / 100)
+            threshold_down = sr * (1 - BREAK_TOLERANCE_PCT / 100)
+            if price >= threshold_up or price <= threshold_down:
+                entry_state[ticker]['already_entered'] = True
+
     # Get all unique timestamps
     all_timestamps = set()
     for df in bars.values():
@@ -308,11 +337,19 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
                 continue
 
             close = float(bar['close'].iloc[0])
+            volume = float(bar['volume'].iloc[0]) if 'volume' in bar.columns else 0
             rec = ticker_records[ticker]
             sr = rec['sr_level']
             bullish = rec['bullish']
+            remarks = rec.get('remarks', '')
+            bounce = rec.get('bounce_value')
+            wait_direction = rec.get('wait_direction', False)
 
             if sr is None:
+                continue
+
+            # Rule 1: Skip tickers with earnings in Remarks — unpredictable event risk
+            if any(kw in remarks.lower() for kw in ('earn', 'report', 'er ', 'eps')):
                 continue
 
             # Check for entry signals
@@ -323,29 +360,101 @@ def run_backtest(csv_path: Path, end_date: str | None = None):
             if any(t.ticker == ticker for t in portfolio.trades):
                 continue
 
-            # Entry logic
+            # Don't re-enter if already broken on CSV date
+            if entry_state[ticker]['already_entered']:
+                continue
+
+            # Rule 2: Bullish=NO only trade on bounce or direction-change, never on fresh breakdown
+            if not bullish:
+                direction = None
+                is_predicted = None
+
+                # Sub-rule A: bounce entry — price reaches the bounce target (going up from support)
+                if bounce is not None:
+                    bounce_low = bounce * (1 - 0.005)   # within 0.5% of bounce value
+                    bounce_high = bounce * (1 + 0.005)
+                    if bounce_low <= close <= bounce_high:
+                        bars_so_far = df[df.index <= ts]
+                        atr = calc_atr(bars_so_far, ATR_PERIOD)
+                        vol_avg = bars_so_far['volume'].tail(20).mean() if 'volume' in bars_so_far.columns else 1
+                        vol_ratio = volume / vol_avg if vol_avg > 0 else 0
+                        if vol_ratio == 0 or vol_ratio >= MIN_VOLUME_RATIO:
+                            trade = portfolio.open_trade(ticker, ts, close, 'UP', False, sr, atr)
+                            entry_state[ticker]['already_entered'] = True
+                            atr_str = f"{atr:.2f}" if atr else "N/A"
+                            vol_str = f"{vol_ratio:.1f}x" if vol_ratio > 0 else "N/A"
+                            print(f"  [{ts.strftime('%m/%d %H:%M')}] ~ {ticker} BOUNCE @ ${close:.2f} "
+                                  f"(target ${bounce:.2f}, ATR {atr_str}, Vol {vol_str})")
+                    continue  # Skip the normal breakout logic entirely for Bullish=NO
+
+                # Sub-rule B: direction-change entry (wait_direction=YES, price near SR moving UP)
+                if wait_direction:
+                    pct_from_sr = (close - sr) / sr * 100
+                    # Looking for price to cross above SR after being below (bullish reversal)
+                    if 0 < pct_from_sr <= 1.5:
+                        bars_so_far = df[df.index <= ts]
+                        atr = calc_atr(bars_so_far, ATR_PERIOD)
+                        vol_avg = bars_so_far['volume'].tail(20).mean() if 'volume' in bars_so_far.columns else 1
+                        vol_ratio = volume / vol_avg if vol_avg > 0 else 0
+                        if vol_ratio == 0 or vol_ratio >= MIN_VOLUME_RATIO:
+                            trade = portfolio.open_trade(ticker, ts, close, 'UP', False, sr, atr)
+                            entry_state[ticker]['already_entered'] = True
+                            atr_str = f"{atr:.2f}" if atr else "N/A"
+                            vol_str = f"{vol_ratio:.1f}x" if vol_ratio > 0 else "N/A"
+                            print(f"  [{ts.strftime('%m/%d %H:%M')}] ~ {ticker} DIR-CHANGE @ ${close:.2f} "
+                                  f"(SR ${sr:.2f}, ATR {atr_str}, Vol {vol_str})")
+                    continue  # Skip normal logic for Bullish=NO
+
+                continue  # Bullish=NO with no bounce/wait_direction — never enter
+
+            # Bullish=YES — normal breakout entry with confirmation bars
             direction = None
             is_predicted = None
 
+            # Count consecutive bars above/below threshold
             if close >= threshold_up:
-                direction = 'UP'
-                is_predicted = bullish
+                entry_state[ticker]['confirmation_bars_up'] += 1
+                entry_state[ticker]['confirmation_bars_down'] = 0
             elif close <= threshold_down:
+                entry_state[ticker]['confirmation_bars_down'] += 1
+                entry_state[ticker]['confirmation_bars_up'] = 0
+            else:
+                # Price back in neutral zone - reset counters
+                entry_state[ticker]['confirmation_bars_up'] = 0
+                entry_state[ticker]['confirmation_bars_down'] = 0
+
+            # Fire entry only after N confirmation bars
+            if entry_state[ticker]['confirmation_bars_up'] == ENTRY_CONFIRMATION_BARS:
+                direction = 'UP'
+                is_predicted = True   # Bullish=YES breaking UP → predicted
+            elif entry_state[ticker]['confirmation_bars_down'] == ENTRY_CONFIRMATION_BARS:
                 direction = 'DOWN'
-                is_predicted = not bullish
+                is_predicted = False  # Bullish=YES breaking DOWN → surprise
 
             if direction:
+                # Filter: only enter if direction matches forecast (if enabled)
+                if ONLY_PREDICTED_TRADES and not is_predicted:
+                    continue
+
                 # Calculate ATR from bars so far
                 bars_so_far = df[df.index <= ts]
                 atr = calc_atr(bars_so_far, ATR_PERIOD)
 
-                trade = portfolio.open_trade(
-                    ticker, ts, close, direction, is_predicted, sr, atr
-                )
-                pred_label = "✓" if is_predicted else "✗"
-                atr_str = f"{atr:.2f}" if atr else "N/A"
-                print(f"  [{ts.strftime('%m/%d %H:%M')}] {pred_label} {ticker} {direction:4} @ ${close:.2f} "
-                      f"(SR ${sr:.2f}, ATR {atr_str})")
+                # Volume check (optional)
+                vol_avg = bars_so_far['volume'].tail(20).mean() if 'volume' in bars_so_far.columns else 1
+                vol_ratio = volume / vol_avg if vol_avg > 0 else 0
+
+                # Only enter if volume is adequate or we don't care (vol_ratio = 0 means no data)
+                if vol_ratio == 0 or vol_ratio >= MIN_VOLUME_RATIO:
+                    trade = portfolio.open_trade(
+                        ticker, ts, close, direction, is_predicted, sr, atr
+                    )
+                    entry_state[ticker]['already_entered'] = True
+                    pred_label = "✓" if is_predicted else "✗"
+                    atr_str = f"{atr:.2f}" if atr else "N/A"
+                    vol_str = f"{vol_ratio:.1f}x" if vol_ratio > 0 else "N/A"
+                    print(f"  [{ts.strftime('%m/%d %H:%M')}] {pred_label} {ticker} {direction:4} @ ${close:.2f} "
+                          f"(SR ${sr:.2f}, ATR {atr_str}, Vol {vol_str})")
 
             # Update trailing stops for open positions
             for trade in portfolio.trades:
