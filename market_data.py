@@ -250,7 +250,6 @@ class MarketDataHandler:
         df = None
         if self.ib_available:
             try:
-                from ib_insync import Stock, util
                 spy = Stock('SPY', 'ARCA', 'USD')
                 bars = await self.ib.reqHistoricalDataAsync(
                     spy, '', '300 D', '1 day', 'TRADES', True, 1

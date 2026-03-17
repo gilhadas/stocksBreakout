@@ -583,7 +583,8 @@ def render_scan_page():
     regime = st.session_state.get('scan_regime', '')
     spy_info = st.session_state.get('scan_spy', '')
     if regime:
-        regime_colors = {'NORMAL': 'green', 'CHOPPY': 'orange', 'EXPANSION': 'blue'}
+        regime_colors = {'NORMAL': 'green', 'CHOPPY': 'orange', 'EXPANSION': 'blue',
+                         'BEARISH': 'red', 'RED_MARKET': 'red'}
         color = regime_colors.get(regime, 'gray')
         st.markdown(f"**Market Regime:** :{color}[{regime}] | {spy_info}")
 

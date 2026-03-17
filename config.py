@@ -261,6 +261,20 @@ REGIME_CONFIG = {
         'description': 'Standard conditions',
         'spy_perf_threshold': None,
         'spy_vol_threshold': None
+    },
+    'BEARISH': {
+        'vol_mult': 1.0,
+        'atr_mult': 1.0,
+        'description': 'Mild pullback (SPY -0.5% to -1.5%) — block BOUNCE/SMA20_CROSS',
+        'spy_perf_threshold': None,
+        'spy_vol_threshold': None
+    },
+    'RED_MARKET': {
+        'vol_mult': 1.0,
+        'atr_mult': 1.0,
+        'description': 'Strong downtrend (SPY < -1.5%) — keep trading, +55.8% P&L share',
+        'spy_perf_threshold': None,
+        'spy_vol_threshold': None
     }
 }
 

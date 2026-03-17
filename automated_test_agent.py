@@ -197,175 +197,7 @@ CRON_SCHEDULE = [
     },
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FLOW 2: MACD+RSI Scanner (parallel, same universe as cron_agent)
-# input/ALL.txt for scans, momentum_watch_daytrade.txt for hourly monitor
-# ─────────────────────────────────────────────────────────────────────────────
-
-_M_ALL = 'python macd_rsi_scan.py --watchlist input/ALL.txt --timeframe 1d --vol-mult 1.5 --track-portfolio'
-_M_1H  = 'python macd_rsi_scan.py --watchlist input/ALL.txt --timeframe 1h --vol-mult 1.2 --track-portfolio'
-_M_HR  = 'python macd_rsi_scan.py --watchlist scanner_output/momentum_watch_daytrade.txt --timeframe 1h --vol-mult 1.2 --track-portfolio'
-_M_RPT = 'python macd_rsi_scan.py --portfolio-report'
-_CMP   = 'python comparison_report.py'  # full day comparison
-_CMP_O = 'python comparison_report.py --since 09:35'  # from open only
-
-MACD_SCHEDULE = [
-    {
-        'time': '08:00', 'id': 'macd_0800',
-        'label': '[MACD/RSI] Premarket Scan #1',
-        'command': _M_ALL,
-        'checks': [
-            ('MACD/RSI signals', _M_RPT),
-        ]
-    },
-    {
-        'time': '08:45', 'id': 'macd_0845',
-        'label': '[MACD/RSI] Premarket Scan #2',
-        'command': _M_ALL,
-        'checks': [
-            ('MACD/RSI signals', _M_RPT),
-        ]
-    },
-    {
-        'time': '09:31', 'id': 'macd_0931',
-        'label': '[MACD/RSI] Opening Surge Scan',
-        'command': _M_1H,
-        'checks': [
-            ('MACD/RSI signals at open', _M_RPT),
-        ]
-    },
-    {
-        'time': '09:35', 'id': 'macd_0935',
-        'label': '[MACD/RSI] Phase 1: Daytrade Scan',
-        'command': _M_1H,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '09:45', 'id': 'macd_0945',
-        'label': '[MACD/RSI] Phase 1: Swing Scan',
-        'command': _M_1H,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '10:00', 'id': 'macd_1000',
-        'label': '[MACD/RSI] Hourly Monitor 10:00',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '11:00', 'id': 'macd_1100',
-        'label': '[MACD/RSI] Hourly Monitor 11:00',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-            ('Signals today', f'wc -l scanner_output/macd_rsi/portfolio_{TODAY_YYYYMMDD}.csv 2>/dev/null || echo "0"'),
-        ]
-    },
-    {
-        'time': '12:00', 'id': 'macd_1200',
-        'label': '[MACD/RSI] Hourly Monitor 12:00',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '13:00', 'id': 'macd_1300',
-        'label': '[MACD/RSI] Hourly Monitor 13:00',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '14:00', 'id': 'macd_1400',
-        'label': '[MACD/RSI] Phase 2: Re-evaluation (2 PM)',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '15:00', 'id': 'macd_1500',
-        'label': '[MACD/RSI] Hourly Monitor 15:00',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '15:30', 'id': 'macd_1530',
-        'label': '[MACD/RSI] Exit Check (3:30 PM)',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '16:00', 'id': 'macd_1600',
-        'label': '[MACD/RSI] Market Close Final',
-        'command': _M_HR,
-        'checks': [
-            ('MACD/RSI portfolio', _M_RPT),
-        ]
-    },
-    {
-        'time': '16:15', 'id': 'macd_1615',
-        'label': '[MACD/RSI] End-of-Day P&L Report',
-        'command': None,
-        'checks': [
-            ('MACD/RSI final P&L', _M_RPT),
-        ]
-    },
-]
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FLOW 3: Comparison Report (every 2 hours during market hours)
-# ─────────────────────────────────────────────────────────────────────────────
-
-COMPARE_SCHEDULE = [
-    {
-        'time': '10:00', 'id': 'cmp_1000',
-        'label': '[COMPARE] First Look (10:00 AM)',
-        'command': _CMP_O,
-        'checks': [
-            ('Breakout vs MACD/RSI', _CMP_O),
-        ]
-    },
-    {
-        'time': '12:00', 'id': 'cmp_1200',
-        'label': '[COMPARE] Mid-day Report (12:00 PM)',
-        'command': _CMP,
-        'checks': [
-            ('Breakout vs MACD/RSI', _CMP),
-        ]
-    },
-    {
-        'time': '14:00', 'id': 'cmp_1400',
-        'label': '[COMPARE] Afternoon Report (2:00 PM)',
-        'command': _CMP,
-        'checks': [
-            ('Breakout vs MACD/RSI', _CMP),
-        ]
-    },
-    {
-        'time': '16:15', 'id': 'cmp_1615',
-        'label': '[COMPARE] End-of-Day Final Report',
-        'command': _CMP,
-        'checks': [
-            ('Breakout vs MACD/RSI — FINAL', _CMP),
-        ]
-    },
-]
-
-# Combined — used only for counting/display
-SCHEDULE = CRON_SCHEDULE + MACD_SCHEDULE + COMPARE_SCHEDULE
+SCHEDULE = CRON_SCHEDULE
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -481,7 +313,6 @@ def schedule_jobs(scheduler: BackgroundScheduler, dry_run: bool = False):
     logger.info(f"📅 SCHEDULING JOBS FOR {TODAY_YYYY_MM_DD} (NY time)")
     logger.info(f"{'='*70}\n")
 
-    logger.info("  ── FLOW 1: Breakout Scanner ──────────────────────────")
     for job_config in CRON_SCHEDULE:
         job_time = job_config['time']
         hour, minute = map(int, job_time.split(':'))
@@ -495,37 +326,8 @@ def schedule_jobs(scheduler: BackgroundScheduler, dry_run: bool = False):
         )
         logger.info(f"  ⏰ {job_time} ET  →  {job_config['label']}")
 
-    logger.info("\n  ── FLOW 2: MACD+RSI Scanner ──────────────────────────")
-    for job_config in MACD_SCHEDULE:
-        job_time = job_config['time']
-        hour, minute = map(int, job_time.split(':'))
-        scheduler.add_job(
-            execute_job,
-            CronTrigger(hour=hour, minute=minute, day=_TODAY_ET.day,
-                        month=_TODAY_ET.month, second=0, timezone=NY_TZ),
-            args=[job_config, dry_run],
-            id=job_config['id'],
-            name=job_config['label'],
-        )
-        logger.info(f"  ⏰ {job_time} ET  →  {job_config['label']}")
-
-    logger.info("\n  ── FLOW 3: Comparison Reports ────────────────────────")
-    for job_config in COMPARE_SCHEDULE:
-        job_time = job_config['time']
-        hour, minute = map(int, job_time.split(':'))
-        scheduler.add_job(
-            execute_job,
-            CronTrigger(hour=hour, minute=minute, day=_TODAY_ET.day,
-                        month=_TODAY_ET.month, second=0, timezone=NY_TZ),
-            args=[job_config, dry_run],
-            id=job_config['id'],
-            name=job_config['label'],
-        )
-        logger.info(f"  ⏰ {job_time} ET  →  {job_config['label']}")
-
     logger.info(f"\n{'-'*70}")
-    logger.info(f"Total jobs scheduled: {len(SCHEDULE)} "
-                f"({len(CRON_SCHEDULE)} breakout + {len(MACD_SCHEDULE)} MACD/RSI + {len(COMPARE_SCHEDULE)} compare)")
+    logger.info(f"Total jobs scheduled: {len(SCHEDULE)}")
     logger.info(f"{'='*70}\n")
 
 
