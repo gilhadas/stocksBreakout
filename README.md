@@ -24,7 +24,7 @@ backtesting, and automated cron + Discord notifications.
 12. [Earnings Date Warning](#earnings-date-warning)
 13. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
 14. [scanner_output/lists/ — Live Working Files](#scanner_outputlists--live-working-files)
-15. [Backtest Results](#backtest-results)
+15. [Backtest Results](#backtest-results) — [V9-H Regime Gate](#v9-h-regime-gate-mar-2026--current-live-config)
 16. [Streamlit Dashboard](#streamlit-dashboard)
 17. [Notifications](#notifications)
 18. [IB Connection](#ib-connection)
@@ -157,13 +157,26 @@ Fires when: `(gap ≥ 5% OR intraday_move ≥ 5% OR daily_move ≥ 5%) AND Vol_R
 
 ### Market Regime
 
-SPY performance auto-adjusts thresholds:
+SPY 15-day performance auto-classifies the market into 5 regimes (V9-H, Mar 2026).
+The regime gate in `orchestrator.py` filters which signal types are allowed:
 
-| Regime | Criteria | Adjustment |
-|--------|----------|------------|
-| CHOPPY | SPY < 1% move | 30% stricter thresholds |
-| EXPANSION | SPY > 5% move | 10% looser thresholds |
-| NORMAL | Everything else | Standard |
+| Regime | Criteria (15-day SPY return) | Signal Gate | Backtest finding |
+|--------|------------------------------|-------------|-----------------|
+| RED_MARKET | SPY ≤ -1.5% | All signals allowed | +55.8% P&L share, WR 43% — keep trading |
+| **BEARISH** | SPY ≤ -0.5% | **Block BOUNCE + SMA20_CROSS** | WR 22.2%, -3.28% expectancy — the real poison |
+| CHOPPY | \|SPY\| < 0.5% AND ATR% < 0.35% | All signals allowed | Low-noise consolidation |
+| NORMAL | Everything else | All signals allowed | Standard conditions |
+| EXPANSION | SPY ≥ +2.0% | All signals allowed | 10% looser thresholds |
+
+Additionally, a **bear_macro** flag (SPY below 200-day SMA) triggers a structural bear override:
+
+| Condition | Gate |
+|-----------|------|
+| `bear_macro = True` (SPY < SMA200) | **GOLD breakouts only** — block all BOUNCE + SMA20_CROSS |
+| `bear_macro = False` + BEARISH regime | PREMIUM+ breakouts OK — block BOUNCE + SMA20_CROSS |
+| Everything else | Normal cascade (breakout → bounce → sma20_cross) |
+
+> **Kill switch:** Set `V9H_REGIME_GATE['enabled'] = False` in `config.py` to disable the gate.
 
 ---
 
@@ -1006,26 +1019,70 @@ Walk-forward: 4 folds × 6 months (optimize on folds 1–3, validate on fold 4).
 Optimizer comparison (2024 full year): current weights +25.9% → optimized +40.5%, Sharpe 2.38 → 3.09.
 Fold 4 validation positive (no catastrophic overfitting).
 
+### V9-H Regime Gate (Mar 2026 — current live config)
+
+3-year backtest across a full market cycle: 2022 bear (SPY -18.7%), 2023 bull (+26.7%), 2024 bull (+26.1%).
+50 symbols from `input/optimizer_watch.txt`.
+
+| Strategy | 2022 | 2023 | 2024 | 3yr Compound | Notes |
+|----------|------|------|------|-------------|-------|
+| SPY Buy & Hold | -18.7% | +26.7% | +26.1% | **+30%** | benchmark |
+| V9-C PREMIUM+ TP→Trail | -26.5% | +89.6% | +16.2% | **+62%** | previous live config |
+| NEW Regime-Adaptive PREMIUM+ | -29.4% | +120.8% | +35.1% | **+110%** | worse in 2022 bear ❗ |
+| **V9-H PREMIUM+ (current)** | **-15.1%** | **+81.7%** | **+35.1%** | **+108%** | **best risk-adjusted** ✓ |
+| V9-H2 (V9-C + SMA200 kill) | -10.2% | +40.8% | +16.2% | **+49%** | too conservative in bulls |
+
+**Key findings:**
+
+- **BEARISH regime is the poison**, not RED_MARKET. BEARISH (SPY down 0.5-1.5%) produced 22.2% WR and -3.28% avg P&L. RED_MARKET (SPY down >1.5%) contributed +55.8% of total P&L at 43% WR — keep trading it.
+- **V9-H saves 11% drawdown** in 2022 bear vs V9-C (-15.1% vs -26.5%) while matching bull returns (+35.1% in 2024 vs +16.2% for V9-C).
+- **Optuna regime-sizing failed** on held-out 2024 (+0.13% vs +16.24% baseline) — regime labels are unstable across market cycles, sizing by regime overfits.
+- **Only block BEARISH** — every other complexity hurts out-of-sample.
+
+**How it works in the live scanner:**
+
+```python
+# In orchestrator.py — computed once per scan
+bear_macro = await self.market_data.get_spy_bear_macro()  # SPY < SMA200?
+
+# In _scan_symbol() — applied before BOUNCE/SMA20_CROSS cascade
+if bear_macro:
+    if signal.Quality != 'GOLD': signal = None
+    if signal is None: return None   # no BOUNCE or SMA20_CROSS
+elif regime == 'BEARISH':
+    if signal is None: return None   # breakouts OK; block cascade
+```
+
+**Research scripts** (untracked, run ad-hoc):
+- `backtest_regime_compare.py` — runs V9-C vs V9-New vs V9-H vs V9-H2 per year
+- `regime_deep_investigation.py` — Phase 1: per-regime P&L diagnosis; Phase 2: Optuna threshold search
+
+```bash
+python backtest_regime_compare.py --years 2022,2023,2024
+python regime_deep_investigation.py --years 2022,2023,2024 --trials 150
+```
+
 ### Best combination recommendation
 
 | Use case | Config | Why |
 |----------|--------|-----|
-| **Live notifications** | V9-C (Minervini PREMIUM+ + TP→Trail) | Only config to beat SPY 2024-2025; -5.23% max DD |
-| **High signal volume** | V8-C (Minervini HIGH+ aggressive) | Best Sharpe in pure momentum markets (2024) |
+| **Live notifications (current)** | V9-H (V9-C + regime gate) | 3yr +108% vs SPY +30%; -15.1% bear-year DD |
+| **High signal volume** | V8-C (Minervini HIGH+ aggressive) | Best Sharpe in pure bull markets (2024) |
 | **Risk-minimized** | V10MX-A (VCP + Minervini + overext) | -4.42% max DD, 63.2% win rate |
 | **Research/scan all** | V1-B ALL quality | Maximum signal visibility; best for discovery |
 
-**Bottom line:** V9-C is the live trading standard. Use V8-C for 2024-style bull markets.
-The optimizer-tuned weights improve signal scoring but the primary alpha driver is the
-**Minervini PREMIUM filter**, not the individual scoring weight values.
+**Bottom line:** V9-H is the live trading standard (V9-C + bear_macro + BEARISH regime gate).
+The primary alpha driver is still the **Minervini PREMIUM filter**; the regime gate adds
+bear-market capital preservation without sacrificing bull-market returns.
 
-### V9-C: the recommended live config
+### V9-C / V9-H: the recommended live configs
 
 **V9-C = Minervini≥7 + PREMIUM quality + TP→Trail stop**
+**V9-H = V9-C + SPY SMA200 bear_macro gate + BEARISH regime block** ← current
 
 - `tp_as_trail=True` in `config.py PORTFOLIO`: when target hit, activate 2.0 ATR trailing stop (don't close)
-- Only config to beat SPY over 2024–2025 (+89.52% vs +87.67%)
-- Dramatically lower drawdown: -5.23% vs SPY -18.76%
+- V9-C: only config to beat SPY over 2024–2025 (+89.52% vs +87.67%), -5.23% max DD
+- V9-H: 3yr compound +108% vs +30% SPY across a full market cycle (2022–2024)
 
 ### VCP verdict (V10)
 

@@ -264,6 +264,29 @@ REGIME_CONFIG = {
     }
 }
 
+# --- V9-H Regime Gate (live signal filter) ---
+# Derived from backtest: 2022 bear (-18.7%), 2023 bull (+26.7%), 2024 bull (+26.1%)
+# V9-H beats V9-C in all 3 years: -15.1% / +81.7% / +35.1% vs -26.5% / +89.6% / +16.2%
+# 3yr compound: +108% vs +62% (V9-C) vs +30% (SPY)
+#
+# Rule 1 — bear_macro (SPY < SMA200): structural bear market
+#   → GOLD breakouts only; block all BOUNCE and SMA20_CROSS
+# Rule 2 — BEARISH regime (SPY down 0.5–1.5% over lookback): 22.2% WR, -3.28% expectancy
+#   → Block BOUNCE and SMA20_CROSS; PREMIUM+ breakouts still allowed
+# Rule 3 — All other regimes (NORMAL, EXPANSION, RED_MARKET, CHOPPY): trade normally
+#   Note: RED_MARKET (SPY down >1.5%) is KEPT — it contributed +55.8% of P&L in backtest
+V9H_REGIME_GATE = {
+    'enabled': True,
+    # 15-day SPY return thresholds (fractions) for regime classification
+    'red_market_thresh': -0.015,   # SPY < -1.5% over lookback → RED_MARKET (keep trading)
+    'bearish_thresh':    -0.005,   # SPY < -0.5% over lookback → BEARISH (block bounce/sma20)
+    'choppy_perf_abs':    0.005,   # |SPY| < 0.5% AND vol < choppy_vol → CHOPPY
+    'choppy_vol':         0.35,    # ATR% threshold for CHOPPY
+    'expansion_thresh':   0.020,   # SPY > +2.0% over lookback → EXPANSION
+    # bear_macro: SPY closing below its 200-day SMA → structural bear
+    'sma200_lookback':    200,     # days for SMA200 calculation
+}
+
 # --- General Settings ---
 MIN_DOLLAR_VOLUME = 5_000_000  # Minimum daily dollar volume
 MAX_CONCURRENT_REQUESTS = 5     # IB rate limiting

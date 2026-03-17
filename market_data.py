@@ -238,7 +238,40 @@ class MarketDataHandler:
 
         self.spy_cache[cache_key] = (perf, spy_vol)
         return perf, spy_vol
-    
+
+    async def get_spy_bear_macro(self) -> bool:
+        """
+        Returns True if SPY is in a structural bear market (close < 200-day SMA).
+        Cached per session. Used by V9-H regime gate to restrict to GOLD-only signals.
+        """
+        if 'bear_macro' in self.spy_cache:
+            return self.spy_cache['bear_macro']
+
+        df = None
+        if self.ib_available:
+            try:
+                from ib_insync import Stock, util
+                spy = Stock('SPY', 'ARCA', 'USD')
+                bars = await self.ib.reqHistoricalDataAsync(
+                    spy, '', '300 D', '1 day', 'TRADES', True, 1
+                )
+                if bars:
+                    df = util.df(bars)
+            except Exception:
+                pass
+
+        if df is None and self.yf_fallback:
+            df = self.yf_adapter.get_historical_data('SPY', '1 day')
+
+        if df is None or len(df) < 200:
+            self.spy_cache['bear_macro'] = False
+            return False
+
+        sma200 = float(df['close'].iloc[-200:].mean())
+        result = float(df['close'].iloc[-1]) < sma200
+        self.spy_cache['bear_macro'] = result
+        return result
+
     def clear_cache(self):
         """Clear SPY performance cache"""
         self.spy_cache.clear()

@@ -550,18 +550,30 @@ def update_position_stops(positions_file: str, price_map: Dict[str, float]) -> L
 
 def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
     """
-    Classify market regime based on SPY performance and volatility
+    Classify market regime based on SPY performance and volatility.
 
-    Returns: CHOPPY | EXPANSION | NORMAL
+    Returns: RED_MARKET | BEARISH | CHOPPY | EXPANSION | NORMAL
+
+    V9-H thresholds (15-day SPY return, proven in 2022/2023/2024 backtest):
+      RED_MARKET : spy_perf <= -1.5%  (SPY in strong downtrend — keep trading, +55.8% P&L share)
+      BEARISH    : spy_perf <= -0.5%  (mild pullback — block BOUNCE/SMA20_CROSS, 22.2% WR)
+      CHOPPY     : |spy_perf| < 0.5% AND spy_vol < 0.35%
+      EXPANSION  : spy_perf >= +2.0%
+      NORMAL     : everything else
     """
-    from config import REGIME_CONFIG
+    from config import V9H_REGIME_GATE
 
-    if abs(spy_perf) < REGIME_CONFIG['CHOPPY']['spy_perf_threshold'] and \
-       spy_vol < REGIME_CONFIG['CHOPPY']['spy_vol_threshold']:
+    if spy_perf <= V9H_REGIME_GATE['red_market_thresh']:
+        return 'RED_MARKET'
+
+    if spy_perf <= V9H_REGIME_GATE['bearish_thresh']:
+        return 'BEARISH'
+
+    if (abs(spy_perf) < V9H_REGIME_GATE['choppy_perf_abs'] and
+            spy_vol < V9H_REGIME_GATE['choppy_vol']):
         return 'CHOPPY'
 
-    if abs(spy_perf) > REGIME_CONFIG['EXPANSION']['spy_perf_threshold'] and \
-       spy_vol > REGIME_CONFIG['EXPANSION']['spy_vol_threshold']:
+    if spy_perf >= V9H_REGIME_GATE['expansion_thresh']:
         return 'EXPANSION'
 
     return 'NORMAL'

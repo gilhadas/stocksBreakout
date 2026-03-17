@@ -14,7 +14,7 @@ _NY_TZ = ZoneInfo('America/New_York')
 from pathlib import Path
 import pandas as pd
 
-from config import MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR
+from config import MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR, V9H_REGIME_GATE
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
@@ -66,13 +66,19 @@ class ScannerOrchestrator:
                 timeframe, lb
             )
             regime = classify_market_regime(spy_perf, spy_vol)
-            
+
+            # V9-H: compute bear_macro once per scan (SPY < 200-day SMA)
+            bear_macro = False
+            if V9H_REGIME_GATE.get('enabled'):
+                bear_macro = await self.market_data.get_spy_bear_macro()
+
             logger.info(
                 f"Mode: {mode.upper()} | TF: {timeframe} | "
                 f"SPY: {spy_perf:.2%} | Vol: {spy_vol:.2f}% | Regime: {regime}"
+                + (" | BEAR_MACRO" if bear_macro else "")
             )
         else:
-            spy_perf, spy_vol, regime = 0.0, 0.0, 'INTRADAY'
+            spy_perf, spy_vol, regime, bear_macro = 0.0, 0.0, 'INTRADAY', False
             logger.info(f"Mode: SCALPING | TF: {timeframe} | VWAP-based")
         
         # V5: Pre-compute sector buzz once for entire scan
@@ -99,7 +105,8 @@ class ScannerOrchestrator:
                 result = await self._scan_symbol(
                     symbol, mode, timeframe, spy_perf, regime,
                     vol_thresh, atr_mult, lookback, detect_bounces,
-                    sector_hot_map=sector_hot_map
+                    sector_hot_map=sector_hot_map,
+                    bear_macro=bear_macro
                 )
 
                 await asyncio.sleep(SCAN_DELAY)
@@ -149,7 +156,8 @@ class ScannerOrchestrator:
                           atr_mult: Optional[float],
                           lookback: Optional[int] = None,
                           detect_bounces: bool = False,
-                          sector_hot_map: Optional[Dict] = None) -> Optional[Dict]:
+                          sector_hot_map: Optional[Dict] = None,
+                          bear_macro: bool = False) -> Optional[Dict]:
         """Scan a single symbol with retry logic and optional Level 2 analysis"""
         max_retries = 3
         
@@ -237,6 +245,19 @@ class ScannerOrchestrator:
                             signal['Quality'] = 'PREMIUM'
                             logger.info(f"   ⭐ {symbol} upgraded to PREMIUM (Level 2)")
                 
+                # V9-H regime gate — applied after initial breakout detection
+                if V9H_REGIME_GATE.get('enabled'):
+                    if bear_macro:
+                        # Structural bear (SPY < SMA200): GOLD breakouts only
+                        if signal and signal.get('Quality') != 'GOLD':
+                            signal = None
+                        if signal is None:
+                            return None  # No BOUNCE or SMA20_CROSS in bear macro
+                    elif regime == 'BEARISH':
+                        # Short-term pullback: breakouts still allowed, but no BOUNCE/SMA20_CROSS
+                        if signal is None:
+                            return None
+
                 # If no breakout signal, try alternative detectors (cascade)
                 if signal is None and detect_bounces:
                     signal = self.detector.detect_bounce(
