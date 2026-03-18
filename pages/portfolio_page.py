@@ -628,6 +628,84 @@ def _render_auto_portfolio():
     else:
         st.info("No open positions. Click **Scan Signals** to add V9-C signals.")
 
+    # ── Portfolio Health & Diversity (advisory) ──
+    if positions:
+        with st.expander("Portfolio Health & Diversity", expanded=False):
+            try:
+                from position_health import evaluate_portfolio_health, is_etf
+
+                health = evaluate_portfolio_health(data)
+
+                # Cash status bar
+                cash_pct = health['cash_pct']
+                if health['cash_status'] == 'CRITICAL':
+                    st.error(f"CRITICAL: Cash at {cash_pct:.1%} (${health['cash']:,.0f} of ${health['total_value']:,.0f})")
+                elif health['cash_status'] == 'LOW':
+                    st.warning(f"Low cash: {cash_pct:.1%} (${health['cash']:,.0f} of ${health['total_value']:,.0f})")
+                else:
+                    st.success(f"Cash OK: {cash_pct:.1%} (${health['cash']:,.0f})")
+
+                # Diversity metrics row
+                div = health['diversity']
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("Sectors", f"{len(div['sector_counts'])}")
+                d2.metric("Modes", f"{len(div['mode_counts'])}")
+                d3.metric("ETF %", f"{div['etf_pct']:.0%}")
+                safe_color = "normal" if div['safe_pct'] >= 0.65 else "off"
+                d4.metric("Safe / Risky", f"{div['safe_pct']:.0%} / {div['risky_pct']:.0%}",
+                          delta="balanced" if div['risky_pct'] <= 0.30 else "rebalance needed",
+                          delta_color=safe_color)
+
+                # Sector breakdown
+                sc1, sc2 = st.columns(2)
+                with sc1:
+                    st.caption("Sector Breakdown")
+                    for sector, count in sorted(div['sector_counts'].items(), key=lambda x: -x[1]):
+                        bar = '█' * count
+                        flag = ' ⚠' if count > 3 else ''
+                        st.text(f"  {sector:15s} {bar} {count}{flag}")
+
+                with sc2:
+                    st.caption("Mode Breakdown")
+                    for mode, count in sorted(div['mode_counts'].items(), key=lambda x: -x[1]):
+                        bar = '█' * count
+                        flag = ' ⚠' if count > 5 else ''
+                        st.text(f"  {mode:15s} {bar} {count}{flag}")
+
+                # Risk ranking table
+                st.caption("Risk Ranking (riskiest first — trim candidates)")
+                risk_rows = []
+                for p in health['risk_ranking']:
+                    rf = p['risk_factors']
+                    risk_rows.append({
+                        'Symbol':     p['symbol'],
+                        'Risk':       p['risk_score'],
+                        'P&L%':       rf['gain_pct'],
+                        'Days':       rf['days_held'],
+                        'ATR%':       rf.get('atr_pct', 0),
+                        'Stale':      'Yes' if rf['stale'] else '',
+                        'Sector':     p.get('sector', ''),
+                        'Mode':       p.get('mode', ''),
+                        'ETF':        'Yes' if is_etf(p['symbol']) else '',
+                        'Value%':     rf['value_pct'],
+                    })
+                if risk_rows:
+                    df_risk = pd.DataFrame(risk_rows)
+                    st.dataframe(df_risk, use_container_width=True, hide_index=True)
+
+                # Alerts
+                if health['alerts']:
+                    st.caption("Alerts & Suggestions")
+                    for a in health['alerts']:
+                        if a['severity'] == 'CRITICAL':
+                            st.error(f"[{a['type']}] {a['message']}")
+                        elif a['severity'] == 'WARNING':
+                            st.warning(f"[{a['type']}] {a['message']}")
+                        else:
+                            st.info(f"[{a['type']}] {a['message']}")
+            except Exception as _health_err:
+                st.caption(f"Health check unavailable: {_health_err}")
+
     # ── Closed Positions ──
     closed = data.get('closed', [])
     if closed:

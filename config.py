@@ -79,6 +79,27 @@ QUALITY_SIZING = {
     'STANDARD': 1.0,  # 5% of capital (base)
 }
 
+# --- Cash Management & Portfolio Diversity ---
+# Advisory system: notifies and suggests, never auto-closes or blocks V9-H entries.
+CASH_MANAGEMENT = {
+    'low_cash_pct': 0.15,            # Alert when cash < 15% of total value
+    'critical_cash_pct': 0.05,       # Urgent alert when cash < 5%
+    'stale_days': 5,                 # Days flat/negative = "stale"
+    'stale_threshold_pct': 0.0,      # Gain % below this = stale
+    'notify_cooldown_hours': 12,     # Don't re-alert same condition within N hours
+    'quality_risk_penalty': {        # Lower quality = higher risk score
+        'GOLD': 0.0, 'PREMIUM': 0.3, 'HIGH': 0.6, 'STANDARD': 1.0,
+    },
+    # ── Diversity Limits ──
+    'max_per_sector': 3,             # Max positions in same sector
+    'max_per_mode': 5,               # Max positions in same mode (swing/daytrade/longterm)
+    'ideal_etf_pct': 0.20,          # Target 20% of positions in ETFs for stability
+    'max_single_position_pct': 0.20, # Largest position should not exceed 20% of portfolio value
+    # ── 70/30 Risk Balance ──
+    'safe_allocation_pct': 0.70,     # 70% of portfolio value in safe positions (risk < 40)
+    'risky_threshold': 40,           # Risk score >= this = "risky" position
+}
+
 # --- R:R Grade Configuration ---
 RR_GRADE_CONFIG = {
     'A': {'min_rr': 0.6626, 'reject': False},

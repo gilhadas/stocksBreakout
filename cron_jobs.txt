@@ -146,6 +146,17 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
+# PORTFOLIO HEALTH CHECK (advisory — never auto-closes)
+# ============================================
+
+# Every weekday at 10:00 AM ET - After morning scans, check cash + diversity + stale positions
+0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health.log 2>&1
+
+# Every weekday at 3:00 PM ET - Afternoon check before close
+0 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health.log 2>&1
+
+
+# ============================================
 # SIGNAL VALIDATION & LEARNING
 # ============================================
 

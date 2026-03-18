@@ -875,6 +875,36 @@ def run_year(year, symbols, watchlist_path, limit, capital,
                    dd_breaker_pct=0.15, **sim_kw)
     print_report(rpt, 'V9-H2  All sigs + MaxPos + DD15%', len(v9c_tagged), spy_info)
 
+    # ── V9-H3: V9-C pure + DD breaker only (no SMA200, no MaxPos) ────────
+    # Isolate DD circuit breaker effect on V9-C signals
+    print(f"\n[V9-H3 — V9-C + DD Breaker Only]")
+
+    # V9-H3 DD10%: cut to 25% size at 10% drawdown
+    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-H3 DD10', dd_breaker_pct=0.10, **sim_kw)
+    print_report(rpt, 'V9-H3  V9-C + DD10%', len(v9c_signals), spy_info)
+
+    # V9-H3 DD15%: cut to 25% size at 15% drawdown
+    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-H3 DD15', dd_breaker_pct=0.15, **sim_kw)
+    print_report(rpt, 'V9-H3  V9-C + DD15%', len(v9c_signals), spy_info)
+
+    # V9-H3 DD20%: cut to 25% size at 20% drawdown
+    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-H3 DD20', dd_breaker_pct=0.20, **sim_kw)
+    print_report(rpt, 'V9-H3  V9-C + DD20%', len(v9c_signals), spy_info)
+
+    # V9-H3 MaxPos only: position cap without DD breaker
+    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-H3 MaxPos', max_positions=8, **sim_kw)
+    print_report(rpt, 'V9-H3  V9-C + MaxPos=8', len(v9c_signals), spy_info)
+
+    # V9-H3 Combined: MaxPos + DD15%
+    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-H3 Full', max_positions=8,
+                   dd_breaker_pct=0.15, **sim_kw)
+    print_report(rpt, 'V9-H3  V9-C + MaxPos=8 + DD15%', len(v9c_signals), spy_info)
+
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 def parse_args():

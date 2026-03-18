@@ -217,6 +217,13 @@ def scan_and_add(min_date: str | None = None,
                 })
                 continue
 
+            # Resolve sector for diversity tracking
+            try:
+                from sentiment import get_sector_for_ticker
+                _sector = get_sector_for_ticker(sym)
+            except Exception:
+                _sector = ''
+
             data['positions'].append({
                 'symbol':          sym,
                 'date_added':      date_str,
@@ -229,6 +236,7 @@ def scan_and_add(min_date: str | None = None,
                 'shares':          shares,
                 'cost':            cost,
                 'current_price':   current_price,
+                'sector':          _sector,
             })
             open_syms.add(sym)
             added_syms.append(sym)
@@ -237,6 +245,16 @@ def scan_and_add(min_date: str | None = None,
 
     data['processed_files'] = sorted(processed)
     _save(data)
+
+    # Advisory health check — trigger when signals skipped due to low cash
+    if skipped_cash:
+        try:
+            from position_health import run_health_check
+            run_health_check(data)
+        except Exception as _e:
+            import logging as _log
+            _log.getLogger(__name__).warning(f"Health check failed: {_e}")
+
     return _build_result(added_syms, skipped_dup, skipped_cash,
                          skipped_no_v9c, files_scanned, data)
 

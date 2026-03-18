@@ -856,6 +856,13 @@ def run_once(decisions_date: Optional[str] = None,
         _send_discord_alerts(notify_alerts)
         _send_telegram_alerts(notify_alerts)
 
+    # ── Portfolio health check (advisory, respects cooldown) ──────────────
+    try:
+        from position_health import run_health_check
+        run_health_check()
+    except Exception as _e:
+        logger.debug(f"Health check skipped: {_e}")
+
     return alerts
 
 
