@@ -442,9 +442,9 @@ def _render_auto_portfolio():
     with cfg_col1:
         pos_pct_label = st.selectbox(
             "Position size",
-            options=["10% ($10K)", "5% ($5K)"],
+            options=["10% ($1K)", "5% ($500)"],
             key="ap_pos_pct",
-            help="Percentage of $100K capital allocated per trade",
+            help="Percentage of $10K capital allocated per trade",
         )
         pos_pct = 0.05 if pos_pct_label.startswith("5%") else 0.10
 
@@ -627,6 +627,76 @@ def _render_auto_portfolio():
                 st.rerun()
     else:
         st.info("No open positions. Click **Scan Signals** to add V9-C signals.")
+
+    # ── IB Execution Controls ──
+    with st.expander("IB Live Execution", expanded=False):
+        try:
+            from ib_executor import (
+                IB_EXEC_CONFIG, is_kill_switch_active,
+                activate_kill_switch, deactivate_kill_switch,
+                get_daily_pnl, _load_exec_log,
+            )
+
+            ib_c1, ib_c2, ib_c3, ib_c4 = st.columns(4)
+            ib_c1.metric("Enabled", "YES" if IB_EXEC_CONFIG['enabled'] else "NO")
+            ib_c2.metric("Mode", "PAPER" if IB_EXEC_CONFIG['paper_mode'] else "LIVE")
+            ib_c3.metric("Kill Switch", "ACTIVE" if is_kill_switch_active() else "Off")
+            ib_c4.metric("Daily P&L", f"${get_daily_pnl():+,.0f}")
+
+            ib_a1, ib_a2, ib_a3 = st.columns(3)
+            with ib_a1:
+                if st.button("Enable Execution", key="ib_enable"):
+                    IB_EXEC_CONFIG['enabled'] = True
+                    st.toast("IB execution enabled")
+                    st.rerun()
+            with ib_a2:
+                if st.button("Disable Execution", key="ib_disable"):
+                    IB_EXEC_CONFIG['enabled'] = False
+                    st.toast("IB execution disabled")
+                    st.rerun()
+            with ib_a3:
+                if is_kill_switch_active():
+                    if st.button("Deactivate Kill Switch", key="ib_unkill", type="primary"):
+                        deactivate_kill_switch()
+                        st.toast("Kill switch deactivated")
+                        st.rerun()
+                else:
+                    if st.button("KILL SWITCH", key="ib_kill", type="primary"):
+                        activate_kill_switch("Streamlit UI")
+                        st.toast("Kill switch ACTIVATED — all orders halted")
+                        st.rerun()
+
+            # Recent execution log
+            log = _load_exec_log()
+            if log:
+                from datetime import date as _dt
+                today_str = _dt.today().isoformat()
+                recent = [e for e in log[-20:]]
+                if recent:
+                    st.caption(f"Recent orders ({len(log)} total)")
+                    log_rows = []
+                    for e in reversed(recent):
+                        log_rows.append({
+                            'Time': e.get('timestamp', '?')[:19],
+                            'Mode': 'LIVE' if e.get('live') else 'PAPER',
+                            'Action': e.get('action', '?'),
+                            'Symbol': e.get('symbol', '?'),
+                            'Shares': e.get('shares', 0),
+                            'Price': f"${e.get('entry_price', 0):.2f}",
+                            'Status': e.get('status', '?'),
+                        })
+                    st.dataframe(pd.DataFrame(log_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No execution history yet")
+
+            st.caption(
+                f"Max position: ${IB_EXEC_CONFIG['max_position_value']:,} | "
+                f"Daily loss limit: ${IB_EXEC_CONFIG['max_daily_loss_usd']} | "
+                f"Order type: {IB_EXEC_CONFIG['order_type']} | "
+                f"Bracket: {IB_EXEC_CONFIG['use_bracket']}"
+            )
+        except Exception as e:
+            st.warning(f"IB executor not available: {e}")
 
     # ── Portfolio Health & Diversity (advisory) ──
     if positions:

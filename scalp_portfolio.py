@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 _NY_TZ = ZoneInfo('America/New_York')
 _PORTFOLIO_PATH = 'scanner_output/portfolio/scalp_portfolio.json'
 
-INITIAL_CAPITAL = 100_000
+INITIAL_CAPITAL = 10_000
 POSITION_SIZE_PCT = 0.10  # 10% of capital per trade
 
 logger = logging.getLogger(__name__)

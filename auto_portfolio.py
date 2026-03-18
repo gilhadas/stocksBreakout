@@ -21,7 +21,7 @@ _NY_TZ          = ZoneInfo('America/New_York')
 _SIGNALS_DIR    = 'scanner_output/signals'
 _PORTFOLIO_PATH = 'scanner_output/portfolio/auto_portfolio.json'
 
-INITIAL_CAPITAL    = 100_000
+INITIAL_CAPITAL    = 10_000
 POSITION_SIZE_PCT  = 0.10      # 10% of capital per trade
 MIN_MINERVINI      = 7         # V9-C filter threshold
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
@@ -194,8 +194,16 @@ def scan_and_add(min_date: str | None = None,
             if stop >= entry_price:
                 stop = round(entry_price * 0.95, 4)
 
-            # Position sizing: pos_pct of initial capital (use entry_price)
-            position_value = data['capital'] * pos_pct
+            # Position sizing: pos_pct × quality_mult × ATR adjustment
+            from config import QUALITY_SIZING, ATR_SIZING
+            quality_mult = QUALITY_SIZING.get(quality, 1.0)
+            atr_adj = _compute_atr_adjustment(sym)
+            position_value = data['capital'] * pos_pct * quality_mult * atr_adj
+
+            # Hard cap: no position > max_single_position_pct of capital
+            hard_cap = data['capital'] * ATR_SIZING.get('max_single_position_pct', 0.20)
+            position_value = min(position_value, hard_cap)
+
             shares = max(1, int(position_value / entry_price))
             cost   = round(shares * entry_price, 2)
 
@@ -224,7 +232,7 @@ def scan_and_add(min_date: str | None = None,
             except Exception:
                 _sector = ''
 
-            data['positions'].append({
+            pos_dict = {
                 'symbol':          sym,
                 'date_added':      date_str,
                 'mode':            mode,
@@ -237,9 +245,18 @@ def scan_and_add(min_date: str | None = None,
                 'cost':            cost,
                 'current_price':   current_price,
                 'sector':          _sector,
-            })
+            }
+            data['positions'].append(pos_dict)
             open_syms.add(sym)
             added_syms.append(sym)
+
+            # IB execution hook — place bracket order if enabled
+            try:
+                from ib_executor import IB_EXEC_CONFIG
+                if IB_EXEC_CONFIG.get('enabled'):
+                    _queue_ib_order(pos_dict)
+            except Exception:
+                pass
 
         processed.add(fname)
 
@@ -257,6 +274,57 @@ def scan_and_add(min_date: str | None = None,
 
     return _build_result(added_syms, skipped_dup, skipped_cash,
                          skipped_no_v9c, files_scanned, data)
+
+
+def _queue_ib_order(pos: dict):
+    """Queue an IB bracket order for a new position. Non-blocking."""
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    try:
+        from ib_executor import IB_EXEC_CONFIG, _log_order
+        signal = {
+            'symbol':      pos['symbol'],
+            'entry_price': pos['entry_price'],
+            'stop':        pos['stop'],
+            'target':      pos['target'],
+            'shares':      pos['shares'],
+            'quality':     pos['quality'],
+            'mode':        pos['mode'],
+        }
+        # Log the pending order — actual IB execution happens in scan_feedback_agent
+        # or via CLI when IB connection is available
+        _log_order({
+            **signal,
+            'action': 'BUY',
+            'status': 'QUEUED',
+            'live': not IB_EXEC_CONFIG.get('paper_mode', True),
+        })
+        _logger.info(f"IB order queued: BUY {pos['shares']} {pos['symbol']} @ ${pos['entry_price']:.2f}")
+    except Exception as e:
+        _logger.warning(f"IB queue failed for {pos['symbol']}: {e}")
+
+
+def _compute_atr_adjustment(symbol: str) -> float:
+    """
+    Compute ATR-based position size adjustment.
+    High ATR% → smaller position (returns < 1.0).
+    Low ATR% → capped at 1.0 (no oversizing).
+    """
+    from config import ATR_SIZING
+    if not ATR_SIZING.get('enabled'):
+        return 1.0
+    try:
+        from position_health import _fetch_atr_pcts
+        atr_map = _fetch_atr_pcts([symbol])
+        atr_pct = atr_map.get(symbol)
+        if atr_pct is None or atr_pct <= 0:
+            return 1.0
+        ref = ATR_SIZING['reference_atr_pct']
+        raw = ref / atr_pct
+        return max(ATR_SIZING['min_adjustment'],
+                   min(ATR_SIZING['max_adjustment'], raw))
+    except Exception:
+        return 1.0
 
 
 def _safe_float(val) -> float:

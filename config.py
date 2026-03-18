@@ -26,8 +26,8 @@ def _load_email_recipients() -> str:
 
 # --- Portfolio Configuration ---
 PORTFOLIO = {
-    'initial_capital': 100000,      # Starting capital in USD
-    'max_position_pct': 0.10,       # 10% base, scaled by quality (PREMIUM=30%)
+    'initial_capital': 10000,       # Starting capital in USD
+    'max_position_pct': 0.10,       # 10% base, scaled by quality × ATR adjustment
     'max_risk_pct': 0.02,           # 2% risk per trade (backtested optimal)
     'use_trailing_stop': False,     # Legacy trailing stops — disabled (V9 replaces this)
     'trailing_stop_atr_mult': 4.0,  # Legacy: Wide trail prevents shakeouts
@@ -73,10 +73,25 @@ SCORE_THRESHOLDS = {
 }
 
 QUALITY_SIZING = {
-    'GOLD': 4.0,      # Up to 20% of capital (max conviction)
-    'PREMIUM': 3.0,   # Up to 15% of capital
-    'HIGH': 2.0,      # Up to 10% of capital
-    'STANDARD': 1.0,  # 5% of capital (base)
+    'GOLD': 2.0,      # Up to 20% of capital (was 4.0 — reduced for risk control)
+    'PREMIUM': 2.0,   # Up to 20% of capital (was 3.0 — ATR adjustment handles the rest)
+    'HIGH': 1.5,      # Up to 15% of capital
+    'STANDARD': 1.0,  # 10% of capital (base)
+}
+
+# --- ATR-Adjusted Position Sizing ---
+# Scales position size inversely with stock volatility.
+# High ATR% → smaller position. Low ATR% → capped at 1.0 (no oversizing).
+# Formula: atr_adj = clamp(reference_atr / stock_atr, min_adj, max_adj)
+# Final:   position = capital × base_pct × quality_mult × atr_adj, capped at max_position_pct
+ATR_SIZING = {
+    'enabled': True,
+    'reference_atr_pct': 0.025,    # 2.5% = median ATR% for liquid US stocks
+    'min_adjustment': 0.3,         # Floor: never shrink below 30% of base size
+    'max_adjustment': 1.0,         # Cap: never oversize (low-vol stocks stay at base)
+    'max_single_position_pct': 0.20,  # Hard cap: no position > 20% of capital
+    'atr_period': 14,              # ATR lookback (Wilder's)
+    'atr_history_days': 30,        # Days of price data for ATR calc
 }
 
 # --- Cash Management & Portfolio Diversity ---

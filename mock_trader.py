@@ -14,7 +14,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
 
-from config import MAX_HOLD_BARS, WIN_PROBABILITY
+from config import MAX_HOLD_BARS, WIN_PROBABILITY, ATR_SIZING, QUALITY_SIZING
 
 logger = logging.getLogger(__name__)
 
@@ -306,23 +306,78 @@ class MockTrader:
         self.trades: List[MockTrade] = []
         self.open_positions: Dict[int, MockTrade] = {}  # trade_id -> MockTrade
         self.trade_id_counter = 1
-    
-    # Position size multipliers by signal quality
+        self.historical_data: Dict[str, pd.DataFrame] = {}  # set by SimulationMode
+        self._atr_cache: Dict[str, float] = {}  # symbol → ATR% cache
+
+    # Position size multipliers by signal quality (uses config.QUALITY_SIZING)
     QUALITY_MULTIPLIERS = {
-        'PREMIUM': 3.0,   # Up to 15% of capital
-        'HIGH': 2.0,      # Up to 10% of capital
-        'STANDARD': 1.0,  # 5% of capital (default)
+        'GOLD': QUALITY_SIZING.get('GOLD', 2.0),
+        'PREMIUM': QUALITY_SIZING.get('PREMIUM', 2.0),
+        'HIGH': QUALITY_SIZING.get('HIGH', 1.5),
+        'STANDARD': QUALITY_SIZING.get('STANDARD', 1.0),
     }
+
+    def _compute_atr_pct(self, symbol: str, as_of_date=None) -> float:
+        """
+        Compute ATR% for a symbol from historical_data.
+        Returns ATR/close as a fraction (e.g., 0.059 for 5.9%).
+        Falls back to reference ATR if data unavailable.
+        """
+        cache_key = f"{symbol}_{as_of_date}" if as_of_date else symbol
+        if cache_key in self._atr_cache:
+            return self._atr_cache[cache_key]
+
+        ref = ATR_SIZING['reference_atr_pct']
+        df = self.historical_data.get(symbol)
+        if df is None or len(df) < ATR_SIZING['atr_period'] + 1:
+            return ref
+
+        try:
+            # Trim to as_of_date if provided (backtest: don't look into future)
+            if as_of_date is not None:
+                df = df[df.index <= as_of_date]
+                if len(df) < ATR_SIZING['atr_period'] + 1:
+                    return ref
+
+            # Normalize column names
+            cols = {c.lower(): c for c in df.columns}
+            high = df[cols.get('high', 'High')]
+            low = df[cols.get('low', 'Low')]
+            close = df[cols.get('close', 'Close')]
+
+            # True Range → Wilder's ATR
+            prev_close = close.shift(1)
+            tr = pd.concat([
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ], axis=1).max(axis=1)
+            atr = tr.ewm(span=ATR_SIZING['atr_period'], adjust=False).mean()
+
+            last_atr = float(atr.dropna().iloc[-1])
+            last_close = float(close.dropna().iloc[-1])
+            if last_close > 0:
+                atr_pct = last_atr / last_close
+            else:
+                atr_pct = ref
+
+            self._atr_cache[cache_key] = atr_pct
+            return atr_pct
+        except Exception:
+            return ref
 
     def calculate_position_size(self, price: float, stop_loss: float,
                                 quality: str = 'STANDARD',
-                                win_probability: float = 0.50) -> int:
+                                win_probability: float = 0.50,
+                                symbol: str = '',
+                                as_of_date=None) -> int:
         """
-        Calculate position size based on risk management rules, signal quality,
-        and win probability.
+        Calculate position size with ATR-adjusted sizing.
 
-        PREMIUM signals get 3x base size, HIGH gets 2x, STANDARD gets 1x.
-        Win probability adjusts: HIGH prob = 1.2x, LOW prob = 0.7x.
+        Three constraints applied (smallest wins):
+        1. Position value = capital × base_pct × quality_mult × atr_adj
+        2. Risk limit = capital × risk_pct × quality_mult / risk_per_share
+        3. Hard cap = capital × max_single_position_pct (20%)
         """
         multiplier = self.QUALITY_MULTIPLIERS.get(quality, 1.0)
 
@@ -333,20 +388,34 @@ class MockTrader:
         elif win_probability < wp_cfg['low_threshold']:
             multiplier *= wp_cfg['low_size_mult']
 
-        # Calculate max position value (scaled by quality + win prob)
-        max_position_value = self.capital * self.max_position_pct * multiplier
+        # ATR adjustment: volatile stocks get smaller positions
+        atr_adj = 1.0
+        if ATR_SIZING.get('enabled') and symbol:
+            atr_pct = self._compute_atr_pct(symbol, as_of_date)
+            ref_atr = ATR_SIZING['reference_atr_pct']
+            if atr_pct > 0:
+                raw_adj = ref_atr / atr_pct
+                atr_adj = max(ATR_SIZING['min_adjustment'],
+                              min(ATR_SIZING['max_adjustment'], raw_adj))
+
+        # Calculate max position value (scaled by quality × ATR adj)
+        max_position_value = self.capital * self.max_position_pct * multiplier * atr_adj
         max_shares_by_position = int(max_position_value / price)
 
-        # Calculate max shares based on risk limit (scaled by quality + win prob)
+        # Hard cap: no position > max_single_position_pct of capital
+        hard_cap_value = self.capital * ATR_SIZING.get('max_single_position_pct', 0.20)
+        max_shares_by_cap = int(hard_cap_value / price)
+
+        # Calculate max shares based on risk limit (also ATR-adjusted)
         risk_per_share = abs(price - stop_loss)
         if risk_per_share > 0:
-            max_risk_amount = self.capital * self.max_risk_pct * multiplier
+            max_risk_amount = self.capital * self.max_risk_pct * multiplier * atr_adj
             max_shares_by_risk = int(max_risk_amount / risk_per_share)
         else:
             max_shares_by_risk = max_shares_by_position
 
-        # Take the smaller of the two limits
-        quantity = min(max_shares_by_position, max_shares_by_risk)
+        # Take the smallest of all limits
+        quantity = min(max_shares_by_position, max_shares_by_risk, max_shares_by_cap)
 
         # Ensure at least 1 share if we have enough capital
         if quantity < 1 and self.capital >= price:
@@ -558,9 +627,10 @@ class SimulationMode:
         """
         logger.info(f"🔄 Running simulation: {self.start_date.date()} to {self.end_date.date()}")
 
-        # Store end prices and historical data for closing positions
+        # Store end prices and historical data for closing positions + ATR sizing
         self.end_prices = end_prices or {}
         self.historical_data = historical_data or {}
+        self.trader.historical_data = self.historical_data  # share with MockTrader for ATR sizing
 
         # --- SPY HEDGE: Buy at start ---
         if self.spy_hedge_enabled and self.spy_allocation_pct > 0:
@@ -599,7 +669,9 @@ class SimulationMode:
                     price=signal['price'],
                     stop_loss=signal.get('stop_loss', signal['price'] * 0.95),
                     quality=quality,
-                    win_probability=win_prob
+                    win_probability=win_prob,
+                    symbol=signal.get('symbol', ''),
+                    as_of_date=current_date,
                 )
 
                 # Skip if quantity is 0 (insufficient capital)

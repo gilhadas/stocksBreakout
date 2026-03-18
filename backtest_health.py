@@ -48,6 +48,7 @@ class DateFixedSimulation(SimulationMode):
         """Override to patch entry_time/exit_time with simulation dates."""
         self.end_prices = end_prices or {}
         self.historical_data = historical_data or {}
+        self.trader.historical_data = self.historical_data  # share for ATR sizing
 
         signals_df = pd.DataFrame(signals)
         signals_df['date'] = pd.to_datetime(signals_df['date'])
@@ -67,6 +68,8 @@ class DateFixedSimulation(SimulationMode):
                     price=signal['price'],
                     stop_loss=signal.get('stop_loss', signal['price'] * 0.95),
                     quality=quality, win_probability=win_prob,
+                    symbol=signal.get('symbol', ''),
+                    as_of_date=current_date,
                 )
                 if quantity == 0:
                     continue

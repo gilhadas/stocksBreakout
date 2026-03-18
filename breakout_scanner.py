@@ -15,21 +15,11 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env before any AWS/broker calls
 
 _NY_TZ = ZoneInfo('America/New_York')
-
-# Load .env file (cron doesn't inherit shell env vars like GMAIL_APP_PASSWORD)
-_env_file = Path(__file__).parent / '.env'
-if _env_file.exists():
-    with open(_env_file) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith('#') and '=' in _line:
-                if _line.startswith('export '):
-                    _line = _line[7:]
-                _key, _, _val = _line.partition('=')
-                _val = _val.split('#')[0].strip().strip('"').strip("'")  # strip inline comments
-                os.environ.setdefault(_key.strip(), _val)
 
 # Python 3.14 compatibility: Create event loop before importing ib_insync
 # This prevents "RuntimeError: There is no current event loop" from eventkit
