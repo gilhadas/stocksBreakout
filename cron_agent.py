@@ -518,10 +518,11 @@ def list_jobs(jobs: List[CronJob], category: Optional[str] = None):
     print("-" * 90)
 
     def sort_key(job):
-        # For sorting: use first hour and minute for display
+        # For sorting: prioritize TIME (h, m) first, then category
+        # This shows daily execution flow chronologically
         h = job.hour[0] if job.hour != [-1] else 99
         m = job.minute[0] if job.minute != [-1] else 99
-        return (job.category, h, m)
+        return (h, m, job.category)
 
     for job in sorted(jobs, key=sort_key):
         wd_str = ','.join(map(str, job.weekday)) if job.weekday != [-1] else 'All'
