@@ -1,7 +1,7 @@
 """
 Auto Virtual Portfolio
 ======================
-Automatically tracks all V9-C signals (GOLD/PREMIUM + MinerviniScore ≥ 7) from
+Automatically tracks all V9-H signals (GOLD/PREMIUM; breakouts require MinerviniScore ≥ 7) from
 scanner_output/signals/ CSV files.
 
 Rules
@@ -23,7 +23,7 @@ _PORTFOLIO_PATH = 'scanner_output/portfolio/auto_portfolio.json'
 
 INITIAL_CAPITAL    = 10_000
 POSITION_SIZE_PCT  = 0.10      # 10% of capital per trade
-MIN_MINERVINI      = 7         # V9-C filter threshold
+MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
 
 
@@ -83,12 +83,18 @@ def _mode_from_filename(fname: str) -> str:
     return 'swing'
 
 
-# ── Scan and add new V9-C signals ────────────────────────────────────────────
+# ── Scan and add new V9-H signals ────────────────────────────────────────────
 
 def scan_and_add(min_date: str | None = None,
                  position_pct: float | None = None) -> dict:
     """
-    Scan signal CSV files and add new V9-C signals.
+    Scan signal CSV files and add new V9-H signals.
+
+    V9-H admission:
+      - Breakout signals: GOLD/PREMIUM + MinerviniScore >= 7
+      - BOUNCE / CONTINUATION / SMA20_CROSS: GOLD/PREMIUM (no MinerviniScore
+        requirement — these signal types don't compute it, and the orchestrator's
+        V9-H regime gate already filtered regime-inappropriate signals)
 
     Args:
         min_date: Optional 'YYYY-MM-DD' string.
@@ -151,19 +157,28 @@ def scan_and_add(min_date: str | None = None,
             processed.add(fname)
             continue
 
-        # V9-C filter: GOLD or PREMIUM + MinerviniScore >= 7
+        # V9-H filter: GOLD or PREMIUM
+        # Breakout signals require MinerviniScore >= 7; BOUNCE/CONTINUATION/SMA20_CROSS
+        # don't compute MinerviniScore — rely on orchestrator's V9-H regime gate instead.
         mask = df['Quality'].isin(['GOLD', 'PREMIUM'])
-        if 'MinerviniScore' in df.columns:
+        if 'MinerviniScore' in df.columns and 'Type' in df.columns:
+            is_breakout = ~df['Type'].isin(['BOUNCE', 'CONTINUATION', 'SMA20_CROSS'])
+            minervini_ok = (pd.to_numeric(df['MinerviniScore'], errors='coerce')
+                            .fillna(0) >= MIN_MINERVINI)
+            # Breakouts must pass MinerviniScore; non-breakouts are exempt
+            mask = mask & (minervini_ok | ~is_breakout)
+        elif 'MinerviniScore' in df.columns:
+            # No Type column — apply MinerviniScore to all (legacy behavior)
             mask = mask & (pd.to_numeric(df['MinerviniScore'], errors='coerce')
                            .fillna(0) >= MIN_MINERVINI)
-        v9c = df[mask]
+        v9h = df[mask]
 
-        if v9c.empty:
+        if v9h.empty:
             skipped_no_v9c += len(df)
             processed.add(fname)
             continue
 
-        for _, row in v9c.iterrows():
+        for _, row in v9h.iterrows():
             sym = str(row.get('Symbol', '')).strip().upper()
             if not sym or sym == 'NAN':
                 continue
@@ -180,7 +195,8 @@ def scan_and_add(min_date: str | None = None,
             stop   = _safe_float(row.get('Stop'))   or round(price * 0.95, 2)
             target = _safe_float(row.get('Target')) or round(price * 1.10, 2)
             quality  = str(row.get('Quality', 'PREMIUM'))
-            minervini = int(_safe_float(row.get('MinerviniScore')) or 0)
+            _ms = _safe_float(row.get('MinerviniScore'))
+            minervini = int(_ms) if (_ms is not None and _ms == _ms) else 0
             # Mode: prefer from signal row, fall back to filename
             mode = str(row.get('Mode', file_mode)).lower().strip() or file_mode
 
@@ -680,9 +696,9 @@ def rebuild_skipped_cash() -> dict:
         if 'MinerviniScore' in df.columns:
             mask = mask & (pd.to_numeric(df['MinerviniScore'], errors='coerce')
                            .fillna(0) >= MIN_MINERVINI)
-        v9c = df[mask]
+        v9h = df[mask]
 
-        for _, row in v9c.iterrows():
+        for _, row in v9h.iterrows():
             sym = str(row.get('Symbol', '')).strip().upper()
             if not sym or sym == 'NAN':
                 continue
@@ -698,7 +714,8 @@ def rebuild_skipped_cash() -> dict:
             stop     = _safe_float(row.get('Stop'))   or round(price * 0.95, 2)
             target   = _safe_float(row.get('Target')) or round(price * 1.10, 2)
             quality  = str(row.get('Quality', 'PREMIUM'))
-            minervini = int(_safe_float(row.get('MinerviniScore')) or 0)
+            _ms = _safe_float(row.get('MinerviniScore'))
+            minervini = int(_ms) if (_ms is not None and _ms == _ms) else 0
             mode = str(row.get('Mode', file_mode)).lower().strip() or file_mode
 
             entry_price, current_price = _fetch_entry_and_current(sym, date_str, price)

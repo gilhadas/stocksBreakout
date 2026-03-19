@@ -404,14 +404,27 @@ def _render_auto_portfolio():
     """Auto Virtual Portfolio section — tracks all V9-C signals automatically."""
     import auto_portfolio as ap
 
-    st.subheader("Auto Virtual Portfolio (V9-C Signals)")
+    st.subheader("Auto Virtual Portfolio (V9-H Signals)")
     st.caption(
-        "Automatically tracks every GOLD/PREMIUM signal with Minervini≥7. "
-        "Position size is configurable below. Stops auto-close positions. "
-        "No duplicates — each ticker enters once while open."
+        "Automatically tracks GOLD/PREMIUM signals (breakouts require Minervini≥7; "
+        "BOUNCE/CONTINUATION exempt). Position size is configurable below. "
+        "Stops auto-close positions. No duplicates — each ticker enters once while open."
     )
 
-    data    = ap.load()
+    data = ap.load()
+
+    # Auto-refresh prices on page load (at most once per 5 minutes)
+    _REFRESH_KEY = '_ap_last_refresh'
+    import time as _time
+    _now = _time.time()
+    if data['positions'] and (_now - st.session_state.get(_REFRESH_KEY, 0)) > 300:
+        try:
+            result = ap.refresh_prices()
+            data = result['data']
+            st.session_state[_REFRESH_KEY] = _now
+        except Exception:
+            pass  # fall through with stale prices
+
     summary = ap.get_summary(data)
     cash    = summary['cash']
     cap     = summary['capital']
@@ -812,6 +825,72 @@ def _render_auto_portfolio():
             _color_pnl, subset=[c for c in ['P&L $', 'P&L%'] if c in df_hist.columns]
         )
         st.dataframe(styled_hist, use_container_width=True, hide_index=True)
+
+    # ── Trading History (chronological activity log) ────────────────────────
+    if positions or closed:
+        with st.expander("Trading History", expanded=False):
+            history = []
+            for p in positions:
+                history.append({
+                    'Date':     p['date_added'],
+                    'Action':   'BUY',
+                    'Symbol':   p['symbol'],
+                    'Mode':     p.get('mode', ''),
+                    'Quality':  p.get('quality', ''),
+                    'Price':    p['entry_price'],
+                    'Shares':   p['shares'],
+                    'Value':    round(p['entry_price'] * p['shares'], 2),
+                    'P&L':     '',
+                    'Reason':   '',
+                })
+            for t in closed:
+                # Entry event
+                history.append({
+                    'Date':     t['date_added'],
+                    'Action':   'BUY',
+                    'Symbol':   t['symbol'],
+                    'Mode':     t.get('mode', ''),
+                    'Quality':  t.get('quality', ''),
+                    'Price':    t['entry_price'],
+                    'Shares':   t.get('shares', ''),
+                    'Value':    round(t['entry_price'] * t.get('shares', 0), 2),
+                    'P&L':     '',
+                    'Reason':   '',
+                })
+                # Exit event
+                reason = t.get('close_reason', '')
+                if reason == 'trailing_stop' and t.get('trail_pct'):
+                    reason = f"trailing {int(t['trail_pct']*100)}%"
+                history.append({
+                    'Date':     t.get('date_closed', ''),
+                    'Action':   'SELL',
+                    'Symbol':   t['symbol'],
+                    'Mode':     t.get('mode', ''),
+                    'Quality':  '',
+                    'Price':    t.get('exit_price', 0),
+                    'Shares':   t.get('shares', ''),
+                    'Value':    round(t.get('exit_price', 0) * t.get('shares', 0), 2),
+                    'P&L':     round(t.get('pnl', 0), 0),
+                    'Reason':   reason,
+                })
+            # Sort by date descending, SELL before BUY on same date
+            action_order = {'SELL': 0, 'BUY': 1}
+            history.sort(key=lambda r: (r['Date'], action_order.get(r['Action'], 2)), reverse=True)
+
+            df_history = pd.DataFrame(history)
+            df_history['Price'] = df_history['Price'].apply(
+                lambda x: f"${x:.2f}" if isinstance(x, (int, float)) and x else ''
+            )
+            df_history['Value'] = df_history['Value'].apply(
+                lambda x: f"${x:,.0f}" if isinstance(x, (int, float)) and x else ''
+            )
+            styled_history = df_history.style.applymap(
+                _color_pnl, subset=['P&L']
+            ).applymap(
+                lambda v: 'color: green' if v == 'BUY' else ('color: red' if v == 'SELL' else ''),
+                subset=['Action']
+            )
+            st.dataframe(styled_history, use_container_width=True, hide_index=True)
 
     # ── Missed Trades (skipped due to insufficient cash) ─────────────────────
     skipped = data.get('skipped_cash', [])

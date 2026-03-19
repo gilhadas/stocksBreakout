@@ -1533,7 +1533,7 @@ Examples:
         if cached_market_data:
             orchestrator.market_data.set_cached_data(cached_market_data)
 
-        # Load exit positions from portfolio.json when:
+        # Load exit positions from portfolio.json + auto_portfolio.json when:
         # 1. --exit-from-portfolio is explicitly set, OR
         # 2. --both is set but no --exit-file provided (auto-fallback)
         if not args.exit_file and (
@@ -1541,19 +1541,44 @@ Examples:
             getattr(args, 'both', False)
         ):
             from portfolio import Portfolio
+            from config import MODES
+            import auto_portfolio
+
+            exit_positions = []
+
+            # 1. Load from portfolio.json
             p = Portfolio()
-            exit_positions = p.get_positions_as_exit_format()
+            exit_positions.extend(p.get_positions_as_exit_format())
+
+            # 2. Load from auto_portfolio.json (merge, dedup by symbol)
+            ap_data = auto_portfolio.load()
+            existing_symbols = {ep['symbol'] for ep in exit_positions}
+            for pos in ap_data.get('positions', []):
+                if pos['symbol'] not in existing_symbols:
+                    mode = pos.get('mode', 'swing')
+                    exit_positions.append({
+                        'symbol': pos['symbol'],
+                        'mode': mode,
+                        'entry': pos['entry_price'],
+                        'entry_date': pos.get('date_added', ''),
+                        'stop': pos['stop'],
+                        'target': pos['target'],
+                        'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
+                        'quality': pos.get('quality', 'PREMIUM'),
+                    })
+
             if not exit_positions:
                 logger.info("Portfolio has no open positions — nothing to evaluate")
             else:
                 import tempfile, csv
                 tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='')
-                writer = csv.DictWriter(tmp, fieldnames=['symbol', 'mode', 'entry', 'stop', 'target', 'timeframe'])
+                fieldnames = ['symbol', 'mode', 'entry', 'entry_date', 'stop', 'target', 'timeframe', 'quality']
+                writer = csv.DictWriter(tmp, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(exit_positions)
                 tmp.close()
                 args.exit_file = tmp.name
-                logger.info(f"Loaded {len(exit_positions)} positions from portfolio.json for exit evaluation")
+                logger.info(f"Loaded {len(exit_positions)} positions from portfolio.json + auto_portfolio.json for exit evaluation")
 
         # Determine execution mode
         if getattr(args, 'monitor_portfolio', False):
