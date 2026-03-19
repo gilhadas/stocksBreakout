@@ -11,7 +11,10 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-from test_optimization import test_configuration
+try:
+    from tests.test_optimization import run_configuration
+except ImportError:
+    from test_optimization import run_configuration
 
 
 async def run_extended_test():
@@ -42,13 +45,13 @@ async def run_extended_test():
     new_config = {'vol_thresh': 1.3, 'atr_mult': 0.25, 'lookback': 15}
 
     print("\n🔵 TESTING OLD CONFIGURATION")
-    old_results = await test_configuration(
+    old_results = await run_configuration(
         test_symbols, start_date, end_date,
         "OLD CONFIG (Vol=1.1, ATR=0.2, Look=10)", old_config
     )
 
     print("\n🟢 TESTING NEW OPTIMIZED CONFIGURATION")
-    new_results = await test_configuration(
+    new_results = await run_configuration(
         test_symbols, start_date, end_date,
         "NEW CONFIG (Vol=1.3, ATR=0.25, Look=15)", new_config
     )

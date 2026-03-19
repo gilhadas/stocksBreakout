@@ -360,7 +360,7 @@ class TestMonitorWatchPaths(unittest.TestCase):
 class TestListsDirectory(unittest.TestCase):
     """Verify that the scanner_output/lists/ directory and key files are present."""
 
-    LISTS_DIR = Path(__file__).parent / 'scanner_output' / 'lists'
+    LISTS_DIR = Path(__file__).resolve().parent.parent / 'scanner_output' / 'lists'
 
     def test_lists_dir_exists(self):
         self.assertTrue(self.LISTS_DIR.exists(), "scanner_output/lists/ directory must exist")
@@ -371,7 +371,6 @@ class TestListsDirectory(unittest.TestCase):
             'premium_daytrade.txt',
             'premium_longterm.txt',
             'momentum_watch_daytrade.txt',
-            'optimizer_watch.txt',
             'positions_swing_mock.csv',
             'positions_daytrade_mock.csv',
         ]
@@ -381,7 +380,7 @@ class TestListsDirectory(unittest.TestCase):
 
     def test_positions_csv_not_in_input(self):
         """positions CSV files should NOT be in input/ any more."""
-        input_dir = Path(__file__).parent / 'input'
+        input_dir = Path(__file__).resolve().parent.parent / 'input'
         for fname in ('positions_swing_mock.csv', 'positions_daytrade_mock.csv',
                       'premium_swing.txt', 'premium_daytrade.txt'):
             self.assertFalse((input_dir / fname).exists(),

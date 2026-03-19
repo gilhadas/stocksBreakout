@@ -54,14 +54,14 @@ class TestEmptyPortfolio(ScalpPortfolioTestCase):
 
     def test_initial_state(self):
         data = sp.load()
-        self.assertEqual(data['capital'], 100_000)
+        self.assertEqual(data['capital'], sp.INITIAL_CAPITAL)
         self.assertEqual(data['positions'], [])
         self.assertEqual(data['closed'], [])
 
     def test_summary_empty(self):
         data = sp.load()
         s = sp.get_summary(data)
-        self.assertEqual(s['cash'], 100_000)
+        self.assertEqual(s['cash'], sp.INITIAL_CAPITAL)
         self.assertEqual(s['market_value'], 0)
         self.assertEqual(s['unrealized'], 0)
         self.assertEqual(s['realized'], 0)
@@ -70,7 +70,7 @@ class TestEmptyPortfolio(ScalpPortfolioTestCase):
 
     def test_available_cash_empty(self):
         data = sp.load()
-        self.assertEqual(sp.available_cash(data), 100_000)
+        self.assertEqual(sp.available_cash(data), sp.INITIAL_CAPITAL)
 
     def test_open_symbols_empty(self):
         data = sp.load()
@@ -100,21 +100,24 @@ class TestAddPosition(ScalpPortfolioTestCase):
     def test_position_sizing(self):
         result = sp.add_position('AAPL', 100.00, 99.98, 100.06)
         pos = result['data']['positions'][0]
-        # 10% of $100K = $10K → 100 shares at $100
-        self.assertEqual(pos['shares'], 100)
-        self.assertEqual(pos['cost'], 10_000.00)
+        # 10% of capital → shares at $100
+        expected_shares = max(1, int(sp.INITIAL_CAPITAL * 0.10 / 100.00))
+        self.assertEqual(pos['shares'], expected_shares)
+        self.assertEqual(pos['cost'], expected_shares * 100.00)
 
     def test_custom_position_pct(self):
         result = sp.add_position('AAPL', 100.00, 99.98, 100.06, position_pct=0.05)
         pos = result['data']['positions'][0]
-        # 5% of $100K = $5K → 50 shares at $100
-        self.assertEqual(pos['shares'], 50)
-        self.assertEqual(pos['cost'], 5_000.00)
+        # 5% of capital → shares at $100
+        expected_shares = max(1, int(sp.INITIAL_CAPITAL * 0.05 / 100.00))
+        self.assertEqual(pos['shares'], expected_shares)
+        self.assertEqual(pos['cost'], expected_shares * 100.00)
 
     def test_cash_deducted(self):
         sp.add_position('AAPL', 100.00, 99.98, 100.06)
         data = sp.load()
-        self.assertEqual(sp.available_cash(data), 90_000)
+        expected_shares = max(1, int(sp.INITIAL_CAPITAL * 0.10 / 100.00))
+        self.assertEqual(sp.available_cash(data), sp.INITIAL_CAPITAL - expected_shares * 100.00)
 
     def test_vol_ratio_stored(self):
         result = sp.add_position('AAPL', 100.00, 99.98, 100.06, vol_ratio=3.5)
@@ -147,7 +150,8 @@ class TestAddPosition(ScalpPortfolioTestCase):
 
     def test_min_1_share(self):
         # Very expensive stock — should still get at least 1 share
-        result = sp.add_position('BRK', 50000.00, 49999.98, 50000.06)
+        # With INITIAL_CAPITAL=10K, 10% = $1K, but stock costs $5K → 0 shares → clamped to 1
+        result = sp.add_position('BRK', 5000.00, 4999.98, 5000.06)
         pos = result['data']['positions'][0]
         self.assertEqual(pos['shares'], 1)
 
@@ -193,7 +197,7 @@ class TestClosePosition(ScalpPortfolioTestCase):
         data = sp.load()
         cash_after = sp.available_cash(data)
         # Cash should be fully restored (position removed from invested)
-        self.assertEqual(cash_after, 100_000)
+        self.assertEqual(cash_after, sp.INITIAL_CAPITAL)
         self.assertGreater(cash_after, cash_before)
 
     def test_close_only_one_when_multiple(self):
@@ -225,26 +229,27 @@ class TestPnLCalculations(ScalpPortfolioTestCase):
     def test_pnl_math(self):
         sp.add_position('AAPL', 100.00, 99.98, 100.06)
         data = sp.load()
-        shares = data['positions'][0]['shares']  # 100
+        shares = data['positions'][0]['shares']
 
         result = sp.close_position('AAPL', 100.03)
-        # PnL = (100.03 - 100.00) * 100 = $3.00
-        self.assertAlmostEqual(result['pnl'], 3.00, places=2)
+        expected_pnl = round((100.03 - 100.00) * shares, 2)
+        self.assertAlmostEqual(result['pnl'], expected_pnl, places=2)
         trade = result['data']['closed'][0]
         self.assertAlmostEqual(trade['pnl_pct'], 0.03, places=2)
 
     def test_realized_pnl_in_summary(self):
         sp.add_position('AAPL', 100.00, 99.98, 100.06)
+        aapl_shares = sp.load()['positions'][0]['shares']
         sp.close_position('AAPL', 100.10)
 
         sp.add_position('MSFT', 200.00, 199.98, 200.06)
+        msft_shares = sp.load()['positions'][0]['shares']
         sp.close_position('MSFT', 199.90)
 
         data = sp.load()
         s = sp.get_summary(data)
-        # AAPL: +$10, MSFT: -$5 → realized = +$5
-        aapl_pnl = (100.10 - 100.00) * 100  # $10
-        msft_pnl = (199.90 - 200.00) * 50   # -$5
+        aapl_pnl = (100.10 - 100.00) * aapl_shares
+        msft_pnl = (199.90 - 200.00) * msft_shares
         self.assertAlmostEqual(s['realized'], round(aapl_pnl + msft_pnl, 2), places=0)
 
     def test_unrealized_pnl_in_summary(self):
@@ -308,10 +313,11 @@ class TestSummary(ScalpPortfolioTestCase):
     def test_market_value_with_positions(self):
         sp.add_position('AAPL', 100.00, 99.98, 100.06)
         data = sp.load()
+        pos = data['positions'][0]
         s = sp.get_summary(data)
-        # 100 shares × $100 = $10,000
-        self.assertEqual(s['market_value'], 10_000)
-        self.assertEqual(s['cash'], 90_000)
+        expected_shares = max(1, int(sp.INITIAL_CAPITAL * 0.10 / 100.00))
+        self.assertEqual(s['market_value'], expected_shares * 100.00)
+        self.assertEqual(s['cash'], sp.INITIAL_CAPITAL - expected_shares * 100.00)
         self.assertEqual(s['open_count'], 1)
 
     def test_summary_after_multiple_trades(self):
@@ -339,7 +345,7 @@ class TestReset(ScalpPortfolioTestCase):
 
         sp.reset()
         data = sp.load()
-        self.assertEqual(data['capital'], 100_000)
+        self.assertEqual(data['capital'], sp.INITIAL_CAPITAL)
         self.assertEqual(data['positions'], [])
         self.assertEqual(data['closed'], [])
 
@@ -474,11 +480,12 @@ class TestEdgeCases(ScalpPortfolioTestCase):
         result = sp.add_position('PENNY', 0.50, 0.48, 0.56)
         self.assertTrue(result['added'])
         pos = result['data']['positions'][0]
-        # $10K / $0.50 = 20,000 shares
-        self.assertEqual(pos['shares'], 20_000)
+        # 10% of capital / $0.50
+        expected_shares = max(1, int(sp.INITIAL_CAPITAL * 0.10 / 0.50))
+        self.assertEqual(pos['shares'], expected_shares)
 
     def test_expensive_stock(self):
-        """Stock at $500K exceeds $100K capital → rejected with no_cash."""
+        """Stock exceeds capital → rejected with no_cash."""
         result = sp.add_position('BRK', 500_000.00, 499_999.98, 500_000.06)
         self.assertFalse(result['added'])
         self.assertEqual(result['reason'], 'no_cash')
@@ -507,23 +514,23 @@ class TestCapitalUpdatesOnClose(ScalpPortfolioTestCase):
         """Capital should grow when a position is closed at profit."""
         sp.add_position('AAPL', 100.00, 99.98, 100.06)
         data = sp.load()
-        shares = data['positions'][0]['shares']  # 100
+        shares = data['positions'][0]['shares']
 
         sp.close_position('AAPL', 100.10)
         data = sp.load()
-        expected_pnl = (100.10 - 100.00) * shares  # $10
-        self.assertAlmostEqual(data['capital'], 100_000 + expected_pnl, places=2)
+        expected_pnl = (100.10 - 100.00) * shares
+        self.assertAlmostEqual(data['capital'], sp.INITIAL_CAPITAL + expected_pnl, places=2)
 
     def test_capital_decreases_on_loss(self):
         """Capital should shrink when a position is closed at a loss."""
         sp.add_position('MSFT', 200.00, 199.98, 200.06)
         data = sp.load()
-        shares = data['positions'][0]['shares']  # 50
+        shares = data['positions'][0]['shares']
 
         sp.close_position('MSFT', 199.90)
         data = sp.load()
-        expected_pnl = (199.90 - 200.00) * shares  # -$5
-        self.assertAlmostEqual(data['capital'], 100_000 + expected_pnl, places=2)
+        expected_pnl = (199.90 - 200.00) * shares
+        self.assertAlmostEqual(data['capital'], sp.INITIAL_CAPITAL + expected_pnl, places=2)
 
     def test_cash_reflects_realized_pnl(self):
         """After closing all positions, cash should equal capital (including realized P&L)."""
@@ -534,7 +541,7 @@ class TestCapitalUpdatesOnClose(ScalpPortfolioTestCase):
         s = sp.get_summary(data)
         # No open positions → cash should equal capital
         self.assertEqual(s['cash'], s['capital'])
-        self.assertGreater(s['cash'], 100_000)
+        self.assertGreater(s['cash'], sp.INITIAL_CAPITAL)
 
 
 if __name__ == '__main__':

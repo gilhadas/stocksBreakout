@@ -14,7 +14,7 @@ import pandas as pd
 from yfinance_adapter import YFinanceAdapter
 from scanner import BreakoutDetector
 
-async def test_signal_detection():
+async def run_signal_detection():
     """Test if we can detect signals on real data"""
     
     print("=" * 70)
@@ -114,4 +114,4 @@ async def test_signal_detection():
     print("\nNot every period will have breakouts. This is expected!")
 
 if __name__ == '__main__':
-    asyncio.run(test_signal_detection())
+    asyncio.run(run_signal_detection())

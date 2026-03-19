@@ -21,7 +21,7 @@ from yfinance_adapter import YFinanceAdapter
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
 
 
-async def test_configuration(symbols, start_date, end_date, config_name, params):
+async def run_configuration(symbols, start_date, end_date, config_name, params):
     """Test a specific configuration"""
     detector = BreakoutDetector()
     yf_adapter = YFinanceAdapter()
@@ -161,7 +161,7 @@ async def run_comparison_test():
     print("\n" + "🔵 "*40)
     print("TESTING: OLD CONFIGURATION (Before Optimization)")
     print("🔵 "*40)
-    old_results = await test_configuration(
+    old_results = await run_configuration(
         test_symbols, start_date, end_date,
         "OLD CONFIG", old_config
     )
@@ -170,7 +170,7 @@ async def run_comparison_test():
     print("\n" + "🟢 "*40)
     print("TESTING: NEW OPTIMIZED CONFIGURATION")
     print("🟢 "*40)
-    new_results = await test_configuration(
+    new_results = await run_configuration(
         test_symbols, start_date, end_date,
         "NEW OPTIMIZED CONFIG", new_config
     )
