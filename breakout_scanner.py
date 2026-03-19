@@ -1541,7 +1541,6 @@ Examples:
             getattr(args, 'both', False)
         ):
             from portfolio import Portfolio
-            from config import MODES
             import auto_portfolio
 
             exit_positions = []

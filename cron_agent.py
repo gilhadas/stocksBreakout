@@ -300,12 +300,15 @@ def run_job(job: CronJob, dry_run: bool = False) -> bool:
         logger.info(f"  [DRY-RUN] Would execute: {job.command}")
         return True
 
+    # Wide-universe scans (ALL.txt) need more time (1332 symbols)
+    job_timeout = 1800 if 'ALL.txt' in job.command else 900
+
     try:
         result = subprocess.run(
             job.command,
             shell=True,
             cwd=_PROJECT_ROOT,
-            timeout=900,  # 15 min timeout
+            timeout=job_timeout,
             capture_output=True,
             text=True,
         )
@@ -321,7 +324,7 @@ def run_job(job: CronJob, dry_run: bool = False) -> bool:
             return False
 
     except subprocess.TimeoutExpired:
-        logger.error(f"✗ Timeout: {job.name} (900s)")
+        logger.error(f"✗ Timeout: {job.name} ({job_timeout}s)")
         _ping_healthcheck(job.hc_uuid, status='fail')
         return False
     except Exception as e:

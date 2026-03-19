@@ -337,6 +337,34 @@ V9H_REGIME_GATE = {
     'sma200_lookback':    200,     # days for SMA200 calculation
 }
 
+# V9-H Sector Exception: allow PREMIUM+ breakouts in sectors with strong
+# relative strength, even when the broad regime gate would block.
+# Targets sector-rotation days (e.g., energy rallying while SPY sells off).
+SECTOR_EXCEPTION = {
+    'enabled': False,          # Off until backtested
+    'min_rs_5d': 2.0,          # Sector must outperform SPY by ≥+2% (5-day RS)
+    'min_buzz': 5,             # Minimum sector buzz score (0-10)
+    'min_quality': 'PREMIUM',  # Only PREMIUM or GOLD signals qualify
+    'max_entries_per_day': 2,  # Cap sector-exception entries per scan
+}
+
+# Economic calendar: reduce position sizing on FOMC, CPI, NFP days.
+ECONOMIC_CALENDAR = {
+    'enabled': True,
+    'fomc_sizing_mult': 0.50,   # 50% position size on FOMC days
+    'cpi_sizing_mult': 0.75,    # 75% on CPI release days
+    'nfp_sizing_mult': 0.75,    # 75% on Non-Farm Payroll days
+}
+
+# VIX-based position sizing: reduce exposure in high-volatility environments.
+VIX_CONFIG = {
+    'enabled': True,
+    'elevated': 25,                   # VIX > 25 → elevated volatility
+    'extreme': 35,                    # VIX > 35 → extreme fear
+    'sizing_mult_elevated': 0.75,     # 75% position size when elevated
+    'sizing_mult_extreme': 0.50,      # 50% position size when extreme
+}
+
 # --- General Settings ---
 MIN_DOLLAR_VOLUME = 5_000_000  # Minimum daily dollar volume
 MAX_CONCURRENT_REQUESTS = 5     # IB rate limiting

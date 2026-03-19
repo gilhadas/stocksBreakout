@@ -14,7 +14,8 @@ _NY_TZ = ZoneInfo('America/New_York')
 from pathlib import Path
 import pandas as pd
 
-from config import MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR, V9H_REGIME_GATE
+from config import (MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR,
+                    V9H_REGIME_GATE, SECTOR_EXCEPTION, VIX_CONFIG)
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
@@ -80,16 +81,57 @@ class ScannerOrchestrator:
         else:
             spy_perf, spy_vol, regime, bear_macro = 0.0, 0.0, 'INTRADAY', False
             logger.info(f"Mode: SCALPING | TF: {timeframe} | VWAP-based")
-        
+
+        # Economic calendar: detect FOMC / CPI / NFP days
+        event_ctx = {'is_event_day': False, 'event_name': '', 'sizing_mult': 1.0}
+        try:
+            from economic_calendar import get_event_context
+            event_ctx = get_event_context()
+            if event_ctx['is_event_day']:
+                logger.info(
+                    f"EVENT DAY: {event_ctx['event_name']} — "
+                    f"sizing mult {event_ctx['sizing_mult']:.0%}"
+                )
+        except Exception as e:
+            logger.debug(f"Economic calendar check failed: {e}")
+
+        # VIX-based sizing: reduce exposure in high-volatility environments
+        vix_sizing_mult = 1.0
+        if VIX_CONFIG.get('enabled') and mode != 'scalping':
+            try:
+                vix = await self.market_data.get_vix_level()
+                if vix > 0:
+                    if vix >= VIX_CONFIG['extreme']:
+                        vix_sizing_mult = VIX_CONFIG['sizing_mult_extreme']
+                        logger.info(f"VIX: {vix:.1f} (EXTREME) — sizing mult {vix_sizing_mult:.0%}")
+                    elif vix >= VIX_CONFIG['elevated']:
+                        vix_sizing_mult = VIX_CONFIG['sizing_mult_elevated']
+                        logger.info(f"VIX: {vix:.1f} (ELEVATED) — sizing mult {vix_sizing_mult:.0%}")
+                    else:
+                        logger.info(f"VIX: {vix:.1f} (normal)")
+            except Exception as e:
+                logger.debug(f"VIX fetch failed: {e}")
+
         # V5: Pre-compute sector buzz once for entire scan
         sector_hot_map = {}
+        sector_scores_map = {}   # full RS/buzz data for sector-exception gate
         try:
             buzz_data = get_sector_buzz()
             for s in buzz_data.get('sectors', []):
                 sector_hot_map[s['sector']] = s['buzz'] >= 7
+                sector_scores_map[s['sector']] = {
+                    'rs_5d': s.get('rs_5d', 0),
+                    'buzz': s.get('buzz', 0),
+                }
             if sector_hot_map:
                 hot = [k for k, v in sector_hot_map.items() if v]
                 logger.info(f"Hot sectors: {', '.join(hot) if hot else 'none'}")
+                # Log strong-RS sectors (potential rotation targets)
+                strong_rs = [f"{k} RS={v['rs_5d']:+.1f}%"
+                             for k, v in sector_scores_map.items()
+                             if v['rs_5d'] >= 2.0]
+                if strong_rs:
+                    logger.info(f"Strong RS sectors: {', '.join(strong_rs)}")
         except Exception as e:
             logger.debug(f"Sector buzz pre-compute failed: {e}")
 
@@ -106,6 +148,7 @@ class ScannerOrchestrator:
                     symbol, mode, timeframe, spy_perf, regime,
                     vol_thresh, atr_mult, lookback, detect_bounces,
                     sector_hot_map=sector_hot_map,
+                    sector_scores_map=sector_scores_map,
                     bear_macro=bear_macro
                 )
 
@@ -115,6 +158,16 @@ class ScannerOrchestrator:
         tasks = [_scan_one((i, sym)) for i, sym in enumerate(watchlist, 1)]
         results_raw = await asyncio.gather(*tasks)
         results = [r for r in results_raw if r]
+
+        # Stamp sizing context onto signals (for auto_portfolio)
+        # Combine event-day and VIX multipliers (multiplicative)
+        combined_sizing = event_ctx['sizing_mult'] * vix_sizing_mult
+        if combined_sizing < 1.0 or event_ctx['is_event_day']:
+            for sig in results:
+                if event_ctx['is_event_day']:
+                    sig['Event_Day'] = event_ctx['event_name']
+                if combined_sizing < 1.0:
+                    sig['Event_Sizing_Mult'] = round(combined_sizing, 2)
 
         print()  # Clear progress line
 
@@ -157,6 +210,7 @@ class ScannerOrchestrator:
                           lookback: Optional[int] = None,
                           detect_bounces: bool = False,
                           sector_hot_map: Optional[Dict] = None,
+                          sector_scores_map: Optional[Dict] = None,
                           bear_macro: bool = False) -> Optional[Dict]:
         """Scan a single symbol with retry logic and optional Level 2 analysis"""
         max_retries = 3
@@ -245,8 +299,29 @@ class ScannerOrchestrator:
                             signal['Quality'] = 'PREMIUM'
                             logger.info(f"   ⭐ {symbol} upgraded to PREMIUM (Level 2)")
                 
+                # Sector-rotation exception: allow PREMIUM+ breakouts in
+                # sectors with strong relative strength, even when the broad
+                # regime gate would normally block.
+                sector_exception = False
+                if (SECTOR_EXCEPTION.get('enabled') and signal
+                        and sector_scores_map
+                        and (bear_macro or regime in ('BEARISH', 'RED_MARKET'))):
+                    sym_sector = get_sector_for_ticker(symbol)
+                    sc = sector_scores_map.get(sym_sector, {})
+                    quality_ok = signal.get('Quality') in ('GOLD', 'PREMIUM')
+                    if (sc.get('rs_5d', 0) >= SECTOR_EXCEPTION['min_rs_5d']
+                            and sc.get('buzz', 0) >= SECTOR_EXCEPTION['min_buzz']
+                            and quality_ok):
+                        sector_exception = True
+                        signal['Sector_Exception'] = True
+                        logger.info(
+                            f"   SECTOR EXCEPTION: {symbol} ({sym_sector} "
+                            f"RS={sc['rs_5d']:+.1f}%, buzz={sc['buzz']}) "
+                            f"— allowed through regime gate"
+                        )
+
                 # V9-H regime gate — applied after initial breakout detection
-                if V9H_REGIME_GATE.get('enabled'):
+                if V9H_REGIME_GATE.get('enabled') and not sector_exception:
                     if bear_macro:
                         # Structural bear (SPY < SMA200): GOLD breakouts only
                         if signal and signal.get('Quality') != 'GOLD':

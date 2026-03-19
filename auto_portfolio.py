@@ -210,11 +210,12 @@ def scan_and_add(min_date: str | None = None,
             if stop >= entry_price:
                 stop = round(entry_price * 0.95, 4)
 
-            # Position sizing: pos_pct × quality_mult × ATR adjustment
+            # Position sizing: pos_pct × quality_mult × ATR adjustment × event mult
             from config import QUALITY_SIZING, ATR_SIZING
             quality_mult = QUALITY_SIZING.get(quality, 1.0)
             atr_adj = _compute_atr_adjustment(sym)
-            position_value = data['capital'] * pos_pct * quality_mult * atr_adj
+            event_mult = _safe_float(row.get('Event_Sizing_Mult')) or 1.0
+            position_value = data['capital'] * pos_pct * quality_mult * atr_adj * event_mult
 
             # Hard cap: no position > max_single_position_pct of capital
             hard_cap = data['capital'] * ATR_SIZING.get('max_single_position_pct', 0.20)

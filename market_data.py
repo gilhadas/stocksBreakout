@@ -271,6 +271,26 @@ class MarketDataHandler:
         self.spy_cache['bear_macro'] = result
         return result
 
+    async def get_vix_level(self) -> float:
+        """
+        Fetch the current VIX closing level. Cached per session.
+        Returns 0.0 on failure (caller should treat as 'unknown').
+        """
+        if 'vix' in self.spy_cache:
+            return self.spy_cache['vix']
+
+        vix = 0.0
+        try:
+            if self.yf_fallback:
+                df = self.yf_adapter.get_historical_data('^VIX', '1 day')
+                if df is not None and len(df) >= 1:
+                    vix = float(df['close'].iloc[-1])
+        except Exception:
+            pass
+
+        self.spy_cache['vix'] = vix
+        return vix
+
     def clear_cache(self):
         """Clear SPY performance cache"""
         self.spy_cache.clear()
