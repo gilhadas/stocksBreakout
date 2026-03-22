@@ -134,11 +134,11 @@ HC_BASE=https://hc-ping.com
 30 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && mv scanner_output/.monitor_alerts.txt scanner_output/.monitor_alerts_$(date +\%Y\%m\%d).txt 2>/dev/null || true
 
 # Every weekday at 9:45 AM ET - First check after market open
-45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --monitor scanner_output/lists/positions_swing_mock.csv,scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1
+45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --monitor-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1
 # Every 15 minutes from 10:00 AM to 3:45 PM ET - Continuous monitoring
-*/15 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --monitor scanner_output/lists/positions_swing_mock.csv,scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1
+*/15 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --monitor-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1
 # Every weekday at 4:00 PM ET - Final check + upload end-of-day portfolio state
-0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --monitor scanner_output/lists/positions_swing_mock.csv,scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload.log 2>&1
+0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --monitor-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload.log 2>&1
 
 # ============================================
 # PORTFOLIO HEALTH CHECK (advisory — never auto-closes)

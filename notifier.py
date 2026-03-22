@@ -118,7 +118,10 @@ class Notifier:
         
         if self.webhook_enabled:
             results.append(('Webhook', self.send_webhook(signals)))
-        
+
+        # Expo push (always attempt if tokens exist)
+        results.append(('Expo Push', self.send_expo_push(subject, message, signals)))
+
         # Log results
         for channel, success in results:
             if success:
@@ -423,7 +426,42 @@ class Notifier:
         except Exception as e:
             logger.error(f"Webhook notification failed: {e}")
             return False
-    
+
+    def send_expo_push(self, subject: str, message: str,
+                       signals: Optional[List[Dict]] = None) -> bool:
+        """Send push notification via Expo Push API to all registered devices."""
+        try:
+            from api.push_registry import get_all_tokens
+            tokens = get_all_tokens()
+            if not tokens:
+                return False
+
+            # Build concise body from signals
+            body = message
+            if signals and len(signals) <= 3:
+                lines = [f"{s.get('Symbol','')} @ ${s.get('Price','')}" for s in signals]
+                body = ' | '.join(lines)
+
+            payload = [
+                {"to": t, "title": subject, "body": body, "sound": "default"}
+                for t in tokens
+            ]
+            resp = requests.post(
+                'https://exp.host/--/api/v2/push/send',
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            ok = resp.status_code == 200
+            if ok:
+                logger.info(f"✓ Expo push sent to {len(tokens)} device(s)")
+            else:
+                logger.warning(f"Expo push returned {resp.status_code}")
+            return ok
+        except Exception as e:
+            logger.error(f"Expo push failed: {e}")
+            return False
+
     def send_exit_notification(self, exit_results: List[Dict],
                                csv_path: Optional[str] = None):
         """Send notification for exit decisions with optional CSV attachment"""

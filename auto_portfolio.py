@@ -50,9 +50,13 @@ def load() -> dict:
 
 
 def _save(data: dict):
+    import fcntl
     from utils import save_json
     data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-    save_json(data, _PORTFOLIO_PATH)
+    with open(_PORTFOLIO_PATH, 'a') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        save_json(data, _PORTFOLIO_PATH)
+        fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
