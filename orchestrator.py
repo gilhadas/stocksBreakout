@@ -20,7 +20,7 @@ from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
 from level2_analyzer import Level2Analyzer
-from utils import classify_market_regime
+from utils import classify_market_regime, get_smoothed_regime, check_regime_cooldown
 from sentiment import get_sector_buzz, get_sector_for_ticker
 
 logger = logging.getLogger(__name__)
@@ -66,20 +66,39 @@ class ScannerOrchestrator:
             spy_perf, spy_vol = await self.market_data.get_spy_performance(
                 timeframe, lb
             )
-            regime = classify_market_regime(spy_perf, spy_vol)
+            raw_regime = classify_market_regime(spy_perf, spy_vol)
+            regime, regime_debug = get_smoothed_regime(raw_regime)
 
             # V9-H: compute bear_macro once per scan (SPY < 200-day SMA)
             bear_macro = False
             if V9H_REGIME_GATE.get('enabled'):
                 bear_macro = await self.market_data.get_spy_bear_macro()
 
+            # Log regime with smoothing info
+            regime_str = f"Regime: {regime}"
+            if regime != raw_regime:
+                regime_str = (
+                    f"Regime: {regime} (raw: {raw_regime}, "
+                    f"pending {regime_debug['count']}/{regime_debug['threshold']})"
+                )
+            # Check post-regime-change cooldown
+            cooldown_hours = V9H_REGIME_GATE.get('cooldown_hours', 12)
+            cooldown_active, cooldown_remaining = check_regime_cooldown(cooldown_hours)
+
+            log_suffix = ""
+            if bear_macro:
+                log_suffix += " | BEAR_MACRO"
+            if cooldown_active:
+                log_suffix += f" | COOLDOWN: {cooldown_remaining:.1f}h left"
+
             logger.info(
                 f"Mode: {mode.upper()} | TF: {timeframe} | "
-                f"SPY: {spy_perf:.2%} | Vol: {spy_vol:.2f}% | Regime: {regime}"
-                + (" | BEAR_MACRO" if bear_macro else "")
+                f"SPY: {spy_perf:.2%} | Vol: {spy_vol:.2f}% | {regime_str}"
+                + log_suffix
             )
         else:
             spy_perf, spy_vol, regime, bear_macro = 0.0, 0.0, 'INTRADAY', False
+            cooldown_active = False
             logger.info(f"Mode: SCALPING | TF: {timeframe} | VWAP-based")
 
         # Economic calendar: detect FOMC / CPI / NFP days
@@ -149,7 +168,8 @@ class ScannerOrchestrator:
                     vol_thresh, atr_mult, lookback, detect_bounces,
                     sector_hot_map=sector_hot_map,
                     sector_scores_map=sector_scores_map,
-                    bear_macro=bear_macro
+                    bear_macro=bear_macro,
+                    cooldown_active=cooldown_active
                 )
 
                 await asyncio.sleep(SCAN_DELAY)
@@ -211,7 +231,8 @@ class ScannerOrchestrator:
                           detect_bounces: bool = False,
                           sector_hot_map: Optional[Dict] = None,
                           sector_scores_map: Optional[Dict] = None,
-                          bear_macro: bool = False) -> Optional[Dict]:
+                          bear_macro: bool = False,
+                          cooldown_active: bool = False) -> Optional[Dict]:
         """Scan a single symbol with retry logic and optional Level 2 analysis"""
         max_retries = 3
         
@@ -319,6 +340,18 @@ class ScannerOrchestrator:
                             f"RS={sc['rs_5d']:+.1f}%, buzz={sc['buzz']}) "
                             f"— allowed through regime gate"
                         )
+
+                # Post-regime-change cooldown — suppress non-GOLD signals
+                if cooldown_active and signal and not sector_exception:
+                    exempt_qualities = V9H_REGIME_GATE.get(
+                        'cooldown_exempt_quality', ['GOLD']
+                    )
+                    if signal.get('Quality') not in exempt_qualities:
+                        logger.info(
+                            f"   COOLDOWN: {symbol} {signal.get('Quality', '')} "
+                            f"signal suppressed (regime changed recently)"
+                        )
+                        signal = None
 
                 # V9-H regime gate — applied after initial breakout detection
                 if V9H_REGIME_GATE.get('enabled') and not sector_exception:

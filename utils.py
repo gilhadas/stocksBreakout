@@ -579,6 +579,161 @@ def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
     return 'NORMAL'
 
 
+def get_smoothed_regime(raw_regime: str) -> tuple:
+    """
+    Apply HMM-like temporal smoothing to regime classification.
+
+    Requires N consecutive scans confirming a new regime before switching.
+    RED_MARKET transitions are always immediate (safety-first).
+
+    State is persisted to ``scanner_output/.regime_state.json`` between
+    invocations so that the persistence counter and cooldown timestamp
+    survive across separate CLI runs and cron jobs.
+
+    Args:
+        raw_regime: Instantaneous regime from classify_market_regime()
+            (RED_MARKET | BEARISH | CHOPPY | EXPANSION | NORMAL).
+
+    Returns:
+        (effective_regime, debug_info) where debug_info contains:
+            raw            – the raw_regime passed in
+            effective      – the smoothed regime actually used
+            pending        – regime awaiting confirmation (or None)
+            count          – consecutive scans confirming pending regime
+            threshold      – scans required to confirm (from config)
+            regime_changed – True if effective regime changed this scan
+            last_regime_change – ISO timestamp of most recent confirmed change
+    """
+    import json
+    from pathlib import Path
+    from datetime import datetime
+    from config import V9H_REGIME_GATE, OUTPUT_DIR
+
+    threshold = V9H_REGIME_GATE.get('persistence_threshold', 2)
+    state_file = Path(OUTPUT_DIR) / '.regime_state.json'
+
+    # Load persisted state
+    state = {
+        'current_regime': 'NORMAL',
+        'pending_regime': None,
+        'pending_count': 0,
+        'history': [],
+    }
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupt file — reset to defaults
+
+    current = state['current_regime']
+    history = state.get('history', [])
+
+    # Disabled or threshold=0: pass through raw regime
+    if threshold <= 0:
+        effective = raw_regime
+    # RED_MARKET: immediate transition (protective — don't delay)
+    elif raw_regime == 'RED_MARKET':
+        effective = 'RED_MARKET'
+    # Raw matches current: no change, reset any pending
+    elif raw_regime == current:
+        state['pending_regime'] = None
+        state['pending_count'] = 0
+        effective = current
+    # Raw matches pending: increment counter toward confirmation
+    elif raw_regime == state.get('pending_regime'):
+        state['pending_count'] += 1
+        if state['pending_count'] >= threshold:
+            effective = raw_regime
+            state['pending_regime'] = None
+            state['pending_count'] = 0
+        else:
+            effective = current
+    # New pending regime: start counting
+    else:
+        state['pending_regime'] = raw_regime
+        state['pending_count'] = 1
+        effective = current
+
+    # Detect regime change
+    regime_changed = (effective != current)
+    if regime_changed:
+        state['last_regime_change'] = datetime.now().isoformat()
+        state['previous_regime'] = current
+
+    # Update state
+    state['current_regime'] = effective
+    state['last_updated'] = datetime.now().isoformat()
+    history.append(raw_regime)
+    state['history'] = history[-10:]  # keep last 10 for debugging
+
+    # Persist
+    try:
+        state_file.write_text(json.dumps(state, indent=2))
+    except OSError:
+        pass  # non-critical — next scan will reset
+
+    debug_info = {
+        'raw': raw_regime,
+        'effective': effective,
+        'pending': state.get('pending_regime'),
+        'count': state.get('pending_count', 0),
+        'threshold': threshold,
+        'regime_changed': regime_changed,
+        'last_regime_change': state.get('last_regime_change'),
+    }
+    return effective, debug_info
+
+
+def check_regime_cooldown(cooldown_hours: float) -> tuple:
+    """
+    Check if a post-regime-change cooldown is currently active.
+
+    After a confirmed regime transition (via get_smoothed_regime), the
+    cooldown window suppresses non-exempt signals to prevent whipsaw
+    re-entries during regime instability.  This implements the "signal
+    hysteresis" concept used in institutional HMM systems.
+
+    Reads ``last_regime_change`` from ``.regime_state.json`` and compares
+    against the cooldown window.
+
+    Args:
+        cooldown_hours: Duration of cooldown window in hours.
+            0 or negative disables the cooldown entirely.
+
+    Returns:
+        (is_active, hours_remaining) — is_active is True when inside
+        the cooldown window; hours_remaining is the time left (>0).
+    """
+    import json
+    from pathlib import Path
+    from datetime import datetime
+    from config import OUTPUT_DIR
+
+    if cooldown_hours <= 0:
+        return False, 0.0
+
+    state_file = Path(OUTPUT_DIR) / '.regime_state.json'
+    if not state_file.exists():
+        return False, 0.0
+
+    try:
+        state = json.loads(state_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False, 0.0
+
+    last_change = state.get('last_regime_change')
+    if not last_change:
+        return False, 0.0
+
+    last_change_dt = datetime.fromisoformat(last_change)
+    elapsed_hours = (datetime.now() - last_change_dt).total_seconds() / 3600
+    remaining = cooldown_hours - elapsed_hours
+
+    if remaining > 0:
+        return True, remaining
+    return False, 0.0
+
+
 def setup_logging(log_file: str = None, debug: bool = False):
     """
     Setup logging configuration with output to nested folder

@@ -335,6 +335,13 @@ V9H_REGIME_GATE = {
     'expansion_thresh':   0.020,   # SPY > +2.0% over lookback → EXPANSION
     # bear_macro: SPY closing below its 200-day SMA → structural bear
     'sma200_lookback':    200,     # days for SMA200 calculation
+    # Regime persistence: require N consecutive scans confirming a new regime before switching.
+    # Smooths out noise (HMM-like temporal memory). RED_MARKET transitions are always immediate.
+    'persistence_threshold': 2,    # scans needed to confirm regime change (0 = disabled)
+    # Post-regime-change cooldown: suppress non-GOLD signals for N hours after a confirmed
+    # regime transition. Prevents whipsaw re-entries during regime instability (HMM hysteresis).
+    'cooldown_hours':        12,   # hours to suppress signals after regime change (0 = disabled)
+    'cooldown_exempt_quality': ['GOLD'],  # signal qualities exempt from cooldown
 }
 
 # V9-H Sector Exception: allow PREMIUM+ breakouts in sectors with strong
