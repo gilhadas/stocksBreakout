@@ -41,6 +41,7 @@ import requests
 import yfinance as yf
 
 from config import NOTIFICATIONS, OUTPUT_DIR
+from notifier import Notifier
 import scalp_portfolio as sp
 from zoneinfo import ZoneInfo
 
@@ -344,6 +345,36 @@ def _send_telegram_alerts(alerts: list[dict]) -> None:
                 logger.warning(f"Telegram returned {r.status_code} for {symbol}: {r.text[:200]}")
         except Exception as e:
             logger.error(f"Telegram post failed for {symbol}: {e}")
+
+
+# ── Email notification ────────────────────────────────────────────────────────
+
+def _send_email_alerts(alerts: list[dict]) -> None:
+    """Send BREAKOUT alerts via email."""
+    notifier = Notifier()
+    if not notifier.email_enabled:
+        return
+
+    subject = f"BREAKOUT Alert: {', '.join(a['symbol'] for a in alerts)}"
+
+    lines = []
+    for alert in alerts:
+        symbol = alert['symbol']
+        cur    = alert['current_price']
+        prev_h = alert.get('prev_high')
+        vol    = alert.get('vol_ratio', 0)
+        pct    = alert.get('pct_from_scan', 0)
+
+        lines.append(f"• {symbol} @ ${cur:.2f}  ({pct:+.1f}% from scan)")
+        if prev_h:
+            lines.append(f"  Broke above prev high: ${prev_h:.2f}")
+        if vol:
+            lines.append(f"  Vol: {vol:.1f}x")
+        lines.append('')
+
+    body = f"BREAKOUT alert — {len(alerts)} symbol(s)\n\n" + '\n'.join(lines)
+    notifier.send_email(subject, body)
+    logger.info(f"Email alert sent: {subject}")
 
 
 # ── Scanner runner ────────────────────────────────────────────────────────────
@@ -850,11 +881,12 @@ def run_once(decisions_date: Optional[str] = None,
         f"{', '.join(a['event'] + ':' + a['symbol'] for a in alerts) or 'none'}"
     )
 
-    # ── Send Discord + Telegram (only actionable BREAKOUT alerts) ──────────
+    # ── Send Discord + Telegram + Email (only actionable BREAKOUT alerts) ──
     notify_alerts = [a for a in alerts if a['event'] == 'BREAKOUT']
     if notify_alerts:
         _send_discord_alerts(notify_alerts)
         _send_telegram_alerts(notify_alerts)
+        _send_email_alerts(notify_alerts)
 
     # ── Portfolio health check (advisory, respects cooldown) ──────────────
     try:

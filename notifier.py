@@ -36,10 +36,13 @@ class Notifier:
 
         # Warn early if email is enabled but password is missing
         if self.email_enabled and not NOTIFICATIONS['email'].get('sender_password'):
-            logger.warning(
-                "⚠️  Email notifications enabled but GMAIL_APP_PASSWORD is not set. "
-                "Emails will fail. Set it in your .env file."
+            msg = (
+                "EMAIL DISABLED: GMAIL_APP_PASSWORD is not set. "
+                "In Docker, pass it via --env-file .env or -e GMAIL_APP_PASSWORD=... "
+                "The .env file is excluded from the Docker image by .dockerignore."
             )
+            logger.warning(msg)
+            print(f"[notifier] WARNING: {msg}", flush=True)
             self.email_enabled = False
 
         # Persistent notification cache — survives across process runs within a day

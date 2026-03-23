@@ -75,6 +75,10 @@ EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]
 
 # Default: run all scheduled cron jobs.
+# IMPORTANT: .env is excluded from the image (see .dockerignore). Pass credentials at runtime:
+#   docker run --env-file .env scanner supercronic /app/docker/crontab
+# Required env vars for email notifications: GMAIL_APP_PASSWORD, NOTIFY_RECIPIENTS
+# Required for Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 # Override to run the scanner directly:
 #   docker run --env-file .env scanner python3 breakout_scanner.py input/ALL.txt --mode swing --mock
 CMD ["supercronic", "/app/docker/crontab"]

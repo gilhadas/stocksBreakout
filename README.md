@@ -1310,6 +1310,8 @@ When `cron_agent.py --daemon` detects multiple modes at the same time, it automa
 ```bash
 # Automatic batch execution
 python cron_agent.py --daemon
+machine no sleep:
+nohup caffeinate -i python3 cron_agent.py --daemon > scanner_output/logs/cron_daemon.log 2>&1 &
 ```
 
 ### Cache structure
