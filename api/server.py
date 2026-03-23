@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Ensure project root is importable
@@ -93,3 +94,9 @@ class PushTokenRequest(BaseModel):
 def register_push_token(req: PushTokenRequest, _token: str = Depends(_require_auth)):
     is_new = register_token(req.token)
     return {"ok": True, "new": is_new}
+
+
+# ── Static Web App (must be last — mounts after all API routes) ─────────────
+_dist = Path(__file__).resolve().parent.parent / 'mobile' / 'dist'
+if _dist.exists():
+    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="web")

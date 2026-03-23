@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import { login, getToken } from '../lib/api';
+// API URL is hardcoded in lib/api.ts — update API_BASE_URL there when tunnel changes
 
 export default function LoginScreen() {
-  const [apiUrl, setApiUrl] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -21,10 +21,10 @@ export default function LoginScreen() {
     setError('');
     setLoading(true);
     try {
-      await login(password, apiUrl || undefined);
+      await login(password);
       router.replace('/(tabs)');
     } catch {
-      setError('Login failed — check password and server URL');
+      setError('Login failed — wrong password');
       setLoading(false);
     }
   };
@@ -41,16 +41,6 @@ export default function LoginScreen() {
     <View style={styles.container}>
       <Text style={styles.title}>StocksBreakout</Text>
       <Text style={styles.subtitle}>Portfolio Tracker</Text>
-
-      <TextInput
-        style={styles.input}
-        placeholder="API URL (e.g. https://your-tunnel.trycloudflare.com)"
-        placeholderTextColor="#555"
-        value={apiUrl}
-        onChangeText={setApiUrl}
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
 
       <TextInput
         style={styles.input}

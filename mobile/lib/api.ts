@@ -8,13 +8,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const TOKEN_KEY = 'jwt_token';
 const API_URL_KEY = 'api_url';
 
-// Default for local dev — user sets real URL on login
-let _baseUrl = 'http://localhost:8000';
+// Permanent API URL via Cloudflare named tunnel — never changes
+const API_BASE_URL = 'https://api.gilhadas-stocks.com';
+
+let _baseUrl = API_BASE_URL;
 
 export async function getBaseUrl(): Promise<string> {
-  const saved = await AsyncStorage.getItem(API_URL_KEY);
-  if (saved) _baseUrl = saved;
-  return _baseUrl;
+  return API_BASE_URL;
 }
 
 export async function setBaseUrl(url: string) {

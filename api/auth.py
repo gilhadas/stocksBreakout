@@ -20,6 +20,7 @@ _EXPIRY_DAYS = 30
 
 def create_token(password: str) -> str | None:
     """Verify password against APP_PASSWORD and return a signed JWT, or None."""
+    load_dotenv(_root / '.env', override=True)
     expected = os.getenv('APP_PASSWORD', '')
     if not expected or password != expected:
         return None

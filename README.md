@@ -1910,6 +1910,142 @@ Changes are automatically applied to `config.py` with backup saved as `config.py
 
 ---
 
+## Mobile App & API Server
+
+The portfolio web app is served via FastAPI + Cloudflare Tunnel, accessible from any device at a permanent URL. No Expo Go or App Store needed.
+
+### Architecture
+
+```
+Mac (always on)
+├── API + Web server (FastAPI, port 8000)  ← launchd auto-start
+│   ├── /auth/login, /portfolio, ...       ← API endpoints
+│   └── /                                 ← Expo web app (static build)
+├── Cloudflare Named Tunnel               ← launchd auto-start
+│   └── api.gilhadas-stocks.com → :8000
+└── Scanner + cron_agent                  ← existing setup
+
+Any device (iPhone, browser)
+└── https://api.gilhadas-stocks.com
+```
+
+### Access
+
+Open **`https://api.gilhadas-stocks.com`** in any browser — no app install needed.
+
+- Password: `APP_PASSWORD` in `.env` (default: `breakout2026`)
+- URL never changes (named Cloudflare tunnel with permanent domain)
+
+### One-Time Setup
+
+#### 1. Install Cloudflare Tunnel
+
+```bash
+brew install cloudflare/cloudflare/cloudflared
+```
+
+#### 2. Authenticate with Cloudflare
+
+```bash
+mv ~/.cloudflared/cert.pem ~/.cloudflared/cert.pem.bak 2>/dev/null
+cloudflared tunnel login
+# Browser opens → select gilhadas-stocks.com → Authorize
+```
+
+#### 3. Create the named tunnel
+
+```bash
+cloudflared tunnel create stocksbreakout
+# Note the tunnel UUID from output
+```
+
+#### 4. Configure the tunnel (`~/.cloudflared/config.yml`)
+
+```yaml
+tunnel: stocksbreakout
+credentials-file: /Users/gilhadas/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: api.gilhadas-stocks.com
+    service: http://localhost:8000
+  - service: http_status:404
+```
+
+#### 5. Add DNS record in Cloudflare dashboard
+
+- Go to **dash.cloudflare.com** → **gilhadas-stocks.com** → **DNS**
+- Add record: Type `CNAME`, Name `api`, Target `<TUNNEL-UUID>.cfargotunnel.com`, Proxy ON
+
+#### 6. Load both launchd services
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.stocksbreakout.api.plist
+launchctl load ~/Library/LaunchAgents/com.stocksbreakout.tunnel.plist
+```
+
+#### 7. Build the web app
+
+```bash
+cd ~/Documents/GitHub/stocksBreakout/mobile
+npm install
+npx expo export --platform web
+```
+
+The `mobile/dist/` folder is served automatically by the API server.
+
+### Day-to-Day Usage
+
+Both services start automatically on Mac login. Nothing to do — just open `https://api.gilhadas-stocks.com` from any device.
+
+### After Code Changes
+
+When you update the mobile app, rebuild and restart:
+
+```bash
+cd ~/Documents/GitHub/stocksBreakout/mobile
+npx expo export --platform web
+kill $(lsof -ti:8000)   # launchd auto-restarts the server
+```
+
+### Management Commands
+
+```bash
+# Check status of both services
+launchctl list | grep stocksbreakout
+
+# View API server logs
+tail -f ~/Documents/GitHub/stocksBreakout/scanner_output/api_server.log
+
+# View tunnel logs
+tail -f ~/Documents/GitHub/stocksBreakout/scanner_output/tunnel.log
+
+# Restart API server
+kill $(lsof -ti:8000)   # launchd restarts it automatically
+
+# Restart tunnel
+launchctl unload ~/Library/LaunchAgents/com.stocksbreakout.tunnel.plist
+launchctl load ~/Library/LaunchAgents/com.stocksbreakout.tunnel.plist
+```
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/login` | Password login, returns JWT token |
+| `GET` | `/portfolio` | Open positions, closed trades, summary stats |
+| `POST` | `/portfolio/refresh` | Refresh prices, auto-close stopped positions |
+| `POST` | `/push/register` | Register Expo push notification token |
+| `GET` | `/` | Web app (Expo static build from `mobile/dist/`) |
+
+### Environment Variables (`.env`)
+
+```bash
+APP_PASSWORD=breakout2026        # Web app login password
+API_SECRET_KEY=<random string>   # JWT signing key
+```
+
+---
+
 ## Disclaimer
 
 This tool is for educational purposes. Trading involves substantial risk of loss. Always test on paper trading before using live funds. Past performance does not guarantee future results. Not financial advice.
