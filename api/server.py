@@ -84,6 +84,74 @@ def refresh_portfolio(_token: str = Depends(_require_auth)):
     }
 
 
+# ── Manual Portfolio ────────────────────────────────────────────────────────
+
+@app.get("/manual-portfolio")
+def get_manual_portfolio(_token: str = Depends(_require_auth)):
+    import yfinance as yf
+    from utils import load_json
+
+    data = load_json('scanner_output/portfolio/portfolio.json')
+    if not data:
+        return {"positions": [], "closed": [], "cash": 0, "last_updated": ""}
+
+    raw = data.get("positions", {})
+    # Normalize: positions is a dict keyed by symbol
+    if isinstance(raw, dict):
+        pos_list = [{"symbol": k, **v} for k, v in raw.items()]
+    else:
+        pos_list = raw
+
+    # Fetch current prices in one batch
+    symbols = [p["symbol"] for p in pos_list if p.get("symbol")]
+    prices = {}
+    if symbols:
+        try:
+            tickers = yf.download(symbols, period="1d", progress=False, auto_adjust=True)
+            if not tickers.empty:
+                closes = tickers["Close"].iloc[-1]
+                for sym in symbols:
+                    prices[sym] = float(closes[sym]) if sym in closes else None
+        except Exception:
+            pass
+
+    def _status(pos, price):
+        stop   = pos.get("stop", 0)
+        target = pos.get("target", 0)
+        if not price:
+            return "UNKNOWN"
+        if price <= stop:
+            return "SELL"
+        if target and price >= target:
+            return "TARGET"
+        if stop and price <= stop * 1.05:
+            return "CAUTION"
+        return "HOLD"
+
+    positions_out = []
+    for pos in pos_list:
+        sym   = pos.get("symbol", "")
+        price = prices.get(sym) or pos.get("current_price")
+        entry = pos.get("entry_price", 0)
+        pnl_pct = ((price - entry) / entry * 100) if price and entry else pos.get("unrealized_pnl_pct")
+        positions_out.append({
+            **pos,
+            "current_price": price,
+            "pnl_pct":       round(pnl_pct, 2) if pnl_pct is not None else None,
+            "status":        _status(pos, price),
+        })
+
+    order = {"SELL": 0, "CAUTION": 1, "UNKNOWN": 2, "HOLD": 3, "TARGET": 4}
+    positions_out.sort(key=lambda p: order.get(p["status"], 2))
+
+    return {
+        "positions":    positions_out,
+        "closed":       data.get("trade_history", []),
+        "cash":         data.get("cash", 0),
+        "last_updated": data.get("last_updated", ""),
+    }
+
+
 # ── Push Notifications ──────────────────────────────────────────────────────
 
 class PushTokenRequest(BaseModel):

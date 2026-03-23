@@ -38,6 +38,19 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="manual"
+        options={{
+          title: 'Manual',
+          tabBarIcon: ({ color }) => (
+            <SymbolView
+              name={{ ios: 'list.bullet.clipboard.fill', android: 'assignment', web: 'assignment' }}
+              tintColor={color}
+              size={24}
+            />
+          ),
+        }}
+      />
     </Tabs>
   );
 }

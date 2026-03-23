@@ -75,6 +75,10 @@ export function refreshPortfolio() {
   return authFetch('/portfolio/refresh', { method: 'POST' });
 }
 
+export function fetchManualPortfolio() {
+  return authFetch('/manual-portfolio');
+}
+
 export function registerPushToken(token: string) {
   return authFetch('/push/register', {
     method: 'POST',
