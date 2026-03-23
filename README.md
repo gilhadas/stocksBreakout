@@ -2005,6 +2005,9 @@ When you update the mobile app, rebuild and restart:
 cd ~/Documents/GitHub/stocksBreakout/mobile
 npx expo export --platform web
 kill $(lsof -ti:8000)   # launchd auto-restarts the server
+or in one command: 
+npx expo export --platform web && kill $(lsof -ti:8000)
+
 ```
 
 ### Management Commands

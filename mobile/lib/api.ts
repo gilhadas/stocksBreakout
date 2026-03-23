@@ -83,6 +83,29 @@ export function computeStops() {
   return authFetch('/manual-portfolio/compute-stops', { method: 'POST' });
 }
 
+export function sellPosition(symbol: string, exit_price: number) {
+  return authFetch('/manual-portfolio/sell', {
+    method: 'POST',
+    body: JSON.stringify({ symbol, exit_price }),
+  });
+}
+
+export function buyPosition(data: {
+  symbol: string;
+  shares: number;
+  entry_price: number;
+  stop?: number;
+  target?: number;
+  sector?: string;
+  broker?: string;
+  mode?: string;
+}) {
+  return authFetch('/manual-portfolio/buy', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
 export function registerPushToken(token: string) {
   return authFetch('/push/register', {
     method: 'POST',

@@ -33,6 +33,16 @@ export default function RootLayout() {
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="login" />
         <Stack.Screen name="(tabs)" />
+        <Stack.Screen
+          name="buy"
+          options={{
+            headerShown: true,
+            title: 'Add Position',
+            headerStyle: { backgroundColor: '#0f0f23' },
+            headerTintColor: '#fff',
+            presentation: 'modal',
+          }}
+        />
       </Stack>
     </ThemeProvider>
   );

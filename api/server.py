@@ -111,6 +111,34 @@ def _load_portfolio_json() -> dict:
         return {}
 
 
+def _save_portfolio_json(data: dict):
+    """Save portfolio.json to S3 and local fallback."""
+    import json, boto3, toml
+    from datetime import datetime, timezone, timedelta
+    ny_tz = timezone(timedelta(hours=-4))
+    data["last_updated"] = datetime.now(ny_tz).isoformat()
+    body = json.dumps(data, indent=2)
+    local = Path(__file__).resolve().parent.parent / 'scanner_output' / 'portfolio' / 'portfolio.json'
+    local.write_text(body)
+    secrets_path = Path(__file__).resolve().parent.parent / '.streamlit' / 'secrets.toml'
+    try:
+        secrets = toml.loads(secrets_path.read_text())
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id     = secrets.get('AWS_ACCESS_KEY_ID') or secrets.get('key'),
+            aws_secret_access_key = secrets.get('AWS_SECRET_ACCESS_KEY') or secrets.get('secret'),
+            region_name           = secrets.get('AWS_DEFAULT_REGION') or secrets.get('region', 'eu-central-1'),
+        )
+        s3.put_object(
+            Bucket='stocks-breakout-scanner-s3-bucket',
+            Key='scanner_output/portfolio/portfolio.json',
+            Body=body.encode(),
+            ContentType='application/json',
+        )
+    except Exception:
+        pass
+
+
 @app.get("/manual-portfolio")
 def get_manual_portfolio(_token: str = Depends(_require_auth)):
     import yfinance as yf
@@ -262,6 +290,101 @@ def compute_stops(_token: str = Depends(_require_auth)):
         "updated": len(updated),
         "stops": {s: p.get("stop") for s, p in updated.items()},
     }
+
+
+# ── Manual Portfolio: Sell ──────────────────────────────────────────────────
+
+class SellRequest(BaseModel):
+    symbol: str
+    exit_price: float
+
+
+@app.post("/manual-portfolio/sell")
+def sell_position(req: SellRequest, _token: str = Depends(_require_auth)):
+    from datetime import datetime, timezone, timedelta
+    ny_tz = timezone(timedelta(hours=-4))
+
+    data = _load_portfolio_json()
+    positions = data.get("positions", {})
+    if isinstance(positions, list):
+        positions = {p["symbol"]: p for p in positions}
+
+    if req.symbol not in positions:
+        raise HTTPException(status_code=404, detail=f"{req.symbol} not found")
+
+    pos = positions.pop(req.symbol)
+    entry_price = pos.get("entry_price", 0)
+    shares = pos.get("shares", 0)
+    pnl = round((req.exit_price - entry_price) * shares, 2)
+
+    entry_date_str = pos.get("entry_date", "")
+    try:
+        entry_date = datetime.fromisoformat(entry_date_str).date()
+        hold_days = (datetime.now(ny_tz).date() - entry_date).days
+    except Exception:
+        hold_days = 0
+
+    trade = {
+        **pos,
+        "exit_price": req.exit_price,
+        "pnl": pnl,
+        "date_closed": datetime.now(ny_tz).strftime("%Y-%m-%d"),
+        "hold_days": hold_days,
+        "close_reason": "manual",
+    }
+    trade_history = data.get("trade_history", [])
+    trade_history.insert(0, trade)
+
+    data["positions"] = positions
+    data["trade_history"] = trade_history
+    data["cash"] = round(data.get("cash", 0) + req.exit_price * shares, 2)
+
+    _save_portfolio_json(data)
+    return {"ok": True, "pnl": pnl, "cash": data["cash"]}
+
+
+# ── Manual Portfolio: Buy ────────────────────────────────────────────────────
+
+class BuyRequest(BaseModel):
+    symbol: str
+    shares: float
+    entry_price: float
+    stop: float = 0.0
+    target: float = 0.0
+    sector: str = ""
+    broker: str = ""
+    mode: str = "swing"
+
+
+@app.post("/manual-portfolio/buy")
+def buy_position(req: BuyRequest, _token: str = Depends(_require_auth)):
+    from datetime import datetime, timezone, timedelta
+    ny_tz = timezone(timedelta(hours=-4))
+
+    data = _load_portfolio_json()
+    positions = data.get("positions", {})
+    if isinstance(positions, list):
+        positions = {p["symbol"]: p for p in positions}
+
+    cost_basis = round(req.entry_price * req.shares, 2)
+    positions[req.symbol] = {
+        "symbol":      req.symbol,
+        "shares":      req.shares,
+        "entry_price": req.entry_price,
+        "entry_date":  datetime.now(ny_tz).strftime("%Y-%m-%d"),
+        "stop":        req.stop,
+        "target":      req.target,
+        "sector":      req.sector,
+        "broker":      req.broker,
+        "mode":        req.mode,
+        "cost_basis":  cost_basis,
+        "quality":     "",
+    }
+    data["positions"] = positions
+    data["cash"] = round(data.get("cash", 0) - cost_basis, 2)
+
+    _save_portfolio_json(data)
+    return {"ok": True, "symbol": req.symbol, "cost_basis": cost_basis, "cash": data["cash"]}
 
 
 # ── Push Notifications ──────────────────────────────────────────────────────
