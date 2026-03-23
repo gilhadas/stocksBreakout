@@ -6,6 +6,7 @@ Coordinates market data, detection, and exit evaluation
 import asyncio
 import logging
 import os
+import sys
 from typing import List, Dict, Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -161,7 +162,8 @@ class ScannerOrchestrator:
         async def _scan_one(idx_sym):
             idx, symbol = idx_sym
             async with semaphore:
-                print(f"[{idx}/{len(watchlist)}] {symbol:6}", end="\r")
+                if sys.stdout.isatty():
+                    print(f"[{idx}/{len(watchlist)}] {symbol:6}", end="\r", flush=True)
 
                 result = await self._scan_symbol(
                     symbol, mode, timeframe, spy_perf, regime,

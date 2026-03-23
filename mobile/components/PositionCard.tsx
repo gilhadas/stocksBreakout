@@ -12,13 +12,22 @@ interface Position {
   quality?: string;
   sector?: string;
   date_added?: string;
+  mode?: string;
 }
+
+const MODE_COLORS: Record<string, string> = {
+  longterm:  '#818cf8',  // indigo
+  swing:     '#34d399',  // emerald
+  daytrade:  '#fb923c',  // orange
+  scalping:  '#f472b6',  // pink
+};
 
 export default function PositionCard({ pos }: { pos: Position }) {
   const current = pos.current_price || pos.entry_price;
   const pnl = (current - pos.entry_price) * pos.shares;
   const pnlPct = ((current / pos.entry_price) - 1) * 100;
   const pnlColor = pnl >= 0 ? '#22c55e' : '#ef4444';
+  const modeColor = pos.mode ? (MODE_COLORS[pos.mode] ?? '#888') : null;
 
   return (
     <View style={styles.card}>
@@ -35,6 +44,11 @@ export default function PositionCard({ pos }: { pos: Position }) {
         <Detail label="Stop" value={`$${pos.stop.toFixed(2)}`} />
       </View>
       <View style={styles.footer}>
+        {pos.mode && modeColor && (
+          <Text style={[styles.modeBadge, { color: modeColor, borderColor: modeColor }]}>
+            {pos.mode.toUpperCase()}
+          </Text>
+        )}
         {pos.quality && <Text style={styles.badge}>{pos.quality}</Text>}
         {pos.sector && <Text style={styles.sector}>{pos.sector}</Text>}
       </View>
@@ -60,6 +74,7 @@ const styles = StyleSheet.create({
   detailLabel: { color: '#666', fontSize: 10 },
   detailValue: { color: '#ccc', fontSize: 13 },
   footer: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  modeBadge: { fontSize: 10, fontWeight: '700', borderWidth: 1, borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
   badge: { color: '#fbbf24', fontSize: 11, fontWeight: '600' },
   sector: { color: '#666', fontSize: 11 },
 });

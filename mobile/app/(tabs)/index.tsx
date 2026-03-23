@@ -14,14 +14,26 @@ function StatBox({ label, value, color }: { label: string; value: string; color?
   );
 }
 
+const MODE_COLORS: Record<string, string> = {
+  longterm: '#818cf8', swing: '#34d399', daytrade: '#fb923c', scalping: '#f472b6',
+};
+
 function TradeRow({ trade }: { trade: any }) {
   const pnl = trade.pnl || 0;
   const pnlColor = pnl >= 0 ? '#22c55e' : '#ef4444';
   const reason = trade.close_reason || trade.reason || '';
+  const modeColor = trade.mode ? (MODE_COLORS[trade.mode] ?? '#888') : null;
   return (
     <View style={styles.tradeCard}>
       <View style={styles.tradeHeader}>
-        <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={styles.tradeSymbol}>{trade.symbol}</Text>
+          {modeColor && (
+            <Text style={[styles.tradeModeBadge, { color: modeColor, borderColor: modeColor }]}>
+              {trade.mode.toUpperCase()}
+            </Text>
+          )}
+        </View>
         <Text style={[styles.tradePnl, { color: pnlColor }]}>
           {pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}
         </Text>
@@ -198,5 +210,6 @@ const styles = StyleSheet.create({
   tradeDetails: { flexDirection: 'row', gap: 12, alignItems: 'center' },
   tradeDetail: { color: '#888', fontSize: 12 },
   reasonBadge: { color: '#fbbf24', fontSize: 10, fontWeight: '600' },
+  tradeModeBadge: { fontSize: 9, fontWeight: '700', borderWidth: 1, borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
   tradeDate: { color: '#444', fontSize: 10, marginTop: 4 },
 });

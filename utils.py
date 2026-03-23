@@ -119,6 +119,15 @@ def _is_cloud() -> bool:
     return bool(os.environ.get("AWS_ACCESS_KEY_ID"))
 
 
+def _in_streamlit() -> bool:
+    """Return True when running inside an active Streamlit session."""
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
 def _s3_conn():
     """Get Streamlit S3 connection (official recommended approach)."""
     import streamlit as st
@@ -127,8 +136,21 @@ def _s3_conn():
 
 
 def _s3_fs():
-    """Return the raw s3fs filesystem (bypasses Streamlit's @st.cache_data layer)."""
-    return _s3_conn().fs
+    """Return an s3fs filesystem.
+
+    - Inside a Streamlit session: goes through st.connection (caches credentials).
+    - Outside Streamlit (cron/CLI): creates S3FileSystem directly from env vars,
+      avoiding the AioSession kwarg bug in s3fs ≥2025 + aiobotocore ≥3.x.
+    """
+    if _in_streamlit():
+        return _s3_conn().fs
+    import s3fs
+    return s3fs.S3FileSystem(
+        key=os.environ.get('AWS_ACCESS_KEY_ID'),
+        secret=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+        client_kwargs={'region_name': os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')},
+        skip_instance_cache=True,
+    )
 
 
 # ─── CSV ────────────────────────────────────────────────────────────────────
@@ -305,8 +327,8 @@ def list_files(local_dir: str, pattern: str = "*",
     if _is_cloud():
         try:
             import fnmatch
-            conn = _s3_conn()
-            all_keys = conn.fs.ls(s3_prefix, detail=False)
+            fs = _s3_fs()
+            all_keys = fs.ls(s3_prefix, detail=False)
             names = [os.path.basename(k) for k in all_keys]
             matched = [n for n in names if fnmatch.fnmatch(n, pattern)]
             return sorted(matched, reverse=True)

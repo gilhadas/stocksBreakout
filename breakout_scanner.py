@@ -723,18 +723,37 @@ async def run_combined_mode(orchestrator: ScannerOrchestrator, args, notifier: N
 
 
 async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
-                          from_portfolio: bool = False):
+                          from_portfolio: bool = False,
+                          from_auto_portfolio: bool = False):
     """Monitor open positions: fetch current prices, alert on drops"""
     import pandas as pd
 
-    # Load positions from portfolio.json or CSV files
+    # Load positions from portfolio.json, auto_portfolio.json, or CSV files
     all_positions = []
-    if from_portfolio:
+    if from_auto_portfolio:
+        import auto_portfolio as _ap
+        from config import MODES as _MODES
+        _ap_data = _ap.load()
+        for p in _ap_data.get('positions', []):
+            mode = p.get('mode', 'swing')
+            all_positions.append({
+                'symbol':    p['symbol'],
+                'mode':      mode,
+                'entry':     p['entry_price'],
+                'stop':      p['stop'],
+                'target':    p['target'],
+                'timeframe': _MODES.get(mode, _MODES['swing'])['default_timeframe'],
+            })
+        logger.info(f"Loaded {len(all_positions)} positions from auto_portfolio.json")
+    elif from_portfolio:
         from portfolio import Portfolio
         _portfolio = Portfolio()
         all_positions = _portfolio.get_positions_as_exit_format()
         logger.info(f"Loaded {len(all_positions)} positions from portfolio.json")
     else:
+        if not args.monitor:
+            logger.warning("run_monitor_mode called without from_auto_portfolio/from_portfolio and no --monitor path")
+            return
         for fpath in args.monitor.split(','):
             fpath = fpath.strip()
             if not fpath:
@@ -774,7 +793,25 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
             price_map[symbol] = price
 
     # Trail stops upward (V9: activate trailing when TP reached)
-    if from_portfolio:
+    if from_auto_portfolio:
+        # Update stops in auto_portfolio.json directly (1% trail, no TP logic needed here)
+        import auto_portfolio as _ap
+        _ap_data_live = _ap.load()
+        _pos_map = {p['symbol']: p for p in _ap_data_live.get('positions', [])}
+        for pos in all_positions:
+            symbol = pos['symbol']
+            current_price = price_map.get(symbol)
+            if current_price is None:
+                continue
+            new_trailing_stop = round(current_price * 0.99, 2)
+            if new_trailing_stop > pos['stop']:
+                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f})")
+                if symbol in _pos_map:
+                    _pos_map[symbol]['stop'] = new_trailing_stop
+                pos['stop'] = new_trailing_stop
+        # Persist updated stops
+        _ap._save(_ap_data_live)
+    elif from_portfolio:
         # Update stops in portfolio.json directly
         for pos in all_positions:
             symbol = pos['symbol']
@@ -814,21 +851,23 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
                 _portfolio.update_stop(symbol, new_trailing_stop)
                 pos['stop'] = new_trailing_stop
     else:
-        from utils import update_position_stops
-        for fpath in args.monitor.split(','):
-            fpath = fpath.strip()
-            if not fpath:
-                continue
-            updated = update_position_stops(fpath, price_map)
-            for u in updated:
-                logger.info(f"  ↑ {u['symbol']} stop: ${u['old_stop']:.2f} → ${u['new_stop']:.2f} (price ${u['price']:.2f})")
+        if args.monitor:
+            from utils import update_position_stops
+            for fpath in args.monitor.split(','):
+                fpath = fpath.strip()
+                if not fpath:
+                    continue
+                updated = update_position_stops(fpath, price_map)
+                for u in updated:
+                    logger.info(f"  ↑ {u['symbol']} stop: ${u['old_stop']:.2f} → ${u['new_stop']:.2f} (price ${u['price']:.2f})")
 
         # Reload positions after stop updates
         all_positions = []
-        for fpath in args.monitor.split(','):
-            fpath = fpath.strip()
-            if fpath:
-                all_positions.extend(get_positions_from_file(fpath))
+        if args.monitor:
+            for fpath in args.monitor.split(','):
+                fpath = fpath.strip()
+                if fpath:
+                    all_positions.extend(get_positions_from_file(fpath))
         # Deduplicate again
         seen = set()
         unique_positions = []
@@ -923,7 +962,13 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
 
     if new_alerts:
         logger.warning(f"\n⚠️  {len(new_alerts)} NEW alert(s), {len(alerts) - len(new_alerts)} already notified")
-        notifier.send_monitor_alert(new_alerts, dashboard)
+        if from_auto_portfolio:
+            portfolio_label = "Auto Portfolio"
+        elif from_portfolio:
+            portfolio_label = "Manual Portfolio"
+        else:
+            portfolio_label = "Portfolio"
+        notifier.send_monitor_alert(new_alerts, dashboard, portfolio_label=portfolio_label)
 
         # Record newly alerted symbols
         with open(alert_history_file, 'a') as f:
@@ -1344,7 +1389,12 @@ Examples:
     parser.add_argument(
         '--monitor-portfolio',
         action='store_true',
-        help='Monitor positions from portfolio.json (instead of CSV files)'
+        help='Monitor positions from portfolio.json (manual portfolio)'
+    )
+    parser.add_argument(
+        '--monitor-auto-portfolio',
+        action='store_true',
+        help='Monitor positions from auto_portfolio.json (auto portfolio)'
     )
     parser.add_argument(
         '--debug',
@@ -1580,8 +1630,11 @@ Examples:
                 logger.info(f"Loaded {len(exit_positions)} positions from portfolio.json + auto_portfolio.json for exit evaluation")
 
         # Determine execution mode
-        if getattr(args, 'monitor_portfolio', False):
-            # Portfolio monitoring mode (reads from portfolio.json)
+        if getattr(args, 'monitor_auto_portfolio', False):
+            # Auto portfolio monitoring mode (reads from auto_portfolio.json)
+            await run_monitor_mode(orchestrator, args, notifier, from_auto_portfolio=True)
+        elif getattr(args, 'monitor_portfolio', False):
+            # Manual portfolio monitoring mode (reads from portfolio.json)
             await run_monitor_mode(orchestrator, args, notifier, from_portfolio=True)
         elif args.monitor:
             # Portfolio monitoring mode

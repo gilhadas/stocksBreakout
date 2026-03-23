@@ -23,6 +23,7 @@ import json
 import logging
 import pickle
 import re
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -283,10 +284,14 @@ def launch_mode_jobs(
             continue
 
         try:
+            job_env = os.environ.copy()
+            job_env.setdefault('PROJECT_ROOT', str(_PROJECT_ROOT))
+            job_env.setdefault('PYTHON_BIN', sys.executable)
             result = subprocess.run(
                 cmd,
                 shell=True,
                 cwd=_PROJECT_ROOT,
+                env=job_env,
                 timeout=900,  # 15 min timeout
                 capture_output=True,
                 text=True,

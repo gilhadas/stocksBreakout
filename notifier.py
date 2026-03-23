@@ -495,12 +495,15 @@ class Notifier:
 
         self.send_all(subject, message, formatted, csv_path=csv_path)
 
-    def send_monitor_alert(self, alerts: List[Dict], all_positions: List[Dict]):
+    def send_monitor_alert(self, alerts: List[Dict], all_positions: List[Dict],
+                           portfolio_label: str = "Portfolio"):
         """Send portfolio monitoring alert for positions that need attention
 
         Args:
             alerts: Positions that need attention (HIT_STOP, NEAR_STOP, FALLING)
             all_positions: All monitored positions (for CSV attachment)
+            portfolio_label: Human-readable portfolio name (e.g. "Manual Portfolio",
+                             "Auto Portfolio") — shown in subject and attachment filename.
         """
         if not alerts:
             return
@@ -508,10 +511,10 @@ class Notifier:
         # Filter to only critical alerts (HIT_STOP, NEAR_STOP) for notification body
         critical = [a for a in alerts if a['status'] in ('HIT_STOP', 'NEAR_STOP')]
 
-        subject = f"{'🔴' if critical else '🟡'} Portfolio Alert: {len(critical)} critical, {len(alerts) - len(critical)} falling"
+        subject = f"{'🔴' if critical else '🟡'} {portfolio_label} Alert: {len(critical)} critical, {len(alerts) - len(critical)} falling"
 
         # Notification body: show ONLY critical alerts
-        lines = [f"Portfolio monitor: {len(critical)} critical alerts (HIT_STOP/NEAR_STOP)\n"]
+        lines = [f"{portfolio_label} monitor: {len(critical)} critical alerts (HIT_STOP/NEAR_STOP)\n"]
         for a in critical:
             icon = '🔴'
             lines.append(
@@ -546,7 +549,8 @@ class Notifier:
         from datetime import datetime
         csv_path = None
         try:
-            csv_path = tempfile.mktemp(suffix=f'_monitor_{datetime.now():%Y%m%d_%H%M%S}.csv')
+            label_slug = portfolio_label.lower().replace(' ', '_')
+            csv_path = tempfile.mktemp(suffix=f'_{label_slug}_{datetime.now():%Y%m%d_%H%M%S}.csv')
             with open(csv_path, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=['Symbol', 'Mode', 'Entry', 'Current', 'Stop', 'Target', 'P&L%', 'Status'])
                 writer.writeheader()

@@ -34,6 +34,7 @@ import argparse
 import json
 import logging
 import re
+import os
 import subprocess
 import sys
 import time
@@ -300,14 +301,27 @@ def run_job(job: CronJob, dry_run: bool = False) -> bool:
         logger.info(f"  [DRY-RUN] Would execute: {job.command}")
         return True
 
-    # Wide-universe scans (ALL.txt) need more time (1332 symbols)
-    job_timeout = 1800 if 'ALL.txt' in job.command else 900
+    # Wide-universe scans (ALL.txt) need more time (1332 symbols).
+    # longterm mode also runs weekly and includes auto-portfolio + upload steps.
+    if 'longterm' in job.name:
+        job_timeout = 3600  # 60 min — weekly, large universe
+    elif 'ALL.txt' in job.command:
+        job_timeout = 1800  # 30 min — swing/daytrade wide scan
+    else:
+        job_timeout = 900   # 15 min — focused watchlist
+
+    # Ensure $PROJECT_ROOT and $PYTHON_BIN are defined for shell commands that
+    # reference them (e.g. SIGFILE=$(ls -t $PROJECT_ROOT/...)).
+    job_env = os.environ.copy()
+    job_env.setdefault('PROJECT_ROOT', str(_PROJECT_ROOT))
+    job_env.setdefault('PYTHON_BIN', sys.executable)
 
     try:
         result = subprocess.run(
             job.command,
             shell=True,
             cwd=_PROJECT_ROOT,
+            env=job_env,
             timeout=job_timeout,
             capture_output=True,
             text=True,
