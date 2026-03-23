@@ -86,16 +86,41 @@ def refresh_portfolio(_token: str = Depends(_require_auth)):
 
 # ── Manual Portfolio ────────────────────────────────────────────────────────
 
+def _load_portfolio_json() -> dict:
+    """Load portfolio.json from S3 (with boto3) or local fallback."""
+    import json, boto3, toml
+    secrets_path = Path(__file__).resolve().parent.parent / '.streamlit' / 'secrets.toml'
+    try:
+        secrets = toml.loads(secrets_path.read_text())
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id     = secrets.get('AWS_ACCESS_KEY_ID') or secrets.get('key'),
+            aws_secret_access_key = secrets.get('AWS_SECRET_ACCESS_KEY') or secrets.get('secret'),
+            region_name           = secrets.get('AWS_DEFAULT_REGION') or secrets.get('region', 'eu-central-1'),
+        )
+        obj = s3.get_object(
+            Bucket = 'stocks-breakout-scanner-s3-bucket',
+            Key    = 'scanner_output/portfolio/portfolio.json',
+        )
+        return json.loads(obj['Body'].read().decode())
+    except Exception as e:
+        # Fall back to local file
+        local = Path(__file__).resolve().parent.parent / 'scanner_output' / 'portfolio' / 'portfolio.json'
+        if local.exists():
+            return json.loads(local.read_text())
+        return {}
+
+
 @app.get("/manual-portfolio")
 def get_manual_portfolio(_token: str = Depends(_require_auth)):
     import yfinance as yf
-    from utils import load_json
 
-    data = load_json('scanner_output/portfolio/portfolio.json')
+    data = _load_portfolio_json()
     if not data:
         return {"positions": [], "closed": [], "cash": 0, "last_updated": ""}
 
     raw = data.get("positions", {})
+
     # Normalize: positions is a dict keyed by symbol
     if isinstance(raw, dict):
         pos_list = [{"symbol": k, **v} for k, v in raw.items()]
@@ -149,6 +174,93 @@ def get_manual_portfolio(_token: str = Depends(_require_auth)):
         "closed":       data.get("trade_history", []),
         "cash":         data.get("cash", 0),
         "last_updated": data.get("last_updated", ""),
+    }
+
+
+# ── Manual Portfolio: Compute Stops ─────────────────────────────────────────
+
+@app.post("/manual-portfolio/compute-stops")
+def compute_stops(_token: str = Depends(_require_auth)):
+    """Fetch 60-day OHLC for each position, compute ATR14 + swing-low stop, save back to S3."""
+    import json, boto3, toml, yfinance as yf, pandas as pd
+    import numpy as np
+    from datetime import datetime, timezone, timedelta
+
+    secrets_path = Path(__file__).resolve().parent.parent / '.streamlit' / 'secrets.toml'
+    secrets = toml.loads(secrets_path.read_text())
+
+    def _s3_client():
+        return boto3.client(
+            's3',
+            aws_access_key_id     = secrets.get('AWS_ACCESS_KEY_ID') or secrets.get('key'),
+            aws_secret_access_key = secrets.get('AWS_SECRET_ACCESS_KEY') or secrets.get('secret'),
+            region_name           = secrets.get('AWS_DEFAULT_REGION', 'eu-central-1'),
+        )
+
+    data = _load_portfolio_json()
+    if not data:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    raw = data.get("positions", {})
+    pos_dict = raw if isinstance(raw, dict) else {p["symbol"]: p for p in raw}
+    symbols  = list(pos_dict.keys())
+
+    SL_MULT  = 3.0   # matches swing mode default
+    LOOKBACK = 20    # bars for swing low
+
+    # Download 60 days of daily OHLC in one batch
+    hist = yf.download(symbols, period="60d", progress=False, auto_adjust=True)
+
+    updated = {}
+    for sym in symbols:
+        pos = pos_dict[sym]
+        try:
+            if len(symbols) == 1:
+                df = hist.copy()
+            else:
+                df = hist.xs(sym, axis=1, level=1).dropna() if sym in hist.columns.get_level_values(1) else None
+
+            if df is None or len(df) < 15:
+                updated[sym] = {**pos, "stop_note": "insufficient data"}
+                continue
+
+            # ATR14
+            hl  = df["High"] - df["Low"]
+            hc  = (df["High"] - df["Close"].shift()).abs()
+            lc  = (df["Low"]  - df["Close"].shift()).abs()
+            atr = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean().iloc[-1]
+
+            price      = float(df["Close"].iloc[-1])
+            atr_stop   = price - SL_MULT * float(atr)
+            swing_low  = float(df["Low"].iloc[-LOOKBACK:].min())
+            stop       = round(max(swing_low, atr_stop), 2)
+
+            updated[sym] = {**pos, "stop": stop, "stop_note": f"ATR14={atr:.2f} swing_low={swing_low:.2f}"}
+        except Exception as e:
+            updated[sym] = {**pos, "stop_note": str(e)}
+
+    ny_tz = timezone(timedelta(hours=-4))
+    data["positions"]    = updated
+    data["last_updated"] = datetime.now(ny_tz).isoformat()
+
+    body = json.dumps(data, indent=2)
+    # Save locally
+    local = Path(__file__).resolve().parent.parent / 'scanner_output' / 'portfolio' / 'portfolio.json'
+    local.write_text(body)
+    # Save to S3
+    try:
+        _s3_client().put_object(
+            Bucket      = 'stocks-breakout-scanner-s3-bucket',
+            Key         = 'scanner_output/portfolio/portfolio.json',
+            Body        = body.encode(),
+            ContentType = 'application/json',
+        )
+    except Exception as e:
+        pass
+
+    return {
+        "updated": len(updated),
+        "stops": {s: p.get("stop") for s, p in updated.items()},
     }
 
 

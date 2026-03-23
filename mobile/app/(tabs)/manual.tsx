@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable } from 'react-native';
 import { useFocusEffect, router } from 'expo-router';
-import { fetchManualPortfolio, getToken } from '../../lib/api';
+import { fetchManualPortfolio, computeStops, getToken } from '../../lib/api';
 
 const STATUS_COLOR: Record<string, string> = {
   SELL:    '#ef4444',
@@ -99,6 +99,21 @@ export default function ManualPortfolioScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError]         = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
+  const [computing, setComputing]     = useState(false);
+  const [computeMsg, setComputeMsg]   = useState('');
+
+  const handleComputeStops = async () => {
+    setComputing(true);
+    setComputeMsg('');
+    try {
+      const result = await computeStops();
+      setComputeMsg(`Stops computed for ${result.updated} positions`);
+      await loadData();  // reload with new stops
+    } catch (e: any) {
+      setComputeMsg(`Error: ${e.message}`);
+    }
+    setComputing(false);
+  };
 
   const loadData = useCallback(async () => {
     try {
@@ -156,6 +171,18 @@ export default function ManualPortfolioScreen() {
         )}
       </View>
 
+      {/* Compute stops button */}
+      <Pressable
+        style={[styles.computeBtn, computing && { opacity: 0.6 }]}
+        onPress={handleComputeStops}
+        disabled={computing}
+      >
+        <Text style={styles.computeBtnText}>
+          {computing ? 'Computing stops...' : 'Compute Stop Loss (ATR14 + Swing Low)'}
+        </Text>
+      </Pressable>
+      {computeMsg ? <Text style={styles.computeMsg}>{computeMsg}</Text> : null}
+
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
       <FlatList
@@ -196,6 +223,9 @@ const styles = StyleSheet.create({
   value:        { color: '#fff', fontSize: 14, fontWeight: '600', marginTop: 2 },
 
   date:         { color: '#555', fontSize: 10, marginTop: 4 },
+  computeBtn:   { backgroundColor: '#1e3a5f', margin: 8, borderRadius: 8, padding: 12, alignItems: 'center', borderWidth: 1, borderColor: '#6366f1' },
+  computeBtnText: { color: '#6366f1', fontSize: 13, fontWeight: '600' },
+  computeMsg:   { color: '#22c55e', textAlign: 'center', fontSize: 12, marginBottom: 4 },
   error:        { color: '#ef4444', textAlign: 'center', padding: 8 },
   empty:        { color: '#555', textAlign: 'center', padding: 32, fontSize: 15 },
   updated:      { color: '#555', fontSize: 11, textAlign: 'center', padding: 16 },

@@ -9,7 +9,7 @@ const TOKEN_KEY = 'jwt_token';
 const API_URL_KEY = 'api_url';
 
 // Permanent API URL via Cloudflare named tunnel — never changes
-const API_BASE_URL = 'https://api.gilhadas-stocks.com';
+const API_BASE_URL = 'https://gilhadas-stocks.com';
 
 let _baseUrl = API_BASE_URL;
 
@@ -77,6 +77,10 @@ export function refreshPortfolio() {
 
 export function fetchManualPortfolio() {
   return authFetch('/manual-portfolio');
+}
+
+export function computeStops() {
+  return authFetch('/manual-portfolio/compute-stops', { method: 'POST' });
 }
 
 export function registerPushToken(token: string) {
