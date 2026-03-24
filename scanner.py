@@ -279,6 +279,7 @@ class BreakoutDetector:
                 'conviction': int(conviction_score_preview) if not pd.isna(conviction_score_preview) else 0,
                 'rsi': int(latest.get('RSI', 0)),
                 'mode': mode_name,
+                'prev_high': round(prev_high, 2),  # breakout trigger level for near_miss_watch
                 'reasons': f'Near miss ({gap_to_break:.2f}% below breakout {prev_high:.2f}) — watch for re-scan',
             })
         

@@ -600,6 +600,31 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         
         orchestrator.save_results(rejections, args.mode, 'rejections')
         logger.info("   (Saved near-miss signals for analysis)")
+
+        # Update near_miss_watch.txt — coiling stocks within 0.5% of breakout level.
+        # Monitored every 15 min by monitor_watch.py --near-miss for intraday trigger alerts.
+        _nm_file = Path('scanner_output/lists/near_miss_watch.txt')
+        _nm_file.parent.mkdir(parents=True, exist_ok=True)
+        _nm_date = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
+        # Load existing entries (dedup by symbol — keep most recent)
+        _existing_nm = {}
+        if _nm_file.exists():
+            for _ln in _nm_file.read_text().splitlines():
+                _ln = _ln.strip()
+                if _ln:
+                    _parts = _ln.split(',')
+                    if len(_parts) >= 1:
+                        _existing_nm[_parts[0]] = _ln
+        # Add/refresh near-miss entries from this scan
+        _added_nm = 0
+        for _rej in rejections:
+            if 'Near miss' in _rej.get('reasons', '') and _rej.get('prev_high', 0) > 0:
+                _sym = _rej['symbol']
+                _existing_nm[_sym] = f"{_sym},{_rej['prev_high']:.2f},{_rej.get('mode', args.mode)},{_nm_date}"
+                _added_nm += 1
+        if _added_nm:
+            _nm_file.write_text('\n'.join(_existing_nm.values()) + '\n')
+            logger.info(f"   Updated near_miss_watch.txt: {len(_existing_nm)} coiling stocks (+{_added_nm} new)")
     
     return results
 

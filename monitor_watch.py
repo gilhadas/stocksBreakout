@@ -422,7 +422,88 @@ def main() -> None:
     elif alerts:
         print(' (Pass --notify to send Discord alerts)')
 
+    # Always check near-miss watch (lightweight price vs prev_high comparison)
+    check_near_miss_triggers(notify=args.notify, dry_run=args.dry_run)
+
     print()
+
+
+def check_near_miss_triggers(notify: bool = False, dry_run: bool = False) -> None:
+    """
+    Check near_miss_watch.txt for stocks that have crossed their breakout level.
+    Sends a Discord alert and removes triggered symbols from the file.
+    Called automatically at the end of every monitor_watch run.
+    """
+    nm_file = Path('scanner_output/lists/near_miss_watch.txt')
+    if not nm_file.exists():
+        return
+
+    entries = []
+    for line in nm_file.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(',')
+        if len(parts) >= 2:
+            try:
+                entries.append({'symbol': parts[0], 'prev_high': float(parts[1]),
+                                 'mode': parts[2] if len(parts) > 2 else '?',
+                                 'date': parts[3] if len(parts) > 3 else '?',
+                                 'raw': line})
+            except ValueError:
+                pass
+
+    if not entries:
+        return
+
+    adapter = YFinanceAdapter(use_disk_cache=False)
+    triggered = []
+    remaining = []
+
+    for entry in entries:
+        sym = entry['symbol']
+        try:
+            now_et = datetime.now(NY_TZ)
+            start = (now_et - timedelta(days=1)).strftime('%Y-%m-%d')
+            end   = (now_et + timedelta(days=1)).strftime('%Y-%m-%d')
+            df = adapter.get_historical_data(sym, '15 mins', start_date=start, end_date=end)
+            if df is None or df.empty:
+                remaining.append(entry['raw'])
+                continue
+            date_mask  = df.index.normalize() == pd.Timestamp(now_et.strftime('%Y-%m-%d'))
+            today_bars = df[date_mask]
+            if today_bars.empty:
+                remaining.append(entry['raw'])
+                continue
+            current = float(today_bars['close'].iloc[-1])
+            if current > entry['prev_high']:
+                triggered.append({**entry, 'current': current})
+                print(f' ⚡ NEAR-MISS TRIGGERED: {sym}  ${current:.2f} > ${entry["prev_high"]:.2f}  (coiling since {entry["date"]})')
+            else:
+                remaining.append(entry['raw'])
+        except Exception as e:
+            print(f' ⚠️  near-miss check failed for {sym}: {e}')
+            remaining.append(entry['raw'])
+
+    if triggered:
+        # Rewrite file without triggered symbols
+        nm_file.write_text('\n'.join(remaining) + ('\n' if remaining else ''))
+
+        if notify and not dry_run:
+            try:
+                notifier = Notifier()
+                lines = [
+                    f"⚡ **{t['symbol']}** triggered: ${t['current']:.2f} > ${t['prev_high']:.2f}  "
+                    f"(coiling since {t['date']}, {t['mode']})"
+                    for t in triggered
+                ]
+                notifier.send_discord(
+                    f"⚡ Near-Miss Breakout: {len(triggered)} triggered",
+                    '\n'.join(lines)
+                )
+                print(f'  📢 Sent near-miss trigger alert ({len(triggered)} symbols)')
+            except Exception as e:
+                print(f'  ⚠️  Near-miss notification error: {e}')
 
 
 if __name__ == '__main__':

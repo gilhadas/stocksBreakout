@@ -75,6 +75,9 @@ class ScannerOrchestrator:
             if V9H_REGIME_GATE.get('enabled'):
                 bear_macro = await self.market_data.get_spy_bear_macro()
 
+            # Session counter for momentum_surge exceptions (reset per scan_watchlist call)
+            self._ms_exception_count = 0
+
             # Log regime with smoothing info
             regime_str = f"Regime: {regime}"
             if regime != raw_regime:
@@ -359,8 +362,28 @@ class ScannerOrchestrator:
                 if V9H_REGIME_GATE.get('enabled') and not sector_exception:
                     if bear_macro:
                         # Structural bear (SPY < SMA200): GOLD breakouts only
+                        # — with a narrow exception for momentum surges (3x vol + 5% move)
                         if signal and signal.get('Quality') != 'GOLD':
-                            signal = None
+                            msex = V9H_REGIME_GATE.get('momentum_surge_exception', {})
+                            vol_ok  = signal.get('Vol_Ratio', 0) >= msex.get('min_vol_ratio', 3.0)
+                            move_ok = abs(signal.get('Gap%', 0) or 0) >= msex.get('min_move_pct', 5.0)
+                            type_ok = signal.get('Type') not in msex.get('blocked_types', [])
+                            qual_ok = signal.get('Quality') in msex.get('allowed_qualities', [])
+                            cap_ok  = getattr(self, '_ms_exception_count', 0) < msex.get('max_per_day', 2)
+
+                            if msex.get('enabled') and vol_ok and move_ok and type_ok and qual_ok and cap_ok:
+                                signal['MomentumException'] = True
+                                signal['PosSizeMult'] = msex.get('pos_size_mult', 0.5)
+                                self._ms_exception_count = getattr(self, '_ms_exception_count', 0) + 1
+                                logger.info(
+                                    f"   🔥 MOMENTUM EXCEPTION: {symbol} {signal.get('Quality')} "
+                                    f"Vol={signal.get('Vol_Ratio', 0):.1f}x "
+                                    f"Gap={signal.get('Gap%', 0):.1f}% "
+                                    f"— passed bear_macro gate (half-size, "
+                                    f"{self._ms_exception_count}/{msex.get('max_per_day', 2)} today)"
+                                )
+                            else:
+                                signal = None
                         if signal is None:
                             return None  # No BOUNCE or SMA20_CROSS in bear macro
                     elif regime == 'BEARISH':

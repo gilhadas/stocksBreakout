@@ -342,6 +342,18 @@ V9H_REGIME_GATE = {
     # regime transition. Prevents whipsaw re-entries during regime instability (HMM hysteresis).
     'cooldown_hours':        12,   # hours to suppress signals after regime change (0 = disabled)
     'cooldown_exempt_quality': ['GOLD'],  # signal qualities exempt from cooldown
+    # Narrow exception: allow PREMIUM signals through bear_macro when vol+move are extreme.
+    # Targets gap-up momentum surges (SATL, COIN-type) that have strong edge regardless of SPY.
+    # Half-size and daily cap keep bear-macro risk controlled.
+    'momentum_surge_exception': {
+        'enabled':           True,
+        'min_vol_ratio':     3.0,   # ≥3x average volume (same as momentum_surge threshold)
+        'min_move_pct':      5.0,   # Gap% OR daily move ≥5% (same as momentum_surge)
+        'allowed_qualities': ['PREMIUM', 'GOLD'],
+        'blocked_types':     ['BOUNCE', 'SMA20_CROSS'],  # never relax weak signal types
+        'max_per_day':       2,     # cap exception entries per scan session
+        'pos_size_mult':     0.5,   # 50% normal position size in bear macro
+    },
 }
 
 # V9-H Sector Exception: allow PREMIUM+ breakouts in sectors with strong
