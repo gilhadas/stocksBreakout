@@ -968,11 +968,11 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
     from pathlib import Path
     from zoneinfo import ZoneInfo
     _today_str = datetime.now(ZoneInfo('America/New_York')).strftime('%Y%m%d')
-    alert_history_file = Path(f'scanner_output/.monitor_alerts_{_today_str}.txt')
+    alert_history_file = Path(f'scanner_output/state/.monitor_alerts_{_today_str}.txt')
     alert_history_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Cleanup old alert history files (keep today only)
-    for old_f in Path('scanner_output').glob('.monitor_alerts*.txt'):
+    for old_f in Path('scanner_output/state').glob('.monitor_alerts*.txt'):
         if old_f.name != alert_history_file.name:
             old_f.unlink(missing_ok=True)
 
@@ -1460,7 +1460,7 @@ Examples:
         setup_logging(debug=getattr(args, 'debug', False))
 
     # Attach structured CSV handler for SCAN-level decisions (learning loop)
-    attach_scan_csv_handler()
+    attach_scan_csv_handler(mode=getattr(args, 'mode', ''))
 
     # Load cached market data if provided (from job_launcher.py batch execution)
     cached_market_data = None

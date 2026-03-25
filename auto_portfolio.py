@@ -748,6 +748,58 @@ def rebuild_skipped_cash() -> dict:
     return {'found': len(data['skipped_cash']), 'data': data}
 
 
+# ── Direct add (feedback agent) ───────────────────────────────────────────────
+
+def add_position_direct(
+    symbol: str,
+    entry_price: float,
+    stop: float,
+    target: float,
+    mode: str = 'swing',
+    quality: str = '',
+    vol_ratio: float = 0.0,
+    position_pct: float | None = None,
+) -> dict:
+    """
+    Directly add a position without scanning CSV files.
+    Used by scan_feedback_agent.py when a real-time BREAKOUT is detected.
+    Returns {'added': bool, 'reason': str}.
+    """
+    data = load()
+
+    if symbol.upper() in open_symbols(data):
+        return {'added': False, 'reason': 'duplicate'}
+
+    pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
+    cost  = entry_price * max(1, int(data['capital'] * pct / entry_price))
+    shares = int(data['capital'] * pct / entry_price)
+    if shares < 1:
+        return {'added': False, 'reason': 'shares_zero'}
+
+    cost = round(entry_price * shares, 2)
+    if cost > available_cash(data):
+        return {'added': False, 'reason': 'no_cash'}
+
+    now_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
+    position = {
+        'symbol':          symbol.upper(),
+        'date_added':      now_str,
+        'mode':            mode,
+        'quality':         quality,
+        'minervini_score': 0,
+        'entry_price':     round(entry_price, 4),
+        'stop':            round(stop, 4),
+        'target':          round(target, 4),
+        'shares':          shares,
+        'cost':            cost,
+        'current_price':   round(entry_price, 4),
+        'vol_ratio':       round(vol_ratio, 2),
+    }
+    data['positions'].append(position)
+    _save(data)
+    return {'added': True, 'reason': 'ok'}
+
+
 # ── Manual close (UI) ─────────────────────────────────────────────────────────
 
 def close_position(symbol: str, exit_price: float, reason: str = 'manual') -> dict:

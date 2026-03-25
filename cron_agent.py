@@ -33,6 +33,7 @@ Usage:
 import argparse
 import json
 import logging
+import logging.handlers
 import re
 import os
 import subprocess
@@ -52,14 +53,17 @@ _PROJECT_ROOT = Path(__file__).parent
 _LOGS_DIR = _PROJECT_ROOT / 'scanner_output' / 'logs'
 _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Setup logging
+# Setup logging — daily rotation at midnight ET; keeps 14 backups
+_log_handler = logging.handlers.TimedRotatingFileHandler(
+    _LOGS_DIR / 'cron_agent.log',
+    when='midnight', interval=1, backupCount=14,
+    utc=False,   # rotates on local system midnight (set TZ=America/New_York in env)
+)
+_log_handler.suffix = '%Y%m%d'  # cron_agent.log.20260325
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
-    handlers=[
-        logging.FileHandler(_LOGS_DIR / 'cron_agent.log'),
-        logging.StreamHandler(),
-    ]
+    handlers=[_log_handler, logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
@@ -193,6 +197,9 @@ def parse_cron_jobs(cron_file: Path) -> List[CronJob]:
                     break
                 elif 'MOMENTUM-WATCH' in nearby_line:
                     category = 'momentum_watch'
+                    break
+                elif 'FEEDBACK' in nearby_line:
+                    category = 'feedback'
                     break
                 elif 'PORTFOLIO' in nearby_line:
                     category = 'portfolio'

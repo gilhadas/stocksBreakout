@@ -31,7 +31,7 @@ SCAN_LEVEL = 15  # same as utils.py
 
 # ── CSV schema ────────────────────────────────────────────────────────────────
 COLUMNS = [
-    'timestamp', 'symbol',
+    'timestamp', 'symbol', 'mode',
     'reason_code', 'reason_detail',
     'price', 'prev_high',
     'bars_have', 'bars_need',
@@ -107,15 +107,27 @@ class ScanCSVHandler(logging.Handler):
     Attach to the root logger once at startup via attach_scan_csv_handler().
     """
 
-    def __init__(self, output_dir: str = OUTPUT_DIR):
+    def __init__(self, output_dir: str = OUTPUT_DIR, mode: str = ''):
         super().__init__(level=SCAN_LEVEL)
+        self.mode = mode
         self.csv_path = (
             Path(output_dir)
             / 'scan_decisions'
             / f'scan_decisions_{datetime.now(_NY_TZ):%Y%m%d}.csv'
         )
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.csv_path.exists():
+        # Create or recreate header if file is missing or has a stale schema
+        needs_header = not self.csv_path.exists()
+        if not needs_header:
+            try:
+                with open(self.csv_path, 'r', newline='') as f:
+                    first_line = f.readline().strip()
+                existing_cols = [c.strip() for c in first_line.split(',')]
+                if existing_cols != COLUMNS:
+                    needs_header = True  # schema changed — recreate
+            except Exception:
+                needs_header = True
+        if needs_header:
             with open(self.csv_path, 'w', newline='') as f:
                 csv.DictWriter(f, fieldnames=COLUMNS).writeheader()
 
@@ -135,6 +147,7 @@ class ScanCSVHandler(logging.Handler):
             row = {
                 'timestamp':     datetime.fromtimestamp(record.created, tz=_NY_TZ).isoformat(),
                 'symbol':        symbol,
+                'mode':          self.mode,
                 'reason_code':   _reason_code(detail),
                 'reason_detail': detail,
                 'price':         nums.get('price', ''),
@@ -160,7 +173,7 @@ class ScanCSVHandler(logging.Handler):
 _handler: Optional[ScanCSVHandler] = None
 
 
-def attach_scan_csv_handler(output_dir: str = OUTPUT_DIR) -> ScanCSVHandler:
+def attach_scan_csv_handler(output_dir: str = OUTPUT_DIR, mode: str = '') -> ScanCSVHandler:
     """
     Attach the CSV handler to the root logger.
     Safe to call multiple times — only installs once per process.
@@ -168,8 +181,11 @@ def attach_scan_csv_handler(output_dir: str = OUTPUT_DIR) -> ScanCSVHandler:
     """
     global _handler
     if _handler is None:
-        _handler = ScanCSVHandler(output_dir)
+        _handler = ScanCSVHandler(output_dir, mode=mode)
         logging.getLogger().addHandler(_handler)
+    elif mode and _handler.mode != mode:
+        # Update mode when the same process runs multiple scanner modes
+        _handler.mode = mode
     return _handler
 
 

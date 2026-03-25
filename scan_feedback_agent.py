@@ -27,6 +27,7 @@ Usage:
 
 import argparse
 import csv
+import fcntl
 import json
 import logging
 import subprocess
@@ -40,25 +41,26 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-from config import NOTIFICATIONS, OUTPUT_DIR
+from config import NOTIFICATIONS, OUTPUT_DIR, MODES
 from notifier import Notifier
-import scalp_portfolio as sp
+import auto_portfolio as ap
 from zoneinfo import ZoneInfo
 
 _NY_TZ       = ZoneInfo('America/New_York')
 _SCAN_DIR    = Path(OUTPUT_DIR) / 'scan_decisions'
 _DEFAULT_INT = 300   # seconds
-_DEFAULT_RESCAN_INT = 900  # 15 min
+_DEFAULT_RESCAN_INT = 900  # 15 min — 3-mode rescan on 73 symbols takes ~3 min (validated)
 
 # Alert thresholds
 SURGE_THRESHOLD    = 2.0   # % move since last check that triggers SURGE alert
 MISS_THRESHOLD     = 2.0   # % above scan_price considered a missed opportunity
 FLAT_BAND          = 0.3   # % band for FLAT classification
-TRAIL_STOP_PCT     = 1.0   # % trailing stop from post-breakout high (swing/daytrade)
-EXIT_BELOW_PCT     = 0.3   # % below prev_high = failed breakout exit (swing/daytrade)
-# Scalping: fixed-cent stops (overrides % stops when > 0)
-SCALP_TRAIL_CENTS  = 3     # ¢ trailing stop from post-breakout high
-SCALP_FAIL_CENTS   = 2     # ¢ below prev_high = failed breakout exit
+# Mode-aware exit thresholds (fail = failed breakout %, trail = trailing stop %)
+MODE_EXIT_PCT = {
+    'daytrade': {'fail': 0.3,  'trail': 0.8},
+    'swing':    {'fail': 1.0,  'trail': 2.5},
+    'longterm': {'fail': 2.0,  'trail': 4.0},
+}
 CONFIRM_PASSES     = 1     # consecutive passes above prev_high (1 = immediate; backtest showed 2 adds no value)
 VOL_MULT           = 2.0   # require bar volume ≥ Xx 20-bar avg at BREAKOUT (backtest: +6 pts WR)
 MIN_BREAKOUT_PCT   = 0.2   # min % above prev_high before firing BREAKOUT
@@ -322,15 +324,19 @@ def _send_telegram_alerts(alerts: list[dict]) -> None:
         prev_h = alert.get('prev_high')
         vol    = alert.get('vol_ratio', 0)
 
+        mode     = alert.get('mode', 'swing')
+        stop_val = alert.get('stop', 0)
+        tgt_val  = alert.get('target', 0)
         lines = [
-            f"SCALP BREAKOUT: {symbol}",
+            f"BREAKOUT [{mode.upper()}]: {symbol}",
             f"Price: ${cur:.2f}",
         ]
         if prev_h:
             lines.append(f"Prev High: ${prev_h:.2f}")
         if vol:
             lines.append(f"Vol: {vol:.1f}x")
-        lines.append(f"Stop: ${cur - SCALP_FAIL_CENTS / 100:.2f} | Target: ${cur + SCALP_TRAIL_CENTS * 2 / 100:.2f}")
+        if stop_val:
+            lines.append(f"Stop: ${stop_val:.2f} | Target: ${tgt_val:.2f}")
 
         text = '\n'.join(lines)
         try:
@@ -379,40 +385,146 @@ def _send_email_alerts(alerts: list[dict]) -> None:
 
 # ── Scanner runner ────────────────────────────────────────────────────────────
 
-_SCANNER_CMD = [
-    sys.executable, 'breakout_scanner.py',
-    './input/1_26_Setups.txt',
-    '--mock', '--bounce',
-    '--mode', 'scalping', '--debug',
-    # --notify removed: feedback agent handles its own BREAKOUT notifications.
-    # Scanner --notify was causing duplicate/noisy alerts for every rescan.
-]
+# Rescan merges momentum_watch_daytrade.txt (73) + 1_26_Setups.txt (147) = ~203 unique symbols
+_MOMENTUM_WATCHLIST = Path(OUTPUT_DIR) / 'lists' / 'momentum_watch_daytrade.txt'
+_CURATED_WATCHLIST  = Path('input') / '1_26_Setups.txt'
+_RESCAN_MODES       = ['daytrade', 'swing', 'longterm']
 
-def _run_scanner(dec_path: Path, label: str = "initial") -> bool:
+
+def _build_rescan_watchlist() -> Path | None:
     """
-    Run the breakout scanner once. Returns True if it completed successfully.
-    The scanner appends rows to the decisions CSV via scan_event_log.py.
+    Merge momentum_watch_daytrade.txt + 1_26_Setups.txt into a temp file.
+    Returns path to merged file, or None if neither source exists.
+    Validated timing: ~203 symbols × 3 modes ≈ 8 min total.
     """
-    logger.info(f"Running {label} scan to seed/update decisions CSV …")
-    logger.info(f"CMD: {' '.join(_SCANNER_CMD)}")
+    symbols: set[str] = set()
+
+    if _MOMENTUM_WATCHLIST.exists():
+        for line in _MOMENTUM_WATCHLIST.read_text().splitlines():
+            sym = line.strip().upper()
+            if sym and not sym.startswith('#'):
+                symbols.add(sym)
+
+    _SKIP_EXCHANGES = {
+        'BINANCE', 'BITSTAMP', 'COINBASE', 'CAPITALCOM', 'BSE',
+        'XETR', 'MIL', 'SP', 'FX', 'CRYPTO', 'COMEX', 'NYMEX',
+    }
+    if _CURATED_WATCHLIST.exists():
+        for token in _CURATED_WATCHLIST.read_text().replace(',', '\n').split('\n'):
+            t = token.strip().upper()
+            if t and not t.startswith('#'):
+                if ':' in t:
+                    exchange, sym = t.split(':', 1)
+                    if exchange in _SKIP_EXCHANGES:
+                        continue
+                else:
+                    sym = t
+                if sym and sym.replace('-', '').isalpha():
+                    symbols.add(sym)
+
+    if not symbols:
+        return None
+
+    merged = Path(OUTPUT_DIR) / 'scan_decisions' / '.feedback_rescan_watchlist.txt'
+    merged.parent.mkdir(parents=True, exist_ok=True)
+    merged.write_text('\n'.join(sorted(symbols)) + '\n')
+    logger.info(f"Rescan watchlist: {len(symbols)} symbols (momentum={_MOMENTUM_WATCHLIST.exists()}, curated={_CURATED_WATCHLIST.exists()})")
+    return merged
+
+
+def _run_rescan(dec_path: Path, label: str = "re-scan") -> bool:
+    """
+    Run the breakout scanner on the merged watchlist (momentum + curated) in all 3 modes.
+    Each mode appends mode-tagged rows to the decisions CSV via scan_event_log.py.
+    Returns True if at least one mode completed successfully.
+    Full ALL.txt scans are handled by the regular cron jobs.
+    Validated: ~203 symbols × 3 modes ≈ 8 min total (fits 15-min rescan window).
+    """
+    watchlist = _build_rescan_watchlist()
+    if watchlist is None:
+        logger.info("No rescan watchlist available — skipping rescan")
+        return False
+
+    success_any = False
+    for mode in _RESCAN_MODES:
+        cmd = [
+            sys.executable, 'breakout_scanner.py',
+            str(watchlist),
+            '--mock', '--bounce',
+            '--mode', mode, '--debug',
+        ]
+        logger.info(f"Running {label} [{mode}] on {watchlist.name} …")
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=Path(__file__).parent,
+                timeout=600,
+                check=False,
+            )
+            if result.returncode == 0:
+                success_any = True
+                logger.info(f"{label.capitalize()} [{mode}] complete")
+            else:
+                logger.warning(f"Scanner [{mode}] exited with code {result.returncode}")
+        except subprocess.TimeoutExpired:
+            logger.error(f"Scanner [{mode}] timed out after 600 s")
+        except Exception as e:
+            logger.error(f"Failed to run scanner [{mode}]: {e}", exc_info=True)
+
+    return success_any
+
+
+def _load_decisions_with_mode(dec_path: Path) -> dict[str, dict]:
+    """
+    Read today's scan_decisions CSV and return {symbol: row} using highest-priority
+    mode per symbol. Priority: longterm(3) > swing(2) > daytrade(1).
+    Rows without a mode column default to 'daytrade'.
+    """
+    _PRIORITY = {'longterm': 3, 'swing': 2, 'daytrade': 1}
+    best: dict[str, dict] = {}
     try:
-        result = subprocess.run(
-            _SCANNER_CMD,
-            cwd=Path(__file__).parent,
-            timeout=600,
-            check=False,
-        )
-        if result.returncode != 0:
-            logger.warning(f"Scanner exited with code {result.returncode}")
-            return False
-        logger.info(f"{label.capitalize()} scan complete — decisions CSV: {dec_path}")
-        return True
-    except subprocess.TimeoutExpired:
-        logger.error("Scanner timed out after 600 s")
-        return False
+        with open(dec_path, newline='') as f:
+            for row in csv.DictReader(f):
+                sym  = str(row.get('symbol', '')).strip().upper()
+                mode = str(row.get('mode', '') or 'daytrade').strip()
+                if not sym:
+                    continue
+                cur_pri = _PRIORITY.get(best[sym].get('mode', ''), 0) if sym in best else -1
+                if _PRIORITY.get(mode, 0) > cur_pri:
+                    best[sym] = dict(row)
+                    best[sym]['mode'] = mode
     except Exception as e:
-        logger.error(f"Failed to run scanner: {e}", exc_info=True)
-        return False
+        logger.warning(f"Could not load decisions with mode from {dec_path}: {e}")
+    return best
+
+
+def _compute_stops(symbol: str, entry: float, mode: str) -> tuple[float, float]:
+    """
+    Compute stop and target using ATR × MODES[mode] sl_mult / tp_mult.
+    Falls back to a heuristic % if ATR data is unavailable.
+    """
+    cfg = MODES.get(mode, MODES['swing'])
+    tf  = cfg.get('default_timeframe', '1d')
+    try:
+        period   = '5d' if tf != '1d' else '3mo'
+        interval = tf if tf != '1d' else '1d'
+        hist = yf.Ticker(symbol).history(period=period, interval=interval)
+        if len(hist) >= 5:
+            tr = pd.concat([
+                hist['High'] - hist['Low'],
+                (hist['High'] - hist['Close'].shift()).abs(),
+                (hist['Low']  - hist['Close'].shift()).abs(),
+            ], axis=1).max(axis=1)
+            atr    = tr.rolling(14).mean().iloc[-1]
+            stop   = round(entry - atr * cfg['sl_mult'], 4)
+            target = round(entry + atr * cfg['tp_mult'], 4)
+            return stop, target
+    except Exception:
+        pass
+    # Fallback: derive % from atr_mult × sl_mult heuristic
+    sl_pct = cfg.get('atr_mult', 0.5) * cfg.get('sl_mult', 2.0) / 100
+    tp_pct = cfg.get('atr_mult', 0.5) * cfg.get('tp_mult', 6.0) / 100
+    return round(entry * (1 - sl_pct), 4), round(entry * (1 + tp_pct), 4)
 
 
 # ── Signal file cleanup ──────────────────────────────────────────────────────
@@ -484,36 +596,42 @@ def run_once(decisions_date: Optional[str] = None,
     _init_feedback_csv(fb_path)
     state = _load_state(date_str)
 
-    # ── First run of the day: seed via scanner ────────────────────────────────
+    # ── Periodic re-scan: momentum_watch_daytrade.txt × 3 modes ──────────────
+    # Full ALL.txt scans are handled by cron (9:35 daytrade/swing, Monday longterm).
+    # Feedback agent only rescans the small 73-symbol momentum watchlist.
     did_rescan = False
-    if not state:
-        did_rescan = _run_scanner(dec_path, label="initial")
-        _cleanup_signal_files()
-        # Record rescan time so the next run doesn't immediately re-scan
+    meta = state.get('_meta', {})
+    last_rescan = meta.get('last_rescan_ts', 0)
+    if time.time() - last_rescan >= rescan_interval:
+        # Stamp BEFORE rescan starts so concurrent cron instances skip it
         state.setdefault('_meta', {})['last_rescan_ts'] = time.time()
-    else:
-        # ── Periodic re-scan to detect pipeline progress ──────────────────────
-        meta = state.get('_meta', {})
-        last_rescan = meta.get('last_rescan_ts', 0)
-        if time.time() - last_rescan >= rescan_interval:
-            did_rescan = _run_scanner(dec_path, label="re-scan")
-            _cleanup_signal_files()
-            state.setdefault('_meta', {})['last_rescan_ts'] = time.time()
+        _save_state(date_str, state)
+        did_rescan = _run_rescan(dec_path)
+        _cleanup_signal_files()
 
     check_ts = datetime.now(_NY_TZ)
 
     # ── Load decisions: one canonical entry per symbol (latest scan wins) ──────
     if not dec_path.exists():
-        logger.warning(f"Decisions file still missing after scan: {dec_path}")
+        logger.warning(f"Decisions file not found: {dec_path} — waiting for cron scan")
         return []
 
-    dec_df = pd.read_csv(dec_path, dtype=str)
+    dec_df = pd.read_csv(dec_path, dtype=str, index_col=False)
     if dec_df.empty:
         logger.info("Decisions CSV is empty.")
         return []
 
     # Deduplicate: keep the last row per symbol (most recent rejection)
     dec_df = dec_df.drop_duplicates(subset='symbol', keep='last')
+
+    # Build mode-priority map: {symbol: row_with_best_mode}
+    decisions_with_mode = _load_decisions_with_mode(dec_path)
+    mode_counts = {}
+    for r in decisions_with_mode.values():
+        m = r.get('mode', 'daytrade')
+        mode_counts[m] = mode_counts.get(m, 0) + 1
+    logger.info(f"Loaded {len(decisions_with_mode)} symbols from scan_decisions "
+                f"(modes: {', '.join(f'{m}={c}' for m, c in sorted(mode_counts.items()))})")
 
     symbols = dec_df['symbol'].dropna().str.strip().tolist()
     symbols = [s for s in symbols if s]
@@ -676,13 +794,10 @@ def run_once(decisions_date: Optional[str] = None,
 
         if prev_in_trade and prev_entry and prev_entry > 0:
             cur_bo_high  = max(prev_bo_high, current_price)
-            # Scalping: fixed-cent stops; otherwise percentage-based
-            if SCALP_TRAIL_CENTS > 0:
-                trail_stop = cur_bo_high - (SCALP_TRAIL_CENTS / 100.0)
-                fail_level = (live_prev_high or prev_entry) - (SCALP_FAIL_CENTS / 100.0)
-            else:
-                trail_stop = cur_bo_high * (1 - TRAIL_STOP_PCT / 100)
-                fail_level = (live_prev_high or prev_entry) * (1 - EXIT_BELOW_PCT / 100)
+            sym_mode     = decisions_with_mode.get(symbol, {}).get('mode', 'swing')
+            exit_pcts    = MODE_EXIT_PCT.get(sym_mode, MODE_EXIT_PCT['swing'])
+            trail_stop   = cur_bo_high * (1 - exit_pcts['trail'] / 100)
+            fail_level   = (live_prev_high or prev_entry) * (1 - exit_pcts['fail'] / 100)
 
             if current_price < fail_level:
                 exit_reason = 'FAILED'
@@ -759,24 +874,28 @@ def run_once(decisions_date: Optional[str] = None,
         if progress_detected and prev_reason and reason_code:
             progress_alerted_list.append(f"{prev_reason}->{reason_code}")
 
-        # ── Trade tracking state + Scalp Portfolio auto-trade ────────────
+        # ── Trade tracking state + Auto Portfolio auto-trade ─────────────
+        _bo_stop_px = _bo_target_px = 0.0
         if event == 'BREAKOUT':
             in_trade     = True
             entry_price  = current_price
             post_bo_high = current_price
-            # Auto-buy into scalp portfolio
-            stop_px   = current_price - (SCALP_FAIL_CENTS / 100.0)
-            target_px = current_price + (SCALP_TRAIL_CENTS * 2 / 100.0)
-            sp.add_position(
-                symbol, current_price, stop_px, target_px,
-                vol_ratio=vol_ratios.get(symbol, 0),
+            sym_mode     = decisions_with_mode.get(symbol, {}).get('mode', 'swing')
+            _bo_stop_px, _bo_target_px = _compute_stops(symbol, current_price, sym_mode)
+            result = ap.add_position_direct(
+                symbol, current_price, _bo_stop_px, _bo_target_px,
+                mode=sym_mode, vol_ratio=vol_ratios.get(symbol, 0),
+            )
+            logger.info(
+                f"  auto_portfolio add [{sym_mode}] {symbol}: "
+                f"stop={_bo_stop_px:.2f} target={_bo_target_px:.2f} → {result['reason']}"
             )
         elif event == 'EXIT':
             in_trade     = False
             entry_price  = 0
             post_bo_high = 0
-            # Auto-sell from scalp portfolio
-            sp.close_position(symbol, current_price, reason=exit_reason.lower())
+            # Auto-close from auto_portfolio
+            ap.close_position(symbol, current_price, reason=exit_reason.lower())
         else:
             in_trade     = prev_in_trade
             entry_price  = prev_entry
@@ -840,6 +959,9 @@ def run_once(decisions_date: Optional[str] = None,
                 alert['post_bo_high']  = prev_bo_high
             if event == 'BREAKOUT':
                 alert['vol_ratio'] = vol_ratios.get(symbol, 0)
+                alert['mode']      = decisions_with_mode.get(symbol, {}).get('mode', 'swing')
+                alert['stop']      = _bo_stop_px
+                alert['target']    = _bo_target_px
             alerts.append(alert)
             if event == 'PROGRESS':
                 logger.info(f"  ★ PROGRESS   {symbol:<8} {progress_detail}")
@@ -996,6 +1118,15 @@ def main() -> None:
 
     if args.summary:
         print_summary(args.date)
+        return
+
+    # Single-instance guard: skip if a previous cron run is still active.
+    # Uses a non-blocking exclusive lock; --loop mode waits (blocks) instead.
+    _lock_file = open('/tmp/feedback_agent.lock', 'w')
+    try:
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | (0 if args.loop else fcntl.LOCK_NB))
+    except BlockingIOError:
+        logger.info("Feedback agent already running — skipping this invocation")
         return
 
     logger.info(

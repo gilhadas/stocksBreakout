@@ -22,6 +22,7 @@ Usage:
   python monitor_watch.py --file scanner_output/lists/my.txt  # custom file
   python monitor_watch.py --dry-run                # print only, no Discord
   python monitor_watch.py --notify                 # force enable Discord
+  python monitor_watch.py --held-only              # only monitor open positions
 """
 
 import argparse
@@ -47,7 +48,7 @@ from yfinance_adapter import YFinanceAdapter
 from notifier import Notifier
 
 NY_TZ   = ZoneInfo('America/New_York')
-OUT_DIR = Path('scanner_output')
+OUT_DIR = Path('scanner_output') / 'state'
 
 # ── Default watch-list paths ──────────────────────────────────────────────────
 WATCH_FILES = {
@@ -72,6 +73,8 @@ def parse_args() -> argparse.Namespace:
                    help='Print results only — no Discord notifications sent')
     p.add_argument('--notify', action='store_true',
                    help='Send Discord notifications (default: only on cron)')
+    p.add_argument('--held-only', action='store_true',
+                   help='Only monitor symbols with open positions (ignore scanner watch list)')
     return p.parse_args()
 
 
@@ -280,8 +283,17 @@ def main() -> None:
     watch_file = args.file or WATCH_FILES.get(args.mode, WATCH_FILES['daytrade'])
     symbols    = load_watch_list(watch_file)
 
-    print(f'\n Momentum-Watch Monitor — {now_et.strftime("%Y-%m-%d %H:%M %Z")}')
-    print(f' File: {watch_file}  |  {len(symbols)} symbols')
+    # Filter to held positions only if requested
+    if args.held_only:
+        import scalp_portfolio as sp
+        portfolio = sp.load()
+        held_syms = sp.open_symbols(portfolio)
+        symbols = [s for s in symbols if s in held_syms]
+        print(f'\n Momentum-Watch Monitor — {now_et.strftime("%Y-%m-%d %H:%M %Z")} [HELD ONLY]')
+        print(f' Portfolio: {len(held_syms)} open position(s)  |  {len(symbols)} being monitored')
+    else:
+        print(f'\n Momentum-Watch Monitor — {now_et.strftime("%Y-%m-%d %H:%M %Z")}')
+        print(f' File: {watch_file}  |  {len(symbols)} symbols')
 
     if not symbols:
         print(' No symbols to monitor. Run Phase 1 scan first to populate the watch list.')
