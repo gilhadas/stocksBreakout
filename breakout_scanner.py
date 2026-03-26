@@ -819,8 +819,13 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
             price_map[symbol] = price
 
     # Trail stops upward (V9: activate trailing when TP reached)
+    # Mode-aware trailing: longterm 5%, swing 3%, daytrade/scalping 1%
+    _TRAIL_PCT_BY_MODE = {
+        'longterm': 0.05, 'swing': 0.03,
+        'daytrade': 0.01, 'scalping': 0.01,
+    }
     if from_auto_portfolio:
-        # Update stops in auto_portfolio.json directly (1% trail, no TP logic needed here)
+        # Update stops in auto_portfolio.json directly
         import auto_portfolio as _ap
         _ap_data_live = _ap.load()
         _pos_map = {p['symbol']: p for p in _ap_data_live.get('positions', [])}
@@ -829,9 +834,15 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
             current_price = price_map.get(symbol)
             if current_price is None:
                 continue
-            new_trailing_stop = round(current_price * 0.99, 2)
+            mode = pos.get('mode', 'swing').lower()
+            trail_pct = _TRAIL_PCT_BY_MODE.get(mode, 0.03)
+            new_trailing_stop = round(current_price * (1.0 - trail_pct), 2)
+            # Never let trailing stop exceed entry price (lock in risk, not loss)
+            entry = pos.get('entry', pos.get('entry_price', 0))
+            if entry > 0 and new_trailing_stop > entry:
+                new_trailing_stop = min(new_trailing_stop, round(entry * 1.005, 2))
             if new_trailing_stop > pos['stop']:
-                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f})")
+                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f}, {mode} trail {trail_pct:.0%})")
                 if symbol in _pos_map:
                     _pos_map[symbol]['stop'] = new_trailing_stop
                 pos['stop'] = new_trailing_stop
@@ -870,10 +881,12 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
                 except Exception as e:
                     logger.debug(f"ATR calc failed for {symbol}: {e}")
 
-            # Standard trailing: 1% below current price
-            new_trailing_stop = round(current_price * 0.99, 2)
+            # Mode-aware trailing stop
+            mode = pos.get('mode', 'swing').lower()
+            trail_pct = _TRAIL_PCT_BY_MODE.get(mode, 0.03)
+            new_trailing_stop = round(current_price * (1.0 - trail_pct), 2)
             if new_trailing_stop > pos['stop']:
-                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f})")
+                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f}, {mode} trail {trail_pct:.0%})")
                 _portfolio.update_stop(symbol, new_trailing_stop)
                 pos['stop'] = new_trailing_stop
     else:

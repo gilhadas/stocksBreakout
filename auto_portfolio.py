@@ -781,6 +781,11 @@ def add_position_direct(
     if cost > available_cash(data):
         return {'added': False, 'reason': 'no_cash'}
 
+    # Guard: stop must be BELOW entry price
+    if stop >= entry_price:
+        _trail_pct = {'longterm': 0.05, 'swing': 0.03, 'daytrade': 0.01, 'scalping': 0.01}
+        stop = entry_price * (1.0 - _trail_pct.get(mode, 0.05))
+
     now_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
     position = {
         'symbol':          symbol.upper(),
