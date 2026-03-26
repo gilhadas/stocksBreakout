@@ -679,12 +679,12 @@ def get_smoothed_regime(raw_regime: str) -> tuple:
     # Detect regime change
     regime_changed = (effective != current)
     if regime_changed:
-        state['last_regime_change'] = datetime.now().isoformat()
+        state['last_regime_change'] = datetime.now(_NY_TZ).isoformat()
         state['previous_regime'] = current
 
     # Update state
     state['current_regime'] = effective
-    state['last_updated'] = datetime.now().isoformat()
+    state['last_updated'] = datetime.now(_NY_TZ).isoformat()
     history.append(raw_regime)
     state['history'] = history[-10:]  # keep last 10 for debugging
 
@@ -748,7 +748,11 @@ def check_regime_cooldown(cooldown_hours: float) -> tuple:
         return False, 0.0
 
     last_change_dt = datetime.fromisoformat(last_change)
-    elapsed_hours = (datetime.now() - last_change_dt).total_seconds() / 3600
+    # Ensure both sides are timezone-aware (NY) for correct comparison
+    now = datetime.now(_NY_TZ)
+    if last_change_dt.tzinfo is None:
+        last_change_dt = last_change_dt.replace(tzinfo=_NY_TZ)
+    elapsed_hours = (now - last_change_dt).total_seconds() / 3600
     remaining = cooldown_hours - elapsed_hours
 
     if remaining > 0:

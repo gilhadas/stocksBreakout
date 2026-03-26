@@ -79,7 +79,7 @@ class MarketDataHandler:
                     df = util.df(bars).set_index('date')
 
             except Exception as e:
-                logger.debug(f"IB fetch failed for {symbol}: {e}")
+                logger.warning(f"IB fetch failed for {symbol}: {e}")
 
         # Fallback to yfinance
         if df is None and self.yf_fallback:

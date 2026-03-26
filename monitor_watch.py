@@ -486,6 +486,25 @@ def check_near_miss_triggers(notify: bool = False, dry_run: bool = False) -> Non
     if not entries:
         return
 
+    # Build set of portfolio-held symbols for filtering
+    held_syms: set[str] = set()
+    try:
+        import scalp_portfolio as sp
+        held_syms |= sp.open_symbols(sp.load())
+    except Exception:
+        pass
+    try:
+        import auto_portfolio as ap
+        held_syms |= ap.open_symbols(ap.load())
+    except Exception:
+        pass
+    try:
+        from portfolio import Portfolio
+        for pos in Portfolio().get_positions_as_exit_format():
+            held_syms.add(pos.get('symbol', '').upper())
+    except Exception:
+        pass
+
     adapter = YFinanceAdapter(use_disk_cache=False)
     triggered = []
     remaining = []
@@ -506,6 +525,10 @@ def check_near_miss_triggers(notify: bool = False, dry_run: bool = False) -> Non
                 remaining.append(entry['raw'])
                 continue
             current = float(today_bars['close'].iloc[-1])
+            # Stale guard: if price is >5% above prev_high the entry is outdated — discard silently
+            if current > entry['prev_high'] * 1.05 and sym not in held_syms:
+                print(f' ⚠️  NEAR-MISS STALE: {sym}  ${current:.2f} >> ${entry["prev_high"]:.2f} — removing')
+                continue   # don't add to remaining → clears from file
             if current > entry['prev_high']:
                 triggered.append({**entry, 'current': current})
                 print(f' ⚡ NEAR-MISS TRIGGERED: {sym}  ${current:.2f} > ${entry["prev_high"]:.2f}  (coiling since {entry["date"]})')

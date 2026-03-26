@@ -181,8 +181,13 @@ class ScannerOrchestrator:
                 return result
         
         tasks = [_scan_one((i, sym)) for i, sym in enumerate(watchlist, 1)]
-        results_raw = await asyncio.gather(*tasks)
-        results = [r for r in results_raw if r]
+        results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+        results = []
+        for r in results_raw:
+            if isinstance(r, Exception):
+                logger.warning(f"Symbol scan failed: {r}")
+            elif r:
+                results.append(r)
 
         # Stamp sizing context onto signals (for auto_portfolio)
         # Combine event-day and VIX multipliers (multiplicative)
@@ -384,12 +389,25 @@ class ScannerOrchestrator:
                                 )
                             else:
                                 signal = None
+                        # bear_macro: no cascade to BOUNCE/SMA20_CROSS, but allow
+                        # continuation detection (it has its own quality checks)
                         if signal is None:
-                            return None  # No BOUNCE or SMA20_CROSS in bear macro
+                            # Try continuation only — skip bounce/sma20_cross in bear macro
+                            signal = self.detector.detect_continuation(
+                                df, symbol, mode, timeframe, spy_perf
+                            )
+                            return signal
                     elif regime == 'BEARISH':
                         # Short-term pullback: breakouts still allowed, but no BOUNCE/SMA20_CROSS
-                        if signal is None:
-                            return None
+                        if signal is not None:
+                            # Breakout found — let it through
+                            pass
+                        else:
+                            # No breakout — allow continuation, block BOUNCE/SMA20_CROSS
+                            signal = self.detector.detect_continuation(
+                                df, symbol, mode, timeframe, spy_perf
+                            )
+                            return signal
 
                 # If no breakout signal, try alternative detectors (cascade)
                 if signal is None and detect_bounces:
@@ -411,7 +429,7 @@ class ScannerOrchestrator:
             
             except Exception as e:
                 if attempt == max_retries - 1:
-                    logger.debug(f"Failed {symbol}: {e}")
+                    logger.warning(f"Failed {symbol}: {e}")
                     return None
                 await asyncio.sleep(1)
         

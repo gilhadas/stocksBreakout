@@ -487,8 +487,9 @@ def refresh_prices() -> dict:
 
     data['positions'] = still_open
     # Realized P&L flows back into capital
-    for t in data['closed'][-len(closed_now):]:
-        data['capital'] += t['pnl']
+    if closed_now:
+        for t in data['closed'][-len(closed_now):]:
+            data['capital'] += t['pnl']
     _save(data)
     return {'closed': closed_now, 'updated': len(prices), 'data': data}
 

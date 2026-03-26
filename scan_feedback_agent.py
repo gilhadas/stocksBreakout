@@ -388,7 +388,7 @@ def _send_email_alerts(alerts: list[dict]) -> None:
 # Rescan merges momentum_watch_daytrade.txt (73) + 1_26_Setups.txt (147) = ~203 unique symbols
 _MOMENTUM_WATCHLIST = Path(OUTPUT_DIR) / 'lists' / 'momentum_watch_daytrade.txt'
 _CURATED_WATCHLIST  = Path('input') / '1_26_Setups.txt'
-_RESCAN_MODES       = ['daytrade', 'swing', 'longterm']
+_RESCAN_MODES       = ['daytrade', 'swing']   # longterm excluded: ~60 min/mode, handled by weekly cron
 
 
 def _build_rescan_watchlist() -> Path | None:
@@ -612,7 +612,11 @@ def run_once(decisions_date: Optional[str] = None,
     did_rescan = False
     meta = state.get('_meta', {})
     last_rescan = meta.get('last_rescan_ts', 0)
-    if time.time() - last_rescan >= rescan_interval:
+    _now_et = datetime.now(_NY_TZ)
+    _market_open  = _now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+    _market_close = _now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+    _in_market_hours = _market_open <= _now_et <= _market_close
+    if _in_market_hours and time.time() - last_rescan >= rescan_interval:
         # Stamp BEFORE rescan starts so concurrent cron instances skip it
         state.setdefault('_meta', {})['last_rescan_ts'] = time.time()
         _save_state(date_str, state)
@@ -1149,16 +1153,6 @@ def main() -> None:
     )
 
     while True:
-        # Market hours guard: only run during 9:30 AM – 4:30 PM ET (single-run always passes)
-        if args.loop:
-            now_et = datetime.now(_NY_TZ)
-            market_start = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-            market_end   = now_et.replace(hour=16, minute=30, second=0, microsecond=0)
-            if not (market_start <= now_et <= market_end):
-                logger.info(f"Outside market hours ({now_et:%H:%M} ET) — sleeping {args.interval}s")
-                time.sleep(args.interval)
-                continue
-
         try:
             run_once(args.date, rescan_interval=args.rescan_interval)
         except Exception as e:

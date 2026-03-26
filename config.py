@@ -340,7 +340,7 @@ V9H_REGIME_GATE = {
     'persistence_threshold': 2,    # scans needed to confirm regime change (0 = disabled)
     # Post-regime-change cooldown: suppress non-GOLD signals for N hours after a confirmed
     # regime transition. Prevents whipsaw re-entries during regime instability (HMM hysteresis).
-    'cooldown_hours':        12,   # hours to suppress signals after regime change (0 = disabled)
+    'cooldown_hours':        3,    # hours to suppress signals after regime change (0 = disabled)
     'cooldown_exempt_quality': ['GOLD'],  # signal qualities exempt from cooldown
     # Narrow exception: allow PREMIUM signals through bear_macro when vol+move are extreme.
     # Targets gap-up momentum surges (SATL, COIN-type) that have strong edge regardless of SPY.
