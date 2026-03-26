@@ -771,9 +771,10 @@ def _run_opening_check(args, now_et: datetime) -> int:
             lines.append(f"  … and {len(surges)-15} more")
         lines.append("")
         lines.append("→ Surging symbols appended to `momentum_watch_daytrade.txt`")
-        notifier = Notifier()
-        sent = notifier.send_discord(subject=subject, message='\n'.join(lines))
-        logger.info("Discord alert sent" if sent else "Discord alert failed")
+        # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+        # notifier = Notifier()
+        # sent = notifier.send_discord(subject=subject, message='\n'.join(lines))
+        logger.info("Opening surge alerts disabled (logged only)")
 
     return 0 if surges else 1
 
@@ -947,9 +948,10 @@ def main() -> int:
             prev_day_gainers=prev_day_gainers,
             x_trending=x_trending if x_trending else None,
         )
-        notifier = Notifier()
-        sent = notifier.send_discord(subject=subject, message=message)
-        logger.info("Discord alert sent" if sent else "Discord alert failed")
+        # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+        # notifier = Notifier()
+        # sent = notifier.send_discord(subject=subject, message=message)
+        logger.info("Premarket alerts disabled (logged only)")
 
     return 0 if all_watch else 1
 

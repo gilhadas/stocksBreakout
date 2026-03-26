@@ -311,8 +311,9 @@ class IBExecutor:
             )
 
             # Notify
-            if IB_EXEC_CONFIG['notify_on_fill']:
-                _notify_order(order_info, 'PLACED')
+            # Disabled PLACED notification: only FILLED and EXIT notifications are active
+            # if IB_EXEC_CONFIG['notify_on_fill']:
+            #     _notify_order(order_info, 'PLACED')
 
             return {'success': True, **order_info}
 
@@ -416,7 +417,8 @@ class IBExecutor:
 
         if ib_only or port_only or mismatches:
             logger.warning(f"Position sync mismatches: {result}")
-            _notify_sync(result)
+            # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+            # _notify_sync(result)
         else:
             logger.info(f"Positions in sync: {len(both)} positions match")
 

@@ -567,9 +567,10 @@ def run_health_check(data: dict | None = None) -> dict:
             _mark_alerted(alert_type)
 
     if alerts_to_send:
-        logger.info(f"Sending {len(alerts_to_send)} health alert(s)")
-        _send_health_discord(alerts_to_send)
-        _send_health_telegram(alerts_to_send)
+        # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+        logger.info(f"{len(alerts_to_send)} health alert(s) logged (notifications disabled)")
+        # _send_health_discord(alerts_to_send)
+        # _send_health_telegram(alerts_to_send)
     else:
         logger.debug("No health alerts to send (all within cooldown or OK)")
 

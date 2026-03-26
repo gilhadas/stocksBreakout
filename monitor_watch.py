@@ -443,8 +443,9 @@ def main() -> None:
                 )
             body = '\n'.join(lines)
 
-            notifier.send_discord(subject, body)
-            print(f'  📢 Sent 1 batched notification ({len(alerts)} alerts)')
+            # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+            # notifier.send_discord(subject, body)
+            print(f'  (monitor alerts disabled — {len(alerts)} alerts logged only)')
         except Exception as e:
             print(f'  ⚠️  Notification error: {e}')
     elif alerts and args.dry_run:
@@ -550,10 +551,11 @@ def check_near_miss_triggers(notify: bool = False, dry_run: bool = False) -> Non
                     f"(coiling since {t['date']}, {t['mode']})"
                     for t in triggered
                 ]
-                notifier.send_discord(
-                    f"⚡ Near-Miss Breakout: {len(triggered)} triggered",
-                    '\n'.join(lines)
-                )
+                # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+                # notifier.send_discord(
+                #     f"⚡ Near-Miss Breakout: {len(triggered)} triggered",
+                #     '\n'.join(lines)
+                # )
                 print(f'  📢 Sent near-miss trigger alert ({len(triggered)} symbols)')
             except Exception as e:
                 print(f'  ⚠️  Near-miss notification error: {e}')

@@ -724,8 +724,9 @@ async def run_check(csv_path: Path, ib, dry_run: bool = False,
         print(f"  {ticker:<8} {price_str:>10} {sr_str:>10} {bull:>5} {pred:>5} {vol_str:>6} {status:<15}")
 
     if alerts:
-        logger.info(f"🔔 {len(alerts)} alert(s) triggered!")
-        send_discord_alert(alerts, source=source, dry_run=dry_run)
+        logger.info(f"🔔 {len(alerts)} alert(s) triggered (notifications disabled — logged only)")
+        # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+        # send_discord_alert(alerts, source=source, dry_run=dry_run)
     else:
         logger.info(f"No new alerts (already notified: {len(state)} events)")
 
@@ -947,7 +948,8 @@ def run_backtest(csv_path: Path, date_str: str, dry_run: bool = False) -> int:
     if all_alerts:
         # Annotate source label with backtest date for Discord
         source = f"BACKTEST {date_str}"
-        send_discord_alert(all_alerts, source=source, dry_run=dry_run)
+        # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+        # send_discord_alert(all_alerts, source=source, dry_run=dry_run)
     else:
         logger.info("No alerts triggered — no notification sent")
 

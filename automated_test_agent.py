@@ -285,24 +285,12 @@ RESULTS:
 Check your dashboard or logs for full details.
 """
 
-    if notifier.email_enabled:
-        notifier.send_email(subject, body)
-        logger.info(f"✉️  Email sent: {subject}")
-    else:
-        logger.warning("⚠️  Email disabled in config.py")
-
-    # ─ Send Telegram notification (brief) ─
-    if notifier.telegram_enabled:
-        signal_count = stdout.count('\n') if stdout else 0
-        telegram_msg = (
-            f"✅ *{label}* completed at {now_et.strftime('%H:%M ET')}\n\n"
-            f"📧 Check email for detailed results.\n\n"
-            f"Signals found: {signal_count if signal_count > 0 else 'See email'}"
-        )
-        notifier.send_telegram(telegram_msg)
-        logger.info(f"📱 Telegram sent")
-    else:
-        logger.warning("⚠️  Telegram disabled in config.py")
+    # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+    # if notifier.email_enabled:
+    #     notifier.send_email(subject, body)
+    # if notifier.telegram_enabled:
+    #     notifier.send_telegram(telegram_msg)
+    logger.info(f"Test completion logged (notifications disabled): {subject}")
 
     logger.info("")
 

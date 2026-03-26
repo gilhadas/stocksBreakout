@@ -694,6 +694,7 @@ class Portfolio:
             f"({pnl_icon}{summary['total_pnl_pct']:.1f}%) | "
             f"{len(positions)} positions"
         )
-        notifier.send_all(subject=subject, message=body)
-        logger.info(f"Daily report sent: {subject}")
+        # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+        # notifier.send_all(subject=subject, message=body)
+        logger.info(f"Daily report logged (notifications disabled): {subject}")
         return body

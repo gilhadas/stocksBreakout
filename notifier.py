@@ -191,31 +191,30 @@ class Notifier:
         """Send Telegram notification"""
         try:
             config = NOTIFICATIONS['telegram']
-            
-            # Build message
+
+            # Build message (plain text — no Markdown to avoid parse errors)
             text = f"🚨 {message}\n\n"
-            
+
             if signals:
                 text += f"📊 Found {len(signals)} signals:\n\n"
                 for sig in signals[:5]:  # Limit to 5 in Telegram
-                    sector = f" [{sig['Sector']}]" if sig.get('Sector') else ""
+                    sector = f" ({sig['Sector']})" if sig.get('Sector') else ""
                     text += (
-                        f"🚀 *{sig['Symbol']}*{sector} ({sig['Quality']})\n"
-                        f"   💰 ${sig['Price']} | SL: ${sig['Stop']} | TP: ${sig['Target']}\n"
-                        f"   📈 R:R: {sig['R:R']} | Vol: {sig['Vol']}x\n\n"
+                        f"🚀 {sig['Symbol']}{sector} — {sig['Quality']}\n"
+                        f"   Price: ${sig['Price']} | SL: ${sig['Stop']} | TP: ${sig['Target']}\n"
+                        f"   R:R: {sig['R:R']} | Vol: {sig['Vol']}x\n\n"
                     )
-                
+
                 if len(signals) > 5:
                     text += f"... and {len(signals) - 5} more signals\n"
-            
-            # Send via Telegram Bot API
+
+            # Send via Telegram Bot API (no parse_mode — plain text avoids escaping issues)
             url = f"https://api.telegram.org/bot{config['bot_token']}/sendMessage"
             data = {
                 'chat_id': config['chat_id'],
                 'text': text,
-                'parse_mode': 'Markdown'
             }
-            
+
             response = requests.post(url, data=data, timeout=10)
             return response.status_code == 200
         

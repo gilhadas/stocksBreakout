@@ -1007,7 +1007,8 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
             portfolio_label = "Manual Portfolio"
         else:
             portfolio_label = "Portfolio"
-        notifier.send_monitor_alert(new_alerts, dashboard, portfolio_label=portfolio_label)
+        # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+        # notifier.send_monitor_alert(new_alerts, dashboard, portfolio_label=portfolio_label)
 
         # Record newly alerted symbols
         with open(alert_history_file, 'a') as f:
@@ -1694,10 +1695,11 @@ Examples:
         if args.notify or args.cron:
             _mode_tag = getattr(args, 'mode', 'unknown').upper()
             _input_tag = Path(getattr(args, 'file', '') or '').name or 'unknown'
-            notifier.send_all(
-                subject=f"❌ Scanner Error [{_mode_tag} | {_input_tag}]",
-                message=f"Scanner encountered an error: {str(e)}"
-            )
+            # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
+            # notifier.send_all(
+            #     subject=f"❌ Scanner Error [{_mode_tag} | {_input_tag}]",
+            #     message=f"Scanner encountered an error: {str(e)}"
+            # )
 
     finally:
         if ib is not None:
