@@ -504,11 +504,13 @@ def _compute_stops(symbol: str, entry: float, mode: str) -> tuple[float, float]:
     Falls back to a heuristic % if ATR data is unavailable.
     """
     cfg = MODES.get(mode, MODES['swing'])
-    tf  = cfg.get('default_timeframe', '1d')
+    # Normalize timeframe: config may store "1 day" or "1d" — always use yfinance format
+    tf_raw = cfg.get('default_timeframe', '1d')
+    is_daily = 'day' in tf_raw.lower() or tf_raw.strip() == '1d'
+    tf = '1d' if is_daily else tf_raw.replace(' ', '')
     try:
-        period   = '5d' if tf != '1d' else '3mo'
-        interval = tf if tf != '1d' else '1d'
-        hist = yf.Ticker(symbol).history(period=period, interval=interval)
+        period = '3mo' if is_daily else '5d'
+        hist = yf.Ticker(symbol).history(period=period, interval=tf)
         if len(hist) >= 5:
             tr = pd.concat([
                 hist['High'] - hist['Low'],
@@ -518,13 +520,21 @@ def _compute_stops(symbol: str, entry: float, mode: str) -> tuple[float, float]:
             atr    = tr.rolling(14).mean().iloc[-1]
             stop   = round(entry - atr * cfg['sl_mult'], 4)
             target = round(entry + atr * cfg['tp_mult'], 4)
-            return stop, target
-    except Exception:
-        pass
-    # Fallback: derive % from atr_mult × sl_mult heuristic
-    sl_pct = cfg.get('atr_mult', 0.5) * cfg.get('sl_mult', 2.0) / 100
-    tp_pct = cfg.get('atr_mult', 0.5) * cfg.get('tp_mult', 6.0) / 100
-    return round(entry * (1 - sl_pct), 4), round(entry * (1 + tp_pct), 4)
+            if stop < entry:   # sanity check: stop must be below entry for a long
+                return stop, target
+            logger.warning(f"_compute_stops({symbol}): ATR stop {stop} >= entry {entry}, using fallback")
+    except Exception as exc:
+        logger.warning(f"_compute_stops({symbol}): ATR fetch failed ({exc}), using fallback")
+    # Fallback: sensible fixed % by mode (atr_mult in config is a scanner param, not a % stop)
+    _FALLBACK_STOP_PCT = {'daytrade': 0.015, 'swing': 0.03, 'longterm': 0.05}
+    sl_pct = _FALLBACK_STOP_PCT.get(mode, 0.03)
+    tp_pct = sl_pct * cfg.get('tp_mult', 6.0) / max(cfg.get('sl_mult', 2.0), 0.001)
+    stop   = round(entry * (1 - sl_pct), 4)
+    target = round(entry * (1 + tp_pct), 4)
+    if stop >= entry:
+        logger.error(f"_compute_stops({symbol}): fallback also produced stop {stop} >= entry {entry}; skipping trade")
+        return None, None
+    return stop, target
 
 
 # ── Signal file cleanup ──────────────────────────────────────────────────────
@@ -877,15 +887,19 @@ def run_once(decisions_date: Optional[str] = None,
         # ── Trade tracking state + Auto Portfolio auto-trade ─────────────
         _bo_stop_px = _bo_target_px = 0.0
         if event == 'BREAKOUT':
-            in_trade     = True
-            entry_price  = current_price
-            post_bo_high = current_price
             sym_mode     = decisions_with_mode.get(symbol, {}).get('mode', 'swing')
             _bo_stop_px, _bo_target_px = _compute_stops(symbol, current_price, sym_mode)
+            if _bo_stop_px is None:
+                logger.warning(f"  BREAKOUT {symbol}: skipping portfolio add — invalid stop/target")
+                event = 'OK'   # suppress alert; don't add to portfolio
+            else:
+                in_trade     = True
+                entry_price  = current_price
+                post_bo_high = current_price
             result = ap.add_position_direct(
-                symbol, current_price, _bo_stop_px, _bo_target_px,
+                symbol, current_price, _bo_stop_px or 0.0, _bo_target_px or 0.0,
                 mode=sym_mode, vol_ratio=vol_ratios.get(symbol, 0),
-            )
+            ) if event == 'BREAKOUT' else {'reason': 'skipped_invalid_stop'}
             logger.info(
                 f"  auto_portfolio add [{sym_mode}] {symbol}: "
                 f"stop={_bo_stop_px:.2f} target={_bo_target_px:.2f} → {result['reason']}"
@@ -1135,6 +1149,16 @@ def main() -> None:
     )
 
     while True:
+        # Market hours guard: only run during 9:30 AM – 4:30 PM ET (single-run always passes)
+        if args.loop:
+            now_et = datetime.now(_NY_TZ)
+            market_start = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            market_end   = now_et.replace(hour=16, minute=30, second=0, microsecond=0)
+            if not (market_start <= now_et <= market_end):
+                logger.info(f"Outside market hours ({now_et:%H:%M} ET) — sleeping {args.interval}s")
+                time.sleep(args.interval)
+                continue
+
         try:
             run_once(args.date, rescan_interval=args.rescan_interval)
         except Exception as e:

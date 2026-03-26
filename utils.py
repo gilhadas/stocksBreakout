@@ -287,7 +287,7 @@ def load_json(local_path: str, s3_path: str = None):
 
 
 def save_json(data, local_path: str, s3_path: str = None):
-    """Save JSON file — writes to S3 (via raw s3fs) if cloud, else local.
+    """Save JSON file — always writes locally; also writes to S3 when cloud creds present.
 
     After writing, invalidates the s3fs cache so subsequent reads are fresh.
     This ensures Reset / Scan buttons take effect immediately without any TTL delay.
@@ -297,20 +297,20 @@ def save_json(data, local_path: str, s3_path: str = None):
 
     content = json.dumps(data, indent=2, default=str)
 
+    # Always write locally so the local filesystem stays in sync with S3
+    abs_path = _to_local_abs(local_path)
+    os.makedirs(os.path.dirname(abs_path) or '.', exist_ok=True)
+    with open(abs_path, 'w') as f:
+        f.write(content)
+
     if _is_cloud():
         try:
             fs = _s3_fs()
             with fs.open(s3_path, 'w') as f:
                 f.write(content)
             fs.invalidate_cache(s3_path)
-            return
         except Exception as e:
             logger.warning(f"S3 JSON write failed for {s3_path}: {e}")
-
-    abs_path = _to_local_abs(local_path)
-    os.makedirs(os.path.dirname(abs_path) or '.', exist_ok=True)
-    with open(abs_path, 'w') as f:
-        f.write(content)
 
 
 # ─── File listing (glob) ───────────────────────────────────────────────────

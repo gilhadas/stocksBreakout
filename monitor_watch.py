@@ -285,12 +285,30 @@ def main() -> None:
 
     # Filter to held positions only if requested
     if args.held_only:
-        import scalp_portfolio as sp
-        portfolio = sp.load()
-        held_syms = sp.open_symbols(portfolio)
+        held_syms: set[str] = set()
+        # scalp_portfolio
+        try:
+            import scalp_portfolio as sp
+            held_syms |= sp.open_symbols(sp.load())
+        except Exception:
+            pass
+        # auto_portfolio
+        try:
+            import auto_portfolio as ap
+            held_syms |= ap.open_symbols(ap.load())
+        except Exception:
+            pass
+        # manual portfolio.json
+        try:
+            from portfolio import Portfolio
+            _p = Portfolio()
+            for pos in _p.get_positions_as_exit_format():
+                held_syms.add(pos.get('symbol', '').upper())
+        except Exception:
+            pass
         symbols = [s for s in symbols if s in held_syms]
         print(f'\n Momentum-Watch Monitor — {now_et.strftime("%Y-%m-%d %H:%M %Z")} [HELD ONLY]')
-        print(f' Portfolio: {len(held_syms)} open position(s)  |  {len(symbols)} being monitored')
+        print(f' Portfolios: {len(held_syms)} open position(s)  |  {len(symbols)} on watch list')
     else:
         print(f'\n Momentum-Watch Monitor — {now_et.strftime("%Y-%m-%d %H:%M %Z")}')
         print(f' File: {watch_file}  |  {len(symbols)} symbols')

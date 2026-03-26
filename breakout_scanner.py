@@ -770,11 +770,12 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
                 'timeframe': _MODES.get(mode, _MODES['swing'])['default_timeframe'],
             })
         logger.info(f"Loaded {len(all_positions)} positions from auto_portfolio.json")
-    elif from_portfolio:
+    if from_portfolio:
         from portfolio import Portfolio
         _portfolio = Portfolio()
-        all_positions = _portfolio.get_positions_as_exit_format()
-        logger.info(f"Loaded {len(all_positions)} positions from portfolio.json")
+        manual_positions = _portfolio.get_positions_as_exit_format()
+        all_positions.extend(manual_positions)
+        logger.info(f"Loaded {len(manual_positions)} positions from portfolio.json")
     else:
         if not args.monitor:
             logger.warning("run_monitor_mode called without from_auto_portfolio/from_portfolio and no --monitor path")
@@ -1655,12 +1656,13 @@ Examples:
                 logger.info(f"Loaded {len(exit_positions)} positions from portfolio.json + auto_portfolio.json for exit evaluation")
 
         # Determine execution mode
-        if getattr(args, 'monitor_auto_portfolio', False):
-            # Auto portfolio monitoring mode (reads from auto_portfolio.json)
-            await run_monitor_mode(orchestrator, args, notifier, from_auto_portfolio=True)
-        elif getattr(args, 'monitor_portfolio', False):
-            # Manual portfolio monitoring mode (reads from portfolio.json)
-            await run_monitor_mode(orchestrator, args, notifier, from_portfolio=True)
+        if getattr(args, 'monitor_auto_portfolio', False) or getattr(args, 'monitor_portfolio', False):
+            # Monitor auto_portfolio.json and/or portfolio.json in one pass
+            await run_monitor_mode(
+                orchestrator, args, notifier,
+                from_auto_portfolio=getattr(args, 'monitor_auto_portfolio', False),
+                from_portfolio=getattr(args, 'monitor_portfolio', False),
+            )
         elif args.monitor:
             # Portfolio monitoring mode
             await run_monitor_mode(orchestrator, args, notifier)

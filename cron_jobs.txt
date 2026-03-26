@@ -117,13 +117,13 @@ HC_BASE=https://hc-ping.com
 # monitor_watch.py has built-in 9:30-16:15 ET market-hours guard — pre-market runs are no-ops.
 
 # Every weekday at 9:45 AM ET - First check after Phase 1 scan
-45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --held-only --notify >> scanner_output/logs/cron_watch_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every 10 minutes from 10:00 AM to 3:50 PM ET (raised from */15 for +14% critical coverage)
-*/10 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+*/10 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --held-only --notify >> scanner_output/logs/cron_watch_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 4:00 PM ET - Final check at market close
-0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN monitor_watch.py --held-only --notify >> scanner_output/logs/cron_watch_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================
@@ -147,15 +147,12 @@ HC_BASE=https://hc-ping.com
 # Every weekday at 9:30 AM ET - Reset alert history for new trading day
 30 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && mv scanner_output/state/.monitor_alerts.txt scanner_output/state/.monitor_alerts_$(date +\%Y\%m\%d).txt 2>/dev/null || true
 
-# Every weekday at 9:45 AM ET - First check after market open
-45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
-45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_auto_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
-# Every 15 minutes from 10:00 AM to 3:45 PM ET - Continuous monitoring
-*/15 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
-*/15 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_auto_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+# Every weekday at 9:45 AM ET - First check after market open (both portfolios in one pass)
+45 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+# Every 15 minutes from 10:00 AM to 3:45 PM ET - Continuous monitoring (both portfolios in one pass)
+*/15 10-15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every weekday at 4:00 PM ET - Final check + upload end-of-day portfolio state
-0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
-0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_auto_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+0 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # ============================================
 # PORTFOLIO HEALTH CHECK (advisory — never auto-closes)
