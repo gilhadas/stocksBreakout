@@ -30,7 +30,7 @@ except RuntimeError:
 
 from ib_insync import IB
 
-from config import IB_PAPER_PORT, IB_LIVE_PORT, IB_HOST, IB_CLIENT_ID, MODES, REGIME_CONFIG, OUTPUT_DIR
+from config import IB_PAPER_PORT, IB_LIVE_PORT, IB_HOST, IB_CLIENT_ID, MODES, REGIME_CONFIG, OUTPUT_DIR, V9H_REGIME_GATE
 from utils import (
     get_watchlist_from_file,
     get_positions_from_file,
@@ -355,50 +355,56 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         # BOUNCE quality gate: GOLD only (PREMIUM bounce avg -1.97% P&L; GOLD avg +1.72%).
         if getattr(args, 'auto_positions', None):
             from utils import append_signals_to_positions
-            _is_true_red = market_warning and 'RED MARKET' in market_warning
-            _is_bearish  = market_warning and 'BEARISH MARKET' in market_warning
-            _is_choppy   = market_warning and 'CHOPPY MARKET' in market_warning
 
-            if _is_true_red:
-                # RED_MARKET (SPY < -1.5%): 0% WR historically — block all longs.
-                # Only CONTINUATION/Momentum GOLD survive (own catalyst, not market-correlated).
-                safe_signals = [
-                    s for s in results
-                    if s.get('Type') in ('CONTINUATION', 'Momentum') and s.get('Quality') == 'GOLD'
-                ]
-                blocked = len(results) - len(safe_signals)
-                logger.warning(f"⚠️  RED MARKET — blocked {blocked} signals; only CONTINUATION/Momentum GOLD allowed.")
-            elif _is_choppy:
-                # CHOPPY (SPY flat, low vol): block SMA20_CROSS (mass-fires, 0% alpha).
-                # CONTINUATION = 100% WR in CHOPPY; BOUNCE GOLD allowed.
-                safe_signals = [
-                    s for s in results
-                    if s.get('Type') == 'CONTINUATION'
-                    or (s.get('Type') in ('BOUNCE', 'Momentum') and s.get('Quality') == 'GOLD')
-                ]
-                blocked = len(results) - len(safe_signals)
-                if blocked:
-                    logger.warning(f"⚠️  CHOPPY — blocked {blocked} signals; passing CONTINUATION + BOUNCE/Momentum GOLD.")
-            elif _is_bearish:
-                # BEARISH (SPY -0.5% to -1.5%): 37% WR — allow BOUNCE GOLD + CONTINUATION.
-                # Block SMA20_CROSS (against market direction).
-                safe_signals = [
-                    s for s in results
-                    if s.get('Type') in ('CONTINUATION', 'Momentum')
-                    or (s.get('Type') == 'BOUNCE' and s.get('Quality') == 'GOLD')
-                ]
-                blocked = len(results) - len(safe_signals)
-                if blocked:
-                    logger.warning(f"⚠️  BEARISH — blocked {blocked} SMA20_CROSS; allowing CONTINUATION + BOUNCE GOLD ({len(safe_signals)} signals).")
+            if V9H_REGIME_GATE['enabled']:
+                # V9-H: regime gating active — block signals by market condition
+                _is_true_red = market_warning and 'RED MARKET' in market_warning
+                _is_bearish  = market_warning and 'BEARISH MARKET' in market_warning
+                _is_choppy   = market_warning and 'CHOPPY MARKET' in market_warning
+
+                if _is_true_red:
+                    safe_signals = [
+                        s for s in results
+                        if s.get('Type') in ('CONTINUATION', 'Momentum') and s.get('Quality') == 'GOLD'
+                    ]
+                    blocked = len(results) - len(safe_signals)
+                    logger.warning(f"⚠️  RED MARKET — blocked {blocked} signals; only CONTINUATION/Momentum GOLD allowed.")
+                elif _is_choppy:
+                    safe_signals = [
+                        s for s in results
+                        if s.get('Type') == 'CONTINUATION'
+                        or (s.get('Type') in ('BOUNCE', 'Momentum') and s.get('Quality') == 'GOLD')
+                    ]
+                    blocked = len(results) - len(safe_signals)
+                    if blocked:
+                        logger.warning(f"⚠️  CHOPPY — blocked {blocked} signals; passing CONTINUATION + BOUNCE/Momentum GOLD.")
+                elif _is_bearish:
+                    safe_signals = [
+                        s for s in results
+                        if s.get('Type') in ('CONTINUATION', 'Momentum')
+                        or (s.get('Type') == 'BOUNCE' and s.get('Quality') == 'GOLD')
+                    ]
+                    blocked = len(results) - len(safe_signals)
+                    if blocked:
+                        logger.warning(f"⚠️  BEARISH — blocked {blocked} SMA20_CROSS; allowing CONTINUATION + BOUNCE GOLD ({len(safe_signals)} signals).")
+                else:
+                    safe_signals = [
+                        s for s in results
+                        if s.get('Type') != 'BOUNCE' or s.get('Quality') == 'GOLD'
+                    ]
+                    blocked = len(results) - len(safe_signals)
+                    if blocked:
+                        logger.info(f"ℹ️  NORMAL — filtered {blocked} BOUNCE non-GOLD; BOUNCE requires GOLD quality.")
             else:
-                # NORMAL/EXPANSION: all types, but BOUNCE requires GOLD quality
+                # V9-C: no regime gating — all PREMIUM+ signals pass through.
+                # Only filter: BOUNCE requires GOLD quality (always, regardless of regime).
                 safe_signals = [
                     s for s in results
                     if s.get('Type') != 'BOUNCE' or s.get('Quality') == 'GOLD'
                 ]
                 blocked = len(results) - len(safe_signals)
                 if blocked:
-                    logger.info(f"ℹ️  NORMAL — filtered {blocked} BOUNCE non-GOLD; BOUNCE requires GOLD quality.")
+                    logger.info(f"V9-C: filtered {blocked} BOUNCE non-GOLD (BOUNCE always requires GOLD quality)")
 
             if safe_signals:
                 append_signals_to_positions(safe_signals, args.auto_positions, args.mode)
@@ -525,25 +531,58 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         watchlist_name = Path(args.file).stem  # Get filename without extension
         subject_prefix = "⚠️ " if market_warning else "🚨 "
         warning_line = f"\n\n⚠️ {market_warning}" if market_warning else ""
+
+        # Apply same regime filter to notifications as portfolio auto-add.
+        # Don't notify about signals that are blocked — avoids confusing alerts.
+        if V9H_REGIME_GATE['enabled']:
+            _is_true_red = market_warning and 'RED MARKET' in market_warning
+            _is_bearish  = market_warning and 'BEARISH MARKET' in market_warning
+            _is_choppy   = market_warning and 'CHOPPY MARKET' in market_warning
+            if _is_true_red:
+                notifiable = [
+                    s for s in results
+                    if s.get('Type') in ('CONTINUATION', 'Momentum') and s.get('Quality') == 'GOLD'
+                ]
+            elif _is_choppy:
+                notifiable = [
+                    s for s in results
+                    if s.get('Type') == 'CONTINUATION'
+                    or (s.get('Type') in ('BOUNCE', 'Momentum') and s.get('Quality') == 'GOLD')
+                ]
+            elif _is_bearish:
+                notifiable = [
+                    s for s in results
+                    if s.get('Type') in ('CONTINUATION', 'Momentum')
+                    or (s.get('Type') == 'BOUNCE' and s.get('Quality') == 'GOLD')
+                ]
+            else:
+                notifiable = results
+        else:
+            # V9-C: no regime gating — notify all signals
+            notifiable = results
+
         v9c_signals = [
-            s for s in results
+            s for s in notifiable
             if s.get('Quality') in ('GOLD', 'PREMIUM')
             and (s.get('MinerviniScore') or 0) >= 7
         ]
         bounce_signals = [
-            s for s in results
+            s for s in notifiable
             if s.get('Quality') == 'GOLD'   # GOLD only — PREMIUM bounces have negative expected value
             and s.get('Type') == 'BOUNCE'
             and s not in v9c_signals
         ]
         # CONTINUATION and SMA20_CROSS signals (no Minervini requirement)
         alt_signals = [
-            s for s in results
+            s for s in notifiable
             if s.get('Quality') in ('GOLD', 'PREMIUM')
             and s.get('Type') in ('CONTINUATION', 'SMA20_CROSS')
             and s not in v9c_signals and s not in bounce_signals
         ]
         notify_signals = v9c_signals + bounce_signals + alt_signals
+        n_blocked = len(results) - len(notifiable)
+        if n_blocked:
+            logger.info(f"Regime filter: {n_blocked} signal(s) blocked from notification")
         if notify_signals:
             n_v9c   = len(v9c_signals)
             n_bnc   = len(bounce_signals)
@@ -1221,7 +1260,7 @@ async def run_simulation_mode(args, ib, data_source='auto'):
     
     for symbol in set(sig['symbol'] for sig in all_signals):
         try:
-            # key in all_historical_data might be different if symbol format changed? 
+            # key in all_historicalclu_data might be different if symbol format changed? 
             # But we used 'symbol' variable in loop, so it should be same.
             df = all_historical_data.get(symbol)
             

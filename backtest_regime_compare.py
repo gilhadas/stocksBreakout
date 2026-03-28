@@ -88,8 +88,9 @@ def fetch_all_data(symbols, start_date, end_date):
         if df is not None and len(df) >= 50:
             historical[sym] = df
             end_prices[sym] = float(df['close'].iloc[-1])
-        if (i + 1) % 20 == 0:
-            print(f"    Fetched {i+1}/{len(all_syms)}...")
+        if (i + 1) % 20 == 0 or (i + 1) == len(all_syms):
+            pct = (i + 1) / len(all_syms) * 100
+            print(f"    Fetched {i+1}/{len(all_syms)} ({pct:.1f}%)...", flush=True)
 
     print(f"  Loaded {len(historical)-1} symbols (+ SPY)")
     return historical, end_prices
@@ -278,7 +279,11 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
 
     print(f"  [{config.upper()}] Scanning {len(symbols)} symbols × {len(sim_dates)} days × {len(modes)} modes...")
 
+    total_days = len(sim_dates)
     for day_idx, sim_date in enumerate(sim_dates):
+        if (day_idx + 1) % 25 == 0 or day_idx == 0 or (day_idx + 1) == total_days:
+            pct = (day_idx + 1) / total_days * 100
+            print(f"    [{config.upper()}] Progress: {day_idx+1}/{total_days} days ({pct:.1f}%) — {sim_date.strftime('%Y-%m-%d')}", flush=True)
         # Day-level regime
         regime, spy_pct, vol_pct = ('NORMAL', 0.0, 0.5) if spy_df is None \
             else classify_day_regime(spy_df, sim_date)

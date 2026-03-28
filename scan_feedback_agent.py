@@ -10,7 +10,7 @@ Runs every 5 min (or --interval). On each pass it:
   2. Fetches their current price via yfinance.
   3. Compares against persisted state (scan_decisions_state_YYYYMMDD.json).
   4. Fires a Discord alert when:
-       BREAKOUT  – price crossed above prev_high
+       BREAKOUT  – scanner confirms breakout (price > prev_close + full indicator validation)
        PROGRESS  – symbol advanced deeper through the scanner pipeline
        SURGE     – price moved ≥ SURGE_THRESHOLD% since last check
        FLIP      – direction changed (UP→DOWN, etc.)
@@ -61,10 +61,7 @@ MODE_EXIT_PCT = {
     'swing':    {'fail': 1.0,  'trail': 2.5},
     'longterm': {'fail': 2.0,  'trail': 4.0},
 }
-CONFIRM_PASSES     = 1     # consecutive passes above prev_high (1 = immediate; backtest showed 2 adds no value)
-VOL_MULT           = 2.0   # require bar volume ≥ Xx 20-bar avg at BREAKOUT (backtest: +6 pts WR)
-MIN_BREAKOUT_PCT   = 0.2   # min % above prev_high before firing BREAKOUT
-MIN_STAGE_BREAKOUT = 5     # only fire BREAKOUT for symbols rejected at stage ≥ this (0=off)
+CONFIRM_PASSES     = 1     # consecutive passes above prev_close (1 = immediate; backtest showed 2 adds no value)
 
 # Pipeline stage depth — higher number = symbol got further through the scanner.
 # Matches the actual gate order in orchestrator.py → scanner.py.
@@ -181,6 +178,136 @@ def _fetch_prices(symbols: list[str]) -> tuple[dict[str, float], dict[str, float
         return {}, {}
 
 
+# ── Previous day close (daily-level reference for BREAKOUT detection) ─────────
+
+_prev_close_cache: dict[str, float] = {}
+_prev_close_date: str = ''
+
+
+def _fetch_prev_close(symbols: list[str]) -> dict[str, float]:
+    """Batch-fetch previous trading day's close for each symbol.
+
+    Cached per calendar day — the value doesn't change intraday.
+    Returns {symbol: prev_day_close_price}.
+    """
+    global _prev_close_cache, _prev_close_date
+    today = datetime.now(_NY_TZ).strftime('%Y%m%d')
+    if _prev_close_date == today and _prev_close_cache:
+        # Filter to requested symbols (may be subset)
+        return {s: _prev_close_cache[s] for s in symbols if s in _prev_close_cache}
+
+    if not symbols:
+        return {}
+    try:
+        raw = yf.download(
+            symbols, period='5d', interval='1d',
+            progress=False, auto_adjust=True,
+            group_by='ticker' if len(symbols) > 1 else None,
+        )
+        result: dict[str, float] = {}
+        if len(symbols) == 1:
+            sym = symbols[0]
+            closes = raw['Close'].dropna()
+            if len(closes) >= 2:
+                # Last row may be today's partial bar; use second-to-last
+                last_date = closes.index[-1]
+                if hasattr(last_date, 'date') and last_date.date() == datetime.now(_NY_TZ).date():
+                    result[sym] = float(closes.iloc[-2])
+                else:
+                    result[sym] = float(closes.iloc[-1])
+        else:
+            for sym in symbols:
+                try:
+                    closes = raw[sym]['Close'].dropna()
+                    if len(closes) >= 2:
+                        last_date = closes.index[-1]
+                        if hasattr(last_date, 'date') and last_date.date() == datetime.now(_NY_TZ).date():
+                            result[sym] = float(closes.iloc[-2])
+                        else:
+                            result[sym] = float(closes.iloc[-1])
+                except Exception:
+                    pass
+        _prev_close_cache = result
+        _prev_close_date = today
+        logger.info(f"Fetched prev_close for {len(result)}/{len(symbols)} symbols")
+        return result
+    except Exception as e:
+        logger.warning(f"prev_close batch fetch failed: {e}")
+        return {}
+
+
+# ── Scanner-based BREAKOUT validation ─────────────────────────────────────────
+
+_spy_perf_cache: tuple[float, float] = (0.0, 0.0)  # (value, timestamp)
+
+
+def _get_spy_perf() -> float:
+    """Get SPY 15-day performance, cached for 15 minutes."""
+    global _spy_perf_cache
+    val, ts = _spy_perf_cache
+    if time.time() - ts < 900:
+        return val
+    try:
+        spy = yf.Ticker('SPY').history(period='1mo', interval='1d')
+        if len(spy) >= 15:
+            perf = (spy['Close'].iloc[-1] / spy['Close'].iloc[-15]) - 1
+        else:
+            perf = 0.0
+        _spy_perf_cache = (float(perf), time.time())
+        return float(perf)
+    except Exception:
+        return _spy_perf_cache[0]
+
+
+def _mode_to_yf_params(mode: str) -> tuple[str, str]:
+    """Map trading mode to yfinance (interval, period)."""
+    return {
+        'daytrade': ('15m', '5d'),
+        'scalping': ('5m',  '2d'),
+    }.get(mode, ('1d', '6mo'))
+
+
+def _validate_breakout_with_scanner(
+    symbol: str, mode: str, detector, regime: str = 'NORMAL'
+) -> dict | None:
+    """Run the full scanner pipeline to validate a potential breakout.
+
+    Returns the signal dict if confirmed, None otherwise.
+    """
+    cfg = MODES.get(mode, MODES['swing'])
+    yf_interval, yf_period = _mode_to_yf_params(mode)
+
+    try:
+        hist = yf.Ticker(symbol.replace(' ', '-')).history(
+            period=yf_period, interval=yf_interval
+        )
+        if hist is None or hist.empty:
+            return None
+        # Scanner expects lowercase columns (same as yfinance_adapter.py:139)
+        hist.columns = hist.columns.str.lower()
+
+        min_bars = cfg.get('trend_period', 50)
+        if len(hist) < min_bars:
+            return None
+
+        spy_perf = _get_spy_perf()
+
+        # Map yf interval to IB-style timeframe the scanner expects
+        tf_map = {'15m': '15 mins', '5m': '5 mins', '1d': '1 day'}
+        timeframe = tf_map.get(yf_interval, '1 day')
+
+        signal = detector.detect(
+            hist, symbol, mode, timeframe,
+            spy_perf=spy_perf,
+            regime=regime,
+            use_scoring=True,
+        )
+        return signal
+    except Exception as e:
+        logger.debug(f"Scanner validation failed for {symbol}: {e}")
+        return None
+
+
 # ── Direction ─────────────────────────────────────────────────────────────────
 
 def _direction(pct: float) -> str:
@@ -228,7 +355,7 @@ def _send_discord_alerts(alerts: list[dict]) -> None:
         pct_scan = alert['pct_from_scan']
         pct_last = alert['pct_since_last']
         reason   = alert['reason_code']
-        prev_h   = alert.get('prev_high')
+        prev_cl  = alert.get('prev_close')
 
         title = f"[FEEDBACK] {symbol} — {event}"
 
@@ -280,9 +407,30 @@ def _send_discord_alerts(alerts: list[dict]) -> None:
                 f"**vs last check:** {pct_last:+.2f}%",
                 f"**Rejected for:** {reason}",
             ]
-            if prev_h and event == 'BREAKOUT':
-                vol_info = f"  vol={alert.get('vol_ratio', 0):.1f}x" if alert.get('vol_ratio') else ''
-                lines.append(f"**Prev high:** ${prev_h:.2f} ← crossed ✓{vol_info}")
+            if event == 'BREAKOUT':
+                quality = alert.get('quality', '')
+                rr_val  = alert.get('rr', 0)
+                vol_r   = alert.get('vol_ratio', 0)
+                rsi_val = alert.get('rsi', '')
+                patterns = alert.get('patterns', '')
+                lines = [
+                    f"**Scanner confirmed: {quality}**",
+                    f"**Price:** ${cur:.2f}",
+                ]
+                if prev_cl:
+                    lines.append(f"**Prev close:** ${prev_cl:.2f} ← crossed ✓")
+                if rr_val:
+                    lines.append(f"**R:R:** {rr_val:.1f}")
+                if vol_r:
+                    lines.append(f"**Volume:** {vol_r:.1f}x")
+                if rsi_val:
+                    lines.append(f"**RSI:** {rsi_val}")
+                if patterns:
+                    lines.append(f"**Patterns:** {patterns}")
+                stop_val = alert.get('stop', 0)
+                tgt_val  = alert.get('target', 0)
+                if stop_val and tgt_val:
+                    lines.append(f"**Stop:** ${stop_val:.2f}  |  **Target:** ${tgt_val:.2f}")
 
         embed = {
             'title':       title,
@@ -321,22 +469,29 @@ def _send_telegram_alerts(alerts: list[dict]) -> None:
     for alert in alerts:
         symbol = alert['symbol']
         cur    = alert['current_price']
-        prev_h = alert.get('prev_high')
+        prev_cl = alert.get('prev_close')
         vol    = alert.get('vol_ratio', 0)
 
         mode     = alert.get('mode', 'swing')
+        quality  = alert.get('quality', '')
         stop_val = alert.get('stop', 0)
         tgt_val  = alert.get('target', 0)
+        rr_val   = alert.get('rr', 0)
+        patterns = alert.get('patterns', '')
         lines = [
-            f"BREAKOUT [{mode.upper()}]: {symbol}",
+            f"BREAKOUT [{mode.upper()}] {quality}: {symbol}",
             f"Price: ${cur:.2f}",
         ]
-        if prev_h:
-            lines.append(f"Prev High: ${prev_h:.2f}")
+        if prev_cl:
+            lines.append(f"Prev Close: ${prev_cl:.2f}")
         if vol:
             lines.append(f"Vol: {vol:.1f}x")
+        if rr_val:
+            lines.append(f"R:R: {rr_val:.1f}")
         if stop_val:
             lines.append(f"Stop: ${stop_val:.2f} | Target: ${tgt_val:.2f}")
+        if patterns:
+            lines.append(f"Patterns: {patterns}")
 
         text = '\n'.join(lines)
         try:
@@ -365,17 +520,21 @@ def _send_email_alerts(alerts: list[dict]) -> None:
 
     lines = []
     for alert in alerts:
-        symbol = alert['symbol']
-        cur    = alert['current_price']
-        prev_h = alert.get('prev_high')
-        vol    = alert.get('vol_ratio', 0)
-        pct    = alert.get('pct_from_scan', 0)
+        symbol  = alert['symbol']
+        cur     = alert['current_price']
+        prev_cl = alert.get('prev_close')
+        vol     = alert.get('vol_ratio', 0)
+        pct     = alert.get('pct_from_scan', 0)
+        quality = alert.get('quality', '')
+        rr_val  = alert.get('rr', 0)
 
-        lines.append(f"• {symbol} @ ${cur:.2f}  ({pct:+.1f}% from scan)")
-        if prev_h:
-            lines.append(f"  Broke above prev high: ${prev_h:.2f}")
+        lines.append(f"• {symbol} @ ${cur:.2f}  ({pct:+.1f}% from scan) — {quality}")
+        if prev_cl:
+            lines.append(f"  Broke above prev close: ${prev_cl:.2f}")
         if vol:
             lines.append(f"  Vol: {vol:.1f}x")
+        if rr_val:
+            lines.append(f"  R:R: {rr_val:.1f}")
         lines.append('')
 
     body = f"BREAKOUT alert — {len(alerts)} symbol(s)\n\n" + '\n'.join(lines)
@@ -690,6 +849,13 @@ def run_once(decisions_date: Optional[str] = None,
     # ── Fetch current prices + volume ratios (batch) ────────────────────────
     prices, vol_ratios = _fetch_prices(symbols)
 
+    # ── Fetch previous day close for all symbols (cached per day) ─────────
+    prev_closes = _fetch_prev_close(symbols)
+
+    # ── BreakoutDetector instance: reused for all scanner validations ─────
+    from scanner import BreakoutDetector
+    _detector = BreakoutDetector()
+
     for _, row in dec_df.iterrows():
         symbol      = str(row.get('symbol', '')).strip()
         reason_code = str(row.get('reason_code', '')).strip()
@@ -698,15 +864,11 @@ def run_once(decisions_date: Optional[str] = None,
         if not symbol:
             continue
 
-        # Parse scan_price and prev_high
+        # Parse scan_price
         try:
             scan_price = float(row.get('price', '') or 'nan')
         except ValueError:
             scan_price = float('nan')
-        try:
-            prev_high = float(row.get('prev_high', '') or 'nan')
-        except ValueError:
-            prev_high = float('nan')
 
         # Parse score (for low_score sub-progress)
         try:
@@ -730,21 +892,10 @@ def run_once(decisions_date: Optional[str] = None,
         # base_price: always the real market price at FIRST observation.
         base_price = prev.get('base_price') if not is_first_check else current_price
 
-        # prev_high from CSV: reject if >20% away from current price (bad data)
-        prev_high_raw = prev_high
-        if not pd.isna(prev_high_raw) and abs(prev_high_raw - current_price) / current_price > 0.20:
-            prev_high_raw = float('nan')
-
-        # Lock prev_high: once set, never let a rescan lower it (prevents
-        # false breakouts from yfinance data instability — see MPC 2026-03-10).
-        saved_prev_high = prev.get('prev_high')
-        if not pd.isna(prev_high_raw):
-            if saved_prev_high and saved_prev_high > 0:
-                live_prev_high = max(saved_prev_high, prev_high_raw)
-            else:
-                live_prev_high = prev_high_raw
-        else:
-            live_prev_high = saved_prev_high
+        # prev_close: previous trading day's close (daily-level resistance).
+        # Replaces the old intraday consolidation prev_high which was meaningless.
+        prev_close = prev_closes.get(symbol)
+        live_prev_high = prev_close  # backward-compat alias used in EXIT tracking
 
         pct_from_scan = (
             (current_price - base_price) / base_price * 100
@@ -786,7 +937,7 @@ def run_once(decisions_date: Optional[str] = None,
             progress_detail = f"score improved {prev_best_score} -> {score_str}"
 
         # ── Compute confirmation pass count ──────────────────────────────────
-        # Tracks how many consecutive 5-min passes price has been above prev_high
+        # Tracks how many consecutive 5-min passes price has been above prev_close
         # (only relevant before first BREAKOUT alert)
         prev_confirm_count = prev.get('confirm_count', 0)
         if (not is_first_check
@@ -823,38 +974,30 @@ def run_once(decisions_date: Optional[str] = None,
 
         # ── Detect events ─────────────────────────────────────────────────────
         event = 'OK'
+        _scanner_signal = None  # populated only on confirmed BREAKOUT
 
         if exit_reason:
             event = 'EXIT'
         elif (
             not is_first_check
-            and live_prev_high is not None
+            and prev_close is not None
+            and current_price > prev_close
             and not prev.get('alerted_breakout', False)
             and confirm_count >= CONFIRM_PASSES
         ):
-            # ── Quality filters (data-driven from backtest comparison) ────
-            bo_ok = True
-
-            # Pipeline-stage filter: skip early-stage rejections (no setup context)
-            if MIN_STAGE_BREAKOUT > 0:
-                sym_stage = STAGE_DEPTH.get(reason_code, -1)
-                if sym_stage < MIN_STAGE_BREAKOUT:
-                    bo_ok = False
-
-            # Min distance above level
-            if bo_ok and MIN_BREAKOUT_PCT > 0 and live_prev_high > 0:
-                dist_pct = (current_price - live_prev_high) / live_prev_high * 100
-                if dist_pct < MIN_BREAKOUT_PCT:
-                    bo_ok = False
-
-            # Volume confirmation: last bar vol vs 20-bar trailing avg
-            if bo_ok and VOL_MULT > 1.0:
-                vr = vol_ratios.get(symbol, 0)
-                if vr < VOL_MULT:
-                    bo_ok = False
-
-            if bo_ok:
+            # Stage 1 passed: price above previous day's close.
+            # Stage 2: run full scanner pipeline to validate the breakout.
+            sym_mode = decisions_with_mode.get(symbol, {}).get('mode', 'swing')
+            _scanner_signal = _validate_breakout_with_scanner(
+                symbol, sym_mode, _detector,
+            )
+            if _scanner_signal is not None:
                 event = 'BREAKOUT'
+                logger.info(
+                    f"  ✓ Scanner confirmed {symbol} [{sym_mode}] "
+                    f"Quality={_scanner_signal.get('Quality')} "
+                    f"R:R={_scanner_signal.get('R:R')}"
+                )
         elif progress_detected:
             event = 'PROGRESS'
         elif (
@@ -890,10 +1033,18 @@ def run_once(decisions_date: Optional[str] = None,
 
         # ── Trade tracking state + Auto Portfolio auto-trade ─────────────
         _bo_stop_px = _bo_target_px = 0.0
-        if event == 'BREAKOUT':
+        _bo_quality = _bo_rr = _bo_patterns = ''
+        if event == 'BREAKOUT' and _scanner_signal:
             sym_mode     = decisions_with_mode.get(symbol, {}).get('mode', 'swing')
-            _bo_stop_px, _bo_target_px = _compute_stops(symbol, current_price, sym_mode)
-            if _bo_stop_px is None:
+            _bo_stop_px  = _scanner_signal.get('Stop', 0)
+            _bo_target_px = _scanner_signal.get('Target', 0)
+            _bo_quality  = _scanner_signal.get('Quality', '')
+            _bo_rr       = _scanner_signal.get('R:R', 0)
+            _bo_patterns = _scanner_signal.get('Patterns', '')
+            if not _bo_stop_px or _bo_stop_px >= current_price:
+                # Fallback to ATR-based stops if scanner signal has bad data
+                _bo_stop_px, _bo_target_px = _compute_stops(symbol, current_price, sym_mode)
+            if _bo_stop_px is None or _bo_stop_px >= current_price:
                 logger.warning(f"  BREAKOUT {symbol}: skipping portfolio add — invalid stop/target")
                 event = 'OK'   # suppress alert; don't add to portfolio
             else:
@@ -906,7 +1057,8 @@ def run_once(decisions_date: Optional[str] = None,
             ) if event == 'BREAKOUT' else {'reason': 'skipped_invalid_stop'}
             logger.info(
                 f"  auto_portfolio add [{sym_mode}] {symbol}: "
-                f"stop={_bo_stop_px:.2f} target={_bo_target_px:.2f} → {result['reason']}"
+                f"stop={_bo_stop_px or 0:.2f} target={_bo_target_px or 0:.2f} "
+                f"quality={_bo_quality} R:R={_bo_rr} → {result['reason']}"
             )
         elif event == 'EXIT':
             in_trade     = False
@@ -921,7 +1073,7 @@ def run_once(decisions_date: Optional[str] = None,
 
         state[symbol] = {
             'base_price':        base_price,
-            'prev_high':         live_prev_high,
+            'prev_close':        prev_close,
             'reason_code':       reason_code,
             'prev_reason_code':  prev_reason if did_rescan and prev_reason else prev.get('prev_reason_code', ''),
             'first_seen_ts':     first_seen,
@@ -945,7 +1097,7 @@ def run_once(decisions_date: Optional[str] = None,
             'first_seen_ts':   first_seen,
             'reason_code':     reason_code,
             'scan_price':      f'{base_price:.4f}' if base_price else '',
-            'prev_high':       f'{live_prev_high:.4f}' if live_prev_high else '',
+            'prev_high':       f'{prev_close:.4f}' if prev_close else '',
             'current_price':   f'{current_price:.4f}',
             'pct_from_scan':   f'{pct_from_scan:.2f}' if not pd.isna(pct_from_scan) else '',
             'pct_since_last':  f'{pct_since_last:.2f}' if not pd.isna(pct_since_last) else '',
@@ -965,7 +1117,7 @@ def run_once(decisions_date: Optional[str] = None,
                 'current_price':    current_price,
                 'pct_from_scan':    pct_from_scan if not pd.isna(pct_from_scan) else 0.0,
                 'pct_since_last':   pct_since_last if not pd.isna(pct_since_last) else 0.0,
-                'prev_high':        live_prev_high,
+                'prev_close':       prev_close,
                 'progress_detail':  progress_detail,
                 'score':            f'{row_score}/{row_score_max}' if row_score else None,
             }
@@ -980,6 +1132,11 @@ def run_once(decisions_date: Optional[str] = None,
                 alert['mode']      = decisions_with_mode.get(symbol, {}).get('mode', 'swing')
                 alert['stop']      = _bo_stop_px
                 alert['target']    = _bo_target_px
+                alert['quality']   = _bo_quality
+                alert['rr']        = _bo_rr
+                alert['patterns']  = _bo_patterns
+                alert['win_prob']  = _scanner_signal.get('WinProb', '') if _scanner_signal else ''
+                alert['rsi']       = _scanner_signal.get('RSI', '') if _scanner_signal else ''
             alerts.append(alert)
             if event == 'PROGRESS':
                 logger.info(f"  ★ PROGRESS   {symbol:<8} {progress_detail}")
