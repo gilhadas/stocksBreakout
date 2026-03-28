@@ -601,6 +601,75 @@ def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
     return 'NORMAL'
 
 
+def filter_signals_by_regime(
+    signals: list[dict],
+    regime: str | None,
+    v9h_enabled: bool,
+) -> tuple[list[dict], int]:
+    """Filter signals by market regime — single source of truth.
+
+    Called by both portfolio auto-add and notification paths in
+    breakout_scanner.py.  Keeps regime logic in one place instead of
+    duplicating it across layers.
+
+    Rules
+    -----
+    * V9-C (v9h_enabled=False): no regime blocking.
+      Only universal rule: BOUNCE requires GOLD quality.
+    * V9-H (v9h_enabled=True):
+
+      +--------------+----------------------------------------------+
+      | Regime       | Allowed signals                              |
+      +--------------+----------------------------------------------+
+      | RED_MARKET   | CONTINUATION / Momentum — GOLD only          |
+      | CHOPPY       | CONTINUATION always; BOUNCE/Momentum GOLD    |
+      | BEARISH      | CONTINUATION/Momentum always; BOUNCE GOLD;   |
+      |              | SMA20_CROSS blocked                          |
+      | NORMAL /     | Everything; BOUNCE requires GOLD             |
+      | EXPANSION    |                                              |
+      +--------------+----------------------------------------------+
+
+    Returns (filtered_signals, blocked_count).
+    """
+    if not signals:
+        return [], 0
+
+    def _bounce_gold_only(s: dict) -> bool:
+        """Universal rule: BOUNCE requires GOLD quality."""
+        return s.get('Type') != 'BOUNCE' or s.get('Quality') == 'GOLD'
+
+    if not v9h_enabled:
+        # V9-C: no regime gating — only BOUNCE-GOLD universal rule
+        filtered = [s for s in signals if _bounce_gold_only(s)]
+        return filtered, len(signals) - len(filtered)
+
+    # V9-H: regime-aware filtering
+    if regime == 'RED_MARKET':
+        filtered = [
+            s for s in signals
+            if s.get('Type') in ('CONTINUATION', 'Momentum')
+            and s.get('Quality') == 'GOLD'
+        ]
+    elif regime == 'CHOPPY':
+        filtered = [
+            s for s in signals
+            if s.get('Type') == 'CONTINUATION'
+            or (s.get('Type') in ('BOUNCE', 'Momentum')
+                and s.get('Quality') == 'GOLD')
+        ]
+    elif regime == 'BEARISH':
+        filtered = [
+            s for s in signals
+            if s.get('Type') in ('CONTINUATION', 'Momentum')
+            or (s.get('Type') == 'BOUNCE' and s.get('Quality') == 'GOLD')
+        ]
+    else:
+        # NORMAL / EXPANSION / None — only BOUNCE-GOLD universal rule
+        filtered = [s for s in signals if _bounce_gold_only(s)]
+
+    return filtered, len(signals) - len(filtered)
+
+
 def get_smoothed_regime(raw_regime: str) -> tuple:
     """
     Apply HMM-like temporal smoothing to regime classification.
