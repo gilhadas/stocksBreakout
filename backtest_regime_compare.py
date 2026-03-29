@@ -375,7 +375,8 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
 def simulate(signals, start_date, end_date, end_prices, historical,
              capital=100_000, tp_as_trail=True, label='', regime_sizing=False,
              slippage_pct=0.0, commission=0.0,
-             max_positions=0, dd_breaker_pct=0.0):
+             max_positions=0, dd_breaker_pct=0.0,
+             bear_macro_mult=1.0):
     """
     Simple, self-contained simulation that avoids SimulationMode bugs.
     - Enters at signal price on signal date
@@ -387,6 +388,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
     - regime_sizing=True: scales position size down in weak regimes
     - max_positions: cap on concurrent open positions (0=unlimited)
     - dd_breaker_pct: if portfolio DD exceeds this (e.g. 0.15), cut size to 25%
+    - bear_macro_mult: position size multiplier when signal.bear_macro=True (1.0=full, 0.5=half)
     """
     if not signals:
         print(f"  [{label}] No signals → skip")
@@ -479,6 +481,8 @@ def simulate(signals, start_date, end_date, end_prices, historical,
             mult *= dd_mult  # apply DD breaker sizing
             if regime_sizing:
                 mult *= REGIME_SIZE.get(sig.get('regime', 'NORMAL'), 1.0)
+            if bear_macro_mult < 1.0 and sig.get('bear_macro', False):
+                mult *= bear_macro_mult
             qty_by_val  = int(cap * MAX_POS_PCT * mult / price)
             qty_by_risk = int(cap * MAX_RISK_PCT * mult / risk_per_share)
             qty = min(qty_by_val, qty_by_risk)
@@ -909,6 +913,94 @@ def run_year(year, symbols, watchlist_path, limit, capital,
                    tp_as_trail=True, label='V9-H3 Full', max_positions=8,
                    dd_breaker_pct=0.15, **sim_kw)
     print_report(rpt, 'V9-H3  V9-C + MaxPos=8 + DD15%', len(v9c_signals), spy_info)
+
+    # ── V9-D: Regime as POST-FILTER + POSITION SIZING (not signal blocker) ──
+    # Uses V9-C signal pipeline (proven best), applies regime intelligence via:
+    #   1. BEARISH post-filter: drop signals generated during BEARISH regime
+    #   2. Bear macro sizing: reduce position size when SPY < SMA200
+    #   3. Combined: both BEARISH filter + bear_macro sizing
+    # Key insight: regime info is valuable for SIZING, not for BLOCKING signals
+    print(f"\n{'─'*80}")
+    print(f"[V9-D — V9-C signals + Regime as Post-Filter & Sizing]")
+    print(f"  Approach: same V9-C signals, regime used for filtering/sizing ONLY")
+    print(f"{'─'*80}")
+
+    # Tag V9-C signals with bear_macro + regime
+    # NOTE: run_scan(config='old') sets bear_macro=False for all signals,
+    # so we ALWAYS recompute it here from SPY data
+    spy_df_raw = historical.get('SPY')
+    v9c_tagged = []
+    for s in v9c_signals:
+        s_copy = dict(s)
+        if spy_df_raw is not None:
+            s_copy['bear_macro'] = is_spy_below_sma200(spy_df_raw, s['date'])
+            regime_tag, _, _ = classify_day_regime(spy_df_raw, s['date'])
+            s_copy['regime'] = regime_tag
+        v9c_tagged.append(s_copy)
+
+    n_bearish = sum(1 for s in v9c_tagged if s.get('regime') == 'BEARISH')
+    n_bear_macro = sum(1 for s in v9c_tagged if s.get('bear_macro'))
+    n_red = sum(1 for s in v9c_tagged if s.get('regime') == 'RED_MARKET')
+    print(f"  V9-C signals: {len(v9c_tagged)} total")
+    print(f"    BEARISH regime: {n_bearish} | RED_MARKET: {n_red} | bear_macro (SPY<SMA200): {n_bear_macro}")
+
+    # ── V9-D1: Drop BEARISH regime only (22.2% WR, -3.28% avg, -13.4% P&L share)
+    v9d_no_bearish = [s for s in v9c_tagged if s.get('regime') != 'BEARISH']
+    print(f"\n  V9-D1: Drop BEARISH signals → {len(v9d_no_bearish)} signals ({n_bearish} dropped)")
+
+    rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-D1', **sim_kw)
+    print_report(rpt, 'V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
+
+    # ── V9-D2: Bear macro position sizing (reduce, not block)
+    for bm_mult in [0.25, 0.50, 0.75]:
+        rpt = simulate(v9c_tagged, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label=f'V9-D2 bm={bm_mult}',
+                       bear_macro_mult=bm_mult, **sim_kw)
+        print_report(rpt, f'V9-D2  V9-C + bear_macro size={bm_mult:.0%}',
+                     len(v9c_tagged), spy_info)
+
+    # ── V9-D3: Combined — drop BEARISH + bear_macro sizing
+    for bm_mult in [0.25, 0.50]:
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label=f'V9-D3 bm={bm_mult}',
+                       bear_macro_mult=bm_mult, **sim_kw)
+        print_report(rpt, f'V9-D3  − BEARISH + bear_macro={bm_mult:.0%}',
+                     len(v9d_no_bearish), spy_info)
+
+    # ── V9-D4: Combined — drop BEARISH + regime-based sizing (no bear_macro)
+    rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-D4', regime_sizing=True, **sim_kw)
+    print_report(rpt, 'V9-D4  − BEARISH + regime sizing', len(v9d_no_bearish), spy_info)
+
+    # ── V9-D5: Combined — drop BEARISH + bear_macro sizing + regime sizing
+    rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-D5',
+                   regime_sizing=True, bear_macro_mult=0.50, **sim_kw)
+    print_report(rpt, 'V9-D5  − BEARISH + regime + bm=50%', len(v9d_no_bearish), spy_info)
+
+    # ── V9-D6: BEARISH block + bear_macro block (compare sizing vs blocking)
+    v9d_no_bear_all = [s for s in v9c_tagged
+                       if s.get('regime') != 'BEARISH' and not s.get('bear_macro')]
+    print(f"\n  V9-D6 (block both): {len(v9d_no_bear_all)} signals "
+          f"(dropped {len(v9c_tagged) - len(v9d_no_bear_all)})")
+    rpt = simulate(v9d_no_bear_all, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='V9-D6', **sim_kw)
+    print_report(rpt, 'V9-D6  − BEARISH − bear_macro (block)', len(v9d_no_bear_all), spy_info)
+
+    # ── Summary: V9-C bear_macro trade quality breakdown
+    if v9c_tagged:
+        bear_sigs = [s for s in v9c_tagged if s.get('bear_macro')]
+        bull_sigs = [s for s in v9c_tagged if not s.get('bear_macro')]
+        print(f"\n  Signal breakdown:")
+        print(f"    BULL_MACRO: {len(bull_sigs)} signals")
+        print(f"    BEAR_MACRO: {len(bear_sigs)} signals")
+        for regime in ['RED_MARKET', 'BEARISH', 'NORMAL', 'EXPANSION', 'CHOPPY']:
+            n = sum(1 for s in v9c_tagged if s.get('regime') == regime)
+            if n:
+                bm = sum(1 for s in v9c_tagged
+                         if s.get('regime') == regime and s.get('bear_macro'))
+                print(f"      {regime}: {n} total ({bm} during bear_macro)")
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────

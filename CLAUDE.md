@@ -74,5 +74,11 @@ Full results: `scanner_output/backtests/backtest_200.txt` | Summary: `scanner_ou
 | 2025 | Mixed  | +18.89% | **+50.23%** | +37.42% | +31.34% |
 
 **Why V9-H failed:** SMA200 filter dropped too many valid signals in bull years (e.g. 2022 only 85/535 passed → -27.5% return). MaxPos=8/3 cap made it worse.
+Also: V9-H used a different signal pipeline (`collect_signals_hybrid`) vs V9-C (`collect_signals_old`), making the comparison apples-to-oranges. The 10-day cooldown amplified small pipeline differences into wildly divergent trade populations.
 
-**V9-C rules:** PREMIUM+ quality threshold, trailing stop exit, no regime gating, no SMA200 filter.
+**V9-D1 rules (active config, 2026-03-29):** V9-C base + block BEARISH regime signals.
+- BEARISH = SPY down 0.5–1.5% over 15 days (only ~5% of trading days)
+- BEARISH trades: 22.2% WR, -3.28% avg P&L, -13.4% P&L share → proven poison
+- Implemented in `filter_signals_by_regime()` in utils.py (one-line post-filter)
+- 4yr/200sym backtest: V9-D1 compound +123.4% vs V9-C +121.5% vs V9-H +33.5%
+- Bear macro sizing was tested and rejected — destroys recovery-phase returns
