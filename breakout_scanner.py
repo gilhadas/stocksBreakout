@@ -300,11 +300,11 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         spy_pct = spy_perf * 100
 
         if regime == 'CHOPPY':
-            market_warning = f"CHOPPY MARKET — SPY {spy_pct:+.2f}%, vol {spy_vol:.2f}%. Avoid new entries, breakouts likely to fail."
+            market_warning = f"CHOPPY MARKET — SPY {spy_pct:+.2f}%, vol {spy_vol:.2f}%. Breakouts may fail in low-conviction environment."
         elif regime == 'RED_MARKET':
-            market_warning = f"RED MARKET — SPY {spy_pct:+.2f}%. Blocking long entries: 0% WR, -4.55% avg P&L on red days."
+            market_warning = f"RED MARKET — SPY {spy_pct:+.2f}%. Signals still active (RED_MARKET contributed +55.8% of backtest P&L)."
         elif regime == 'BEARISH':
-            market_warning = f"BEARISH MARKET — SPY {spy_pct:+.2f}%. Prefer oversold bounces; gate SMA20_CROSS."
+            market_warning = f"BEARISH MARKET — SPY {spy_pct:+.2f}%. All signals blocked (22.2% WR, -3.28% avg P&L)."
 
         if market_warning:
             logger.warning(f"\n{'!'*70}")

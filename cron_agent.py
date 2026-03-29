@@ -95,8 +95,8 @@ class CronJob:
             return False
         if self.month != -1 and dt.month != self.month:
             return False
-        if self.weekday != [-1] and dt.weekday() not in self.weekday:
-            # Convert Python weekday (0=Mon) to cron (0=Sun)
+        if self.weekday != [-1]:
+            # Convert Python weekday (0=Mon) to cron format (0=Sun)
             cron_weekday = (dt.weekday() + 1) % 7
             if cron_weekday not in self.weekday:
                 return False
