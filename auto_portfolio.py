@@ -284,6 +284,47 @@ def scan_and_add(min_date: str | None = None,
     data['processed_files'] = sorted(processed)
     _save(data)
 
+    # ── Notify on newly added positions ──────────────────────────────────────
+    if added_syms:
+        try:
+            from notifier import Notifier
+            _notifier = Notifier()
+            _signals = [
+                {
+                    'Symbol':  p['symbol'],
+                    'Price':   p['entry_price'],
+                    'Stop':    p['stop'],
+                    'Target':  p['target'],
+                    'R:R':     round((p['target'] - p['entry_price']) / max(p['entry_price'] - p['stop'], 1e-6), 2),
+                    'Vol':     '',
+                    'Quality': p['quality'],
+                    'Mode':    p['mode'],
+                    'Sector':  p.get('sector', ''),
+                    'Type':    'AUTO_PORTFOLIO',
+                    'Shares':  p['shares'],
+                    'Cost':    p['cost'],
+                }
+                for p in data['positions']
+                if p['symbol'] in added_syms
+            ]
+            _notifier.send_all(
+                subject=f"📋 Auto Portfolio: {len(added_syms)} position(s) added — {', '.join(added_syms)}",
+                message=(
+                    f"{len(added_syms)} new position(s) added to auto portfolio.\n\n"
+                    + "\n".join(
+                        f"• {s['Symbol']} [{s['Mode'].upper()}] @ ${s['Price']:.2f} | "
+                        f"SL: ${s['Stop']:.2f} | TP: ${s['Target']:.2f} | "
+                        f"R:R: {s['R:R']} | {s['Shares']} shares"
+                        for s in _signals
+                    )
+                ),
+                signals=_signals,
+                notification_type='signals',
+            )
+        except Exception as _e:
+            import logging as _log
+            _log.getLogger(__name__).warning(f"Auto portfolio notification failed: {_e}")
+
     # Advisory health check — trigger when signals skipped due to low cash
     if skipped_cash:
         try:

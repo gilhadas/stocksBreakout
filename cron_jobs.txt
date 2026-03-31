@@ -41,7 +41,7 @@ HC_BASE=https://hc-ping.com
 # ============================================
 # TEST JOB (remove after testing)
 # ============================================
-#* * * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/test_watch.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --export-premium scanner_output/lists/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+#* * * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/test_watch.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --export-premium scanner_output/lists/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================
@@ -51,7 +51,7 @@ HC_BASE=https://hc-ping.com
 # Every Monday at 9:00 AM ET - Phase 1: S&P 500 wide scan, export PREMIUM tickers
 0 9 * * 1 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --mode longterm --bounce --sector-buzz --export-premium scanner_output/lists/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import scan_and_add; scan_and_add()" >> scanner_output/logs/cron_longterm.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_longterm_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every Monday at 9:15 AM ET - Long-term exit evaluation (no signal file, portfolio only)
-15 9 * * 1 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/ALL.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+15 9 * * 1 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/ALL.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================
@@ -59,17 +59,17 @@ HC_BASE=https://hc-ping.com
 # ============================================
 
 # Every weekday at 9:35 AM ET - Phase 1: S&P 500 wide scan
-35 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import scan_and_add; scan_and_add()" >> scanner_output/logs/cron_swing.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+35 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import scan_and_add; scan_and_add()" >> scanner_output/logs/cron_swing_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every weekday at 10:00 AM ET - Morning exit check + price refresh (catches overnight gaps / failed entries from prev day)
-0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/1_26_setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import refresh_prices; refresh_prices()" >> scanner_output/logs/cron_swing_exit.log 2>&1
+0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/1_26_setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import refresh_prices; refresh_prices()" >> scanner_output/logs/cron_swing_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 3:45 PM ET - Swing exit evaluation + price refresh (auto-portfolio positions only)
-45 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/1_26_setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import refresh_prices; refresh_prices()" >> scanner_output/logs/cron_swing_exit.log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+45 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/1_26_setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import refresh_prices; refresh_prices()" >> scanner_output/logs/cron_swing_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 4:30 PM ET - Phase 2: Re-evaluate all open positions + exit check
-30 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/positions_swing_mock.csv --mode swing --bounce --exit-from-portfolio --both --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+30 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/positions_swing_mock.csv --mode swing --bounce --exit-from-portfolio --both --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every weekday at 7:30 PM ET - Evening re-evaluation of all open positions
-30 19 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/positions_swing_mock.csv --mode swing --bounce --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_evening.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+30 19 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/positions_swing_mock.csv --mode swing --bounce --sentiment --auto-positions scanner_output/lists/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_evening_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_swing_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================
@@ -80,15 +80,15 @@ HC_BASE=https://hc-ping.com
 # Discord alert if IBIT or any priority symbol gaps >= 3% before open.
 
 # Every weekday at 8:00 AM ET - First pre-market check (1.5 hrs before open)
-0  8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --notify >> scanner_output/logs/cron_premarket.log 2>&1
+0  8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --notify >> scanner_output/logs/cron_premarket_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 8:45 AM ET - Second check (45 min before open, fresher data)
-45 8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --notify >> scanner_output/logs/cron_premarket.log 2>&1
+45 8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --notify >> scanner_output/logs/cron_premarket_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 9:31 AM ET - Opening surge check: first-minute momentum on pre-market watch list
 # Reads premarket_watch.txt → flags symbols breaking above PM high or surging on volume
 # Appends them to momentum_watch_daytrade.txt BEFORE Phase 1 runs at 9:35
-31 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --open-check --notify >> scanner_output/logs/cron_premarket.log 2>&1
+31 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN premarket_monitor.py --open-check --notify >> scanner_output/logs/cron_premarket_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================
@@ -96,17 +96,17 @@ HC_BASE=https://hc-ping.com
 # ============================================
 
 # Every weekday at 9:35 AM ET - Phase 1: S&P 500 wide scan, export PREMIUM + momentum-watch
-35 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --export-momentum-watch scanner_output/lists/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import scan_and_add; scan_and_add()" >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+35 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --export-momentum-watch scanner_output/lists/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import scan_and_add; scan_and_add()" >> scanner_output/logs/cron_daytrade_morning_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every weekday at 10:00 AM ET - Phase 2: Re-evaluate momentum-watch tickers
-0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 2:00 PM ET - Phase 2: Re-evaluate momentum-watch tickers
-0 14 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+0 14 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every weekday at 3:30 PM ET - Day trade exit check (auto-portfolio positions only)
-30 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/1_26_setups.txt --mode daytrade --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+30 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/1_26_setups.txt --mode daytrade --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_daytrade_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 8:20 PM ET - Phase 4: Evening re-evaluate momentum-watch tickers
-20 20 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+20 20 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py scanner_output/lists/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions scanner_output/lists/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_daytrade_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================
@@ -159,10 +159,10 @@ HC_BASE=https://hc-ping.com
 # ============================================
 
 # Every weekday at 10:00 AM ET - After morning scans, check cash + diversity + stale positions
-0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health.log 2>&1
+0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # Every weekday at 3:00 PM ET - Afternoon check before close
-0 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health.log 2>&1
+0 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================
@@ -170,9 +170,9 @@ HC_BASE=https://hc-ping.com
 # ============================================
 
 # Every weekday at 8:30 PM ET - Validate signals from 3+ days ago
-30 20 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN validate_signals.py validate-all --min-age-days 3 >> scanner_output/logs/cron_validate.log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/signal_reports >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+30 20 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN validate_signals.py validate-all --min-age-days 3 >> scanner_output/logs/cron_validate_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/signal_reports >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every Sunday at 9:00 PM ET - Generate learning recommendations
-0 21 * * 0 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN validate_signals.py learn >> scanner_output/logs/cron_learn.log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/signal_reports >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+0 21 * * 0 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN validate_signals.py learn >> scanner_output/logs/cron_learn_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/signal_reports >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # ============================================
 # MAINTENANCE TASKS
@@ -183,4 +183,4 @@ HC_BASE=https://hc-ping.com
 #   logs: 7d (rotate at 5MB)   scan_decisions CSVs: 30d (header-only deleted immediately)
 #   state JSONs: 7d             scan_feedback CSVs: 90d
 #   rejections: 14d             exits/signals: 30d    outcomes: 60d
-0 23 * * 0 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN cleanup_outputs.py >> scanner_output/logs/cron_cleanup.log 2>&1
+0 23 * * 0 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN cleanup_outputs.py >> scanner_output/logs/cron_cleanup_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
