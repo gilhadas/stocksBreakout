@@ -169,7 +169,7 @@ def _render_manual_portfolio():
 
         df_pos = pd.DataFrame(rows)
         pnl_cols = [c for c in ['Change%', 'P&L $'] if c in df_pos.columns]
-        styled = df_pos.style.applymap(_color_pnl, subset=pnl_cols)
+        styled = df_pos.style.map(_color_pnl, subset=pnl_cols)
         st.dataframe(styled, use_container_width=True, hide_index=True)
     else:
         st.info("No open positions. Buy a position below.")
@@ -617,7 +617,7 @@ def _render_auto_portfolio():
         })
 
         df_open = pd.DataFrame(rows)
-        styled_open = df_open.style.applymap(
+        styled_open = df_open.style.map(
             _color_pnl, subset=[c for c in ['Chg%', 'Unr. P&L', 'To Stop%'] if c in df_open.columns]
         )
         st.dataframe(styled_open, use_container_width=True, hide_index=True)
@@ -821,7 +821,7 @@ def _render_auto_portfolio():
                 'Shares':    t.get('shares', ''),
             })
         df_hist = pd.DataFrame(hist_rows)
-        styled_hist = df_hist.style.applymap(
+        styled_hist = df_hist.style.map(
             _color_pnl, subset=[c for c in ['P&L $', 'P&L%'] if c in df_hist.columns]
         )
         st.dataframe(styled_hist, use_container_width=True, hide_index=True)
@@ -884,9 +884,9 @@ def _render_auto_portfolio():
             df_history['Value'] = df_history['Value'].apply(
                 lambda x: f"${x:,.0f}" if isinstance(x, (int, float)) and x else ''
             )
-            styled_history = df_history.style.applymap(
+            styled_history = df_history.style.map(
                 _color_pnl, subset=['P&L']
-            ).applymap(
+            ).map(
                 lambda v: 'color: green' if v == 'BUY' else ('color: red' if v == 'SELL' else ''),
                 subset=['Action']
             )
@@ -935,7 +935,7 @@ def _render_auto_portfolio():
             f"Would-be winners: {total_hyp_wins}/{len(skipped)}"
         )
         df_missed = pd.DataFrame(missed_rows)
-        styled_missed = df_missed.style.applymap(
+        styled_missed = df_missed.style.map(
             _color_pnl,
             subset=[c for c in ['Chg%', 'Hyp. P&L'] if c in df_missed.columns]
         )
@@ -1054,7 +1054,7 @@ def _render_scalping_portfolio():
         })
 
         df_open = pd.DataFrame(rows)
-        styled_open = df_open.style.applymap(
+        styled_open = df_open.style.map(
             _color_pnl, subset=[c for c in ['Chg%', 'Unr. P&L'] if c in df_open.columns]
         )
         st.dataframe(styled_open, use_container_width=True, hide_index=True)
@@ -1124,7 +1124,7 @@ def _render_scalping_portfolio():
                 'Vol':     f"{t.get('vol_ratio', 0):.1f}x",
             })
         df_hist = pd.DataFrame(hist_rows)
-        styled_hist = df_hist.style.applymap(
+        styled_hist = df_hist.style.map(
             _color_pnl, subset=[c for c in ['P&L $', 'P&L%'] if c in df_hist.columns]
         )
         st.dataframe(styled_hist, use_container_width=True, hide_index=True)
@@ -1253,7 +1253,7 @@ def _render_watch_lists():
                 # Style quality column
                 styled = df.style
                 if 'quality' in df.columns:
-                    styled = styled.applymap(_color_quality_cell, subset=['quality'])
+                    styled = styled.map(_color_quality_cell, subset=['quality'])
 
                 # Color entry/stop/target columns for readability
                 numeric_cols = [c for c in ['entry', 'stop', 'target'] if c in df.columns]

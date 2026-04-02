@@ -426,7 +426,7 @@ def render_signals_page():
     styled = (
         scan_display_df
         .style
-        .applymap(_color_gain, subset=gain_style_cols)
+        .map(_color_gain, subset=gain_style_cols)
         .apply(_color_scan_row, axis=1)
     )
 

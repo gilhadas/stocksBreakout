@@ -314,6 +314,18 @@ def scan_and_add(min_date: str | None = None,
                 for p in data['positions']
                 if p['symbol'] in added_syms
             ]
+            # Write a temp CSV so the email has an attachment
+            import tempfile, csv as _csv, os as _os
+            _tmp = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.csv', prefix='auto_portfolio_',
+                delete=False, newline=''
+            )
+            _csv_path = _tmp.name
+            _writer = _csv.DictWriter(_tmp, fieldnames=list(_signals[0].keys()))
+            _writer.writeheader()
+            _writer.writerows(_signals)
+            _tmp.close()
+
             _notifier.send_all(
                 subject=f"📋 Auto Portfolio: {len(added_syms)} position(s) added — {', '.join(added_syms)}",
                 message=(
@@ -326,8 +338,10 @@ def scan_and_add(min_date: str | None = None,
                     )
                 ),
                 signals=_signals,
+                csv_path=_csv_path,
                 notification_type='signals',
             )
+            _os.unlink(_csv_path)
         except Exception as _e:
             import logging as _log
             _log.getLogger(__name__).warning(f"Auto portfolio notification failed: {_e}")
