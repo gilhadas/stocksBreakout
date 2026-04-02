@@ -365,6 +365,7 @@ def list_files(local_dir: str, pattern: str = "*",
         try:
             import fnmatch
             fs = _s3_fs()
+            fs.invalidate_cache(s3_prefix)
             all_keys = fs.ls(s3_prefix, detail=False)
             names = [os.path.basename(k) for k in all_keys]
             matched = [n for n in names if fnmatch.fnmatch(n, pattern)]

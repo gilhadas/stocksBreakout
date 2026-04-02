@@ -16,3 +16,4 @@ __pycache__/
 !COMPLETE_BUILDOUT.txt
 !requirements.txt
 /credentials/
+/backtests
