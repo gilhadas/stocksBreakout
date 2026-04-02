@@ -571,6 +571,16 @@ class ScannerOrchestrator:
         
         df = pd.DataFrame(results)
         df.to_csv(filepath, index=False)
-        
+
+        # Mirror to S3 so mobile app / Streamlit Cloud stay in sync
+        try:
+            from utils import _is_cloud, _s3_fs
+            if _is_cloud():
+                s3_key = f"{subdir}/{filename}"
+                _s3_fs().put(filepath, f"stocks-breakout-scanner-s3-bucket/{s3_key}")
+                logger.info(f"↑ S3 sync: {s3_key}")
+        except Exception as _e:
+            logger.warning(f"S3 sync skipped: {_e}")
+
         logger.info(f"✓ Saved {len(results)} {result_type} to: {filepath}")
         return filepath

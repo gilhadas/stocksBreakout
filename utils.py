@@ -94,6 +94,31 @@ def _to_s3_key(local_path: str) -> str:
 
 # ─── Hybrid I/O helpers (local + S3) ───────────────────────────────────────
 
+def _load_secrets_toml() -> dict:
+    """Read .streamlit/secrets.toml directly (for cron/CLI outside Streamlit).
+
+    Returns an empty dict if the file doesn't exist or can't be parsed.
+    """
+    secrets_path = PROJECT_ROOT / '.streamlit' / 'secrets.toml'
+    if not secrets_path.exists():
+        return {}
+    try:
+        import toml
+        return toml.loads(secrets_path.read_text())
+    except Exception:
+        try:
+            # Fallback: simple TOML key=value parser (no toml package needed)
+            result: dict = {}
+            for line in secrets_path.read_text().splitlines():
+                line = line.strip()
+                if '=' in line and not line.startswith('[') and not line.startswith('#'):
+                    k, _, v = line.partition('=')
+                    result[k.strip()] = v.strip().strip('"').strip("'")
+            return result
+        except Exception:
+            return {}
+
+
 def _is_cloud() -> bool:
     """Return True when S3 storage should be used.
 
@@ -102,6 +127,7 @@ def _is_cloud() -> bool:
       - [connections.s3] in Streamlit secrets
       - Flat AWS keys in Streamlit secrets (AWS_ACCESS_KEY_ID, etc.)
       - AWS_ACCESS_KEY_ID in environment (EC2/ECS/Lambda/CI)
+      - AWS keys in .streamlit/secrets.toml (cron/CLI on local machine)
     """
     # Streamlit Cloud: apps always deploy under /mount/src/
     if _PROJECT_ROOT.startswith('/mount/src/'):
@@ -116,7 +142,14 @@ def _is_cloud() -> bool:
             return True
     except Exception:
         pass
-    return bool(os.environ.get("AWS_ACCESS_KEY_ID"))
+    if os.environ.get("AWS_ACCESS_KEY_ID"):
+        return True
+    # Outside Streamlit (cron/CLI): check secrets.toml directly
+    _toml = _load_secrets_toml()
+    return bool(
+        _toml.get("AWS_ACCESS_KEY_ID") or _toml.get("aws_access_key_id")
+        or (_toml.get("connections", {}) or {})
+    )
 
 
 def _in_streamlit() -> bool:
@@ -145,10 +178,14 @@ def _s3_fs():
     if _in_streamlit():
         return _s3_conn().fs
     import s3fs
+    _toml = _load_secrets_toml()
+    _conn = _toml.get('connections', {}) or {}
+    key    = os.environ.get('AWS_ACCESS_KEY_ID')    or _toml.get('AWS_ACCESS_KEY_ID')    or _toml.get('aws_access_key_id')    or _conn.get('key')
+    secret = os.environ.get('AWS_SECRET_ACCESS_KEY') or _toml.get('AWS_SECRET_ACCESS_KEY') or _toml.get('aws_secret_access_key') or _conn.get('secret')
+    region = os.environ.get('AWS_DEFAULT_REGION')    or _toml.get('AWS_DEFAULT_REGION')    or _conn.get('region', 'eu-central-1')
     return s3fs.S3FileSystem(
-        key=os.environ.get('AWS_ACCESS_KEY_ID'),
-        secret=os.environ.get('AWS_SECRET_ACCESS_KEY'),
-        client_kwargs={'region_name': os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')},
+        key=key, secret=secret,
+        client_kwargs={'region_name': region},
         skip_instance_cache=True,
     )
 
