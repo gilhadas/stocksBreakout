@@ -1,0 +1,491 @@
+INFO:     Started server process [98183]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 00:39:06.117 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [98183]
+INFO:     Started server process [51884]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [51884]
+INFO:     Started server process [52023]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [52023]
+INFO:     Started server process [52067]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 01:29:28.679 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [52067]
+INFO:     Started server process [52769]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 01:33:26.665 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [52769]
+INFO:     Started server process [53905]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 01:37:07.583 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [53905]
+INFO:     Started server process [54735]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [54735]
+INFO:     Started server process [54834]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [54834]
+INFO:     Started server process [54955]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [54955]
+INFO:     Started server process [55078]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 01:41:56.419 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [55078]
+INFO:     Started server process [57270]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [57270]
+INFO:     Started server process [57682]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [57682]
+INFO:     Started server process [58279]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 01:56:40.669 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [58279]
+INFO:     Started server process [60122]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 02:05:42.011 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [60122]
+INFO:     Started server process [63499]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 02:22:36.445 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [63499]
+INFO:     Started server process [64040]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 02:24:24.050 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [64040]
+INFO:     Started server process [64378]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 02:25:14.477 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [64378]
+INFO:     Started server process [65022]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 02:27:59.379 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [65022]
+INFO:     Started server process [77595]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [77595]
+INFO:     Started server process [78994]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 12:03:46.002 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [78994]
+INFO:     Started server process [91360]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [91360]
+INFO:     Started server process [91474]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [91474]
+INFO:     Started server process [92065]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 12:12:30.041 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [92065]
+INFO:     Started server process [99679]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 12:51:52.648 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [99679]
+INFO:     Started server process [394]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 12:54:00.226 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [394]
+INFO:     Started server process [1601]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 12:58:47.003 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1601]
+INFO:     Started server process [2378]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 13:02:02.676 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [2378]
+INFO:     Started server process [4353]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 13:12:43.700 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+S3 JSON read failed for stocks-breakout-scanner-s3-bucket/scanner_output/portfolio/auto_portfolio.json: AioSession.__init__() got an unexpected keyword argument 'bucket'
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [4353]
+INFO:     Started server process [74722]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-03-23 22:38:53.291 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-25 18:31:09.618 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-25 18:58:46.519 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-25 19:10:13.683 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-25 19:47:28.939 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-25 19:47:42.020 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-26 17:37:43.702 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-26 17:51:39.231 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-26 22:34:25.988 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-30 19:05:09.249 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-30 19:12:55.615 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-31 16:41:45.875 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-31 16:42:06.595 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-31 16:43:24.968 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-31 22:06:55.984 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-03-31 23:45:42.528 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 08:31:51.053 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 16:18:49.307 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 17:00:18.516 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 17:13:11.224 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 19:01:53.504 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 23:28:51.354 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 23:36:24.888 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 23:36:43.846 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 23:50:15.357 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 23:54:55.587 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 23:56:38.278 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-01 23:59:11.180 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [74722]
+INFO:     Started server process [340]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:01:15.186 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:01:15.187 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:06:28.990 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:06:28.992 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [340]
+INFO:     Started server process [1764]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:06:59.331 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:06:59.332 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1764]
+INFO:     Started server process [3592]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:16:39.651 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:16:39.652 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [3592]
+INFO:     Started server process [4833]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:22:19.247 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:22:19.248 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+$DAY: possibly delisted; no price data found  (period=5d)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [4833]
+INFO:     Started server process [6275]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:29:32.230 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:29:32.231 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [6275]
+INFO:     Started server process [7923]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:37:39.264 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:37:39.265 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:40:36.765 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:40:36.775 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [7923]
+INFO:     Started server process [9510]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:44:43.513 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:44:43.514 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [9510]
+INFO:     Started server process [9986]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 00:46:12.935 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 00:46:12.936 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 18:52:04.500 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 18:52:04.515 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 18:57:48.282 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 18:57:48.309 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 18:57:48.508 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 18:57:48.518 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [9986]
+INFO:     Started server process [25997]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 18:58:58.268 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 18:58:58.269 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [25997]
+INFO:     Started server process [27271]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 19:04:40.153 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 19:04:40.154 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 19:12:01.349 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 19:12:01.373 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [27271]
+INFO:     Started server process [30673]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 19:21:49.586 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 19:21:49.587 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [30673]
+INFO:     Started server process [36201]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 19:49:55.419 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 19:49:55.420 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:24:10.463 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:24:10.481 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [36201]
+INFO:     Started server process [42967]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-04-02 20:24:46.540 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:24:46.541 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:28:05.818 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:28:05.869 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:45:30.654 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:45:31.426 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:46:08.701 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 20:46:48.190 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 21:21:13.968 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 21:21:15.251 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 21:23:36.494 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 21:23:36.511 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 21:42:09.949 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 21:42:09.951 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 22:15:28.032 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 22:15:28.051 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 22:18:54.069 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 22:18:54.081 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 22:27:03.461 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.
+2026-04-02 22:27:03.462 Thread 'AnyIO worker thread': missing ScriptRunContext! This warning can be ignored when running in bare mode.

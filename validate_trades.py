@@ -349,7 +349,7 @@ def main():
     ]
     out = out[[c for c in col_order if c in out.columns]]
 
-    out_dir = Path('scanner_output/backtests')
+    out_dir = Path('backtests')
     out_dir.mkdir(parents=True, exist_ok=True)
     ts    = datetime.now().strftime('%Y%m%d_%H%M%S')
     fname = out_dir / f"validated_trades_{ts}.csv"

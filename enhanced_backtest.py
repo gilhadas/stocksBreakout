@@ -1365,7 +1365,7 @@ async def main():
         print(f"Gap to SPY: {gap:.2f}% — strategy excels at risk control (lower drawdowns)")
 
     # Save results
-    output_dir = Path('scanner_output/backtests')
+    output_dir = Path('backtests')
     output_dir.mkdir(parents=True, exist_ok=True)
     import json
 

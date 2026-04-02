@@ -1,0 +1,20 @@
+{
+  "current_regime": "SURGE",
+  "pending_regime": "BEARISH",
+  "pending_count": 1,
+  "history": [
+    "SURGE",
+    "SURGE",
+    "RED_MARKET",
+    "SURGE",
+    "SURGE",
+    "RED_MARKET",
+    "NORMAL",
+    "SURGE",
+    "SURGE",
+    "BEARISH"
+  ],
+  "last_updated": "2026-04-02T16:30:09.605872-04:00",
+  "last_regime_change": "2026-04-02T15:43:53.780725-04:00",
+  "previous_regime": "RED_MARKET"
+}

@@ -89,7 +89,7 @@ ATR_SIZING = {
     'reference_atr_pct': 0.025,    # 2.5% = median ATR% for liquid US stocks
     'min_adjustment': 0.3,         # Floor: never shrink below 30% of base size
     'max_adjustment': 1.0,         # Cap: never oversize (low-vol stocks stay at base)
-    'max_single_position_pct': 0.05,  # Hard cap: no position > 5% of capital
+    'max_single_position_pct': 0.10,  # Hard cap: no position > 10% of capital
     'atr_period': 14,              # ATR lookback (Wilder's)
     'atr_history_days': 30,        # Days of price data for ATR calc
 }
@@ -109,7 +109,7 @@ CASH_MANAGEMENT = {
     'max_per_sector': 3,             # Max positions in same sector
     'max_per_mode': 5,               # Max positions in same mode (swing/daytrade/longterm)
     'ideal_etf_pct': 0.20,          # Target 20% of positions in ETFs for stability
-    'max_single_position_pct': 0.05, # Largest position should not exceed 5% of portfolio value
+    'max_single_position_pct': 0.10, # Largest position should not exceed 10% of portfolio value
     # ── 70/30 Risk Balance ──
     'safe_allocation_pct': 0.70,     # 70% of portfolio value in safe positions (risk < 40)
     'risky_threshold': 40,           # Risk score >= this = "risky" position

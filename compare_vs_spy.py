@@ -392,7 +392,7 @@ async def run_comprehensive_comparison():
     print()
 
     # Save results
-    output_dir = Path('scanner_output/backtests')
+    output_dir = Path('backtests')
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results = {

@@ -576,7 +576,7 @@ class ScannerOrchestrator:
         try:
             from utils import _is_cloud, _s3_fs
             if _is_cloud():
-                s3_key = f"{subdir}/{filename}"
+                s3_key = f"{OUTPUT_DIR}/{subdir}/{filename}"
                 _s3_fs().put(filepath, f"stocks-breakout-scanner-s3-bucket/{s3_key}")
                 logger.info(f"↑ S3 sync: {s3_key}")
         except Exception as _e:

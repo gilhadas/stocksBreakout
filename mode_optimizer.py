@@ -649,7 +649,7 @@ def parse_args():
                    help='Skip patching config.py with best params')
     p.add_argument('--watchlist', default=None,
                    help='Custom symbol file (one per line or comma-separated)')
-    p.add_argument('--output-dir', default='scanner_output/backtests/mode_optimizer',
+    p.add_argument('--output-dir', default='backtests/mode_optimizer',
                    help='Directory for result JSON files')
     return p.parse_args()
 

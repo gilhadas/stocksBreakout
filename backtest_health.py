@@ -117,7 +117,7 @@ class DateFixedSimulation(SimulationMode):
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-_OUTPUT_DIR = Path('scanner_output/backtests')
+_OUTPUT_DIR = Path('backtests')
 
 
 # ── Periods ───────────────────────────────────────────────────────────────────

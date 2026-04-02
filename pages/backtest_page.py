@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 
 from utils import load_json, list_files
-BACKTESTS_DIR = 'scanner_output/backtests'
+BACKTESTS_DIR = 'backtests'
 
 
 def _list_backtest_files() -> list[str]:

@@ -1,0 +1,53 @@
+{
+  "HYMC": {
+    "status": "FAILED",
+    "checked_at": "11:30",
+    "consecutive_failed": 3,
+    "last_alerted_at": "10:50",
+    "current": 31.74,
+    "day_open": 33.44,
+    "day_high": 34.27,
+    "day_low": 31.08,
+    "from_open_pct": -5.09,
+    "from_high_pct": -7.38,
+    "vol_ratio": 0.0,
+    "bars3_trend": 0.68,
+    "n_bars": 9,
+    "fib_label": "78.6%",
+    "fib_price": 31.76
+  },
+  "CAH": {
+    "status": "RECOVERING",
+    "checked_at": "13:50",
+    "consecutive_failed": 0,
+    "last_alerted_at": null,
+    "current": 207.63,
+    "day_open": 209.1,
+    "day_high": 209.96,
+    "day_low": 206.78,
+    "from_open_pct": -0.7,
+    "from_high_pct": -1.11,
+    "vol_ratio": 0.38,
+    "bars3_trend": 0.0,
+    "n_bars": 18,
+    "fib_label": "78.6%",
+    "fib_price": 207.46
+  },
+  "CTRA": {
+    "status": "RECOVERING",
+    "checked_at": "13:50",
+    "consecutive_failed": 0,
+    "last_alerted_at": null,
+    "current": 36.15,
+    "day_open": 36.52,
+    "day_high": 36.88,
+    "day_low": 36.07,
+    "from_open_pct": -1.03,
+    "from_high_pct": -1.99,
+    "vol_ratio": 0.19,
+    "bars3_trend": 0.07,
+    "n_bars": 18,
+    "fib_label": "100%",
+    "fib_price": 36.07
+  }
+}

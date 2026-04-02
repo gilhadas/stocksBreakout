@@ -1,0 +1,66 @@
+{
+  "mode": "scalping",
+  "best_params": {
+    "vol_thresh": 3.0734509910171486,
+    "atr_mult": 0.07090268572399898,
+    "sl_fixed_cents": 5,
+    "tp_fixed_cents": 6,
+    "min_rr": 0.6626289824631988,
+    "max_wick_atr": 1.92332830588,
+    "max_body_top_pct": 0.6828160165372796,
+    "lookback": 13,
+    "min_price": 10.52918553685438,
+    "tp_as_trail": false,
+    "quality_filter": "PREMIUM"
+  },
+  "results": [
+    {
+      "regime": "Bear 2022",
+      "role": "optimize",
+      "signals": 0,
+      "trades": 0,
+      "win_rate": 0.0,
+      "total_return": 0.0,
+      "sharpe": 0.0,
+      "max_dd": 0.0,
+      "spy_sharpe": -0.7352906484607106
+    },
+    {
+      "regime": "Bull 2023",
+      "role": "optimize",
+      "signals": 0,
+      "trades": 0,
+      "win_rate": 0.0,
+      "total_return": 0.0,
+      "sharpe": 0.0,
+      "max_dd": 0.0,
+      "spy_sharpe": 1.89603947362071
+    },
+    {
+      "regime": "Mixed 2024H1",
+      "role": "optimize",
+      "signals": 0,
+      "trades": 0,
+      "win_rate": 0.0,
+      "total_return": 0.0,
+      "sharpe": 0.0,
+      "max_dd": 0.0,
+      "spy_sharpe": 2.876150614477507
+    },
+    {
+      "regime": "Hold-out 2024H2",
+      "role": "validate",
+      "signals": 0,
+      "trades": 0,
+      "win_rate": 0.0,
+      "total_return": 0.0,
+      "sharpe": 0.0,
+      "max_dd": 0.0,
+      "spy_sharpe": 1.2216314616346204
+    }
+  ],
+  "trials": 80,
+  "symbols": 39,
+  "date_step": 10,
+  "timestamp": "20260311_132223"
+}

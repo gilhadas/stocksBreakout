@@ -836,7 +836,7 @@ async def main():
     print_cross_period_summary(all_period_results, m_thresh=m_thresh)
 
     # Save results
-    output_dir = Path('scanner_output/backtests')
+    output_dir = Path('backtests')
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def safe_val(v):
