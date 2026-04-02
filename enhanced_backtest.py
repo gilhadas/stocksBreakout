@@ -137,6 +137,33 @@ def calculate_spy_perf_on_date(spy_df, current_date, lookback=15):
     return (df_up['close'].iloc[-1] / df_up['close'].iloc[-lookback]) - 1
 
 
+def is_surge_day(spy_df, current_date) -> bool:
+    """Detect surge day from SPY daily data for backtesting.
+
+    A surge day is when SPY gaps up >= 1% from previous close (open vs prev close)
+    OR moves >= 1.5% intraday (open to close).  Uses the same spirit as
+    SURGE_DAY_CONFIG but adapted for daily bar data (no premarket/breadth).
+    """
+    from config import SURGE_DAY_CONFIG
+    if not SURGE_DAY_CONFIG.get('enabled'):
+        return False
+
+    df_up = spy_df[spy_df.index <= current_date]
+    if len(df_up) < 2:
+        return False
+
+    today = df_up.iloc[-1]
+    prev = df_up.iloc[-2]
+
+    gap_pct = (today['open'] - prev['close']) / prev['close'] * 100
+    intraday_pct = (today['close'] - today['open']) / today['open'] * 100
+
+    gap_thresh = SURGE_DAY_CONFIG.get('spy_gap_min_pct', 1.0)
+    intraday_thresh = SURGE_DAY_CONFIG.get('spy_intraday_fallback_pct', 1.5)
+
+    return gap_pct >= gap_thresh or intraday_pct >= intraday_thresh
+
+
 def run_all_scans(historical, start_date, end_date, modes=None):
     """
     Single-pass scan that produces all 3 signal variants simultaneously.
@@ -196,6 +223,11 @@ def run_all_scans(historical, start_date, end_date, modes=None):
         if spy_df is not None:
             spy_perf = calculate_spy_perf_on_date(spy_df, sim_date, lookback=15)
 
+        # Surge day detection for backtest
+        surge = False
+        if spy_df is not None:
+            surge = is_surge_day(spy_df, sim_date)
+
         for symbol in symbols:
             df = historical[symbol]
             df_slice = df[df.index <= sim_date]
@@ -219,7 +251,7 @@ def run_all_scans(historical, start_date, end_date, modes=None):
                     try:
                         sig = detector.detect(
                             df_slice, symbol, mode_name, '1 day', spy_perf,
-                            use_scoring=True, **flags
+                            use_scoring=True, is_surge=surge, **flags
                         )
                     except Exception:
                         sig = None
@@ -285,6 +317,10 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
         if spy_df is not None:
             spy_perf = calculate_spy_perf_on_date(spy_df, sim_date, lookback=15)
 
+        surge = False
+        if spy_df is not None:
+            surge = is_surge_day(spy_df, sim_date)
+
         for symbol in symbols:
             df = historical[symbol]
             df_slice = df[df.index <= sim_date]
@@ -302,7 +338,7 @@ def run_enhanced_scan(historical, start_date, end_date, modes=None,
                 try:
                     sig = detector.detect(
                         df_slice, symbol, mode_name, '1 day', spy_perf,
-                        use_scoring=True,
+                        use_scoring=True, is_surge=surge,
                         use_legacy_momentum=use_legacy_momentum,
                         use_v4_overextension=use_v4_overextension
                     )
@@ -390,6 +426,10 @@ def run_prescan(historical, start_date, end_date, modes=None, date_step: int = 5
             if spy_df is not None:
                 spy_perf = calculate_spy_perf_on_date(spy_df, sim_date, lookback=15)
 
+            surge = False
+            if spy_df is not None:
+                surge = is_surge_day(spy_df, sim_date)
+
             for symbol in symbols:
                 df       = historical[symbol]
                 df_slice = df[df.index <= sim_date]
@@ -408,7 +448,7 @@ def run_prescan(historical, start_date, end_date, modes=None, date_step: int = 5
                     try:
                         sig = detector.detect(
                             df_slice, symbol, mode_name, '1 day', spy_perf,
-                            use_scoring=True,
+                            use_scoring=True, is_surge=surge,
                             use_legacy_momentum=True,
                             use_v4_overextension=False,
                             reference_date=sim_date,

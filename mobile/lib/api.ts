@@ -75,6 +75,10 @@ export function refreshPortfolio() {
   return authFetch('/portfolio/refresh', { method: 'POST' });
 }
 
+export function fetchSkipped() {
+  return authFetch('/portfolio/skipped');
+}
+
 export function fetchManualPortfolio() {
   return authFetch('/manual-portfolio');
 }

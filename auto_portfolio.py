@@ -21,8 +21,8 @@ _NY_TZ          = ZoneInfo('America/New_York')
 _SIGNALS_DIR    = 'scanner_output/signals'
 _PORTFOLIO_PATH = 'scanner_output/portfolio/auto_portfolio.json'
 
-INITIAL_CAPITAL    = 10_000
-POSITION_SIZE_PCT  = 0.10      # 10% of capital per trade
+INITIAL_CAPITAL    = 100_000
+POSITION_SIZE_PCT  = 0.05      # 5% of capital per trade
 MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
 
@@ -50,13 +50,20 @@ def load() -> dict:
 
 
 def _save(data: dict):
-    import fcntl
-    from utils import save_json
+    from utils import save_json, _is_cloud, _to_local_abs
     data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-    with open(_PORTFOLIO_PATH, 'a') as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+    if _is_cloud():
+        # On cloud (Streamlit Cloud / S3), skip fcntl — S3 is the source of truth
+        # and the local filesystem may be read-only or the directory may not exist.
         save_json(data, _PORTFOLIO_PATH)
-        fcntl.flock(lf, fcntl.LOCK_UN)
+    else:
+        import fcntl, os
+        abs_path = _to_local_abs(_PORTFOLIO_PATH)
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        with open(abs_path, 'a') as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            save_json(data, _PORTFOLIO_PATH)
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -209,9 +216,9 @@ def scan_and_add(min_date: str | None = None,
                 sym, date_str, price
             )
 
-            # Guard: stop must be BELOW entry price (scanner uses CSV signal price
-            # for stop calc, but yfinance may return a different actual close).
-            if stop >= entry_price:
+            # Guard: stop must be below entry and not based on wrong price scale
+            # (catches stale/split-adjusted data returning wrong close in scanner)
+            if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.40):
                 stop = round(entry_price * 0.95, 4)
 
             # Position sizing: pos_pct × quality_mult × ATR adjustment × event mult
@@ -717,13 +724,42 @@ def rebuild_skipped_cash() -> dict:
     taken_syms = ({p['symbol'] for p in data['positions']} |
                   {t['symbol'] for t in data['closed']})
 
-    data['skipped_cash'] = []   # rebuild from scratch
-    seen_syms = set()
-
     all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+
+    # Collect all symbols that appear in signal files so we know which
+    # skipped_cash entries were sourced from CSVs vs. added via live
+    # BREAKOUT detection (feedback agent). Live entries are preserved —
+    # only signal-file-sourced entries are rebuilt.
+    signal_syms: set[str] = set()
+    for fname in all_fnames:
+        df = load_data(f"{_SIGNALS_DIR}/{fname}")
+        if df is None or df.empty:
+            continue
+        df.columns = [c.strip() for c in df.columns]
+        col = 'Symbol' if 'Symbol' in df.columns else ('symbol' if 'symbol' in df.columns else None)
+        if col:
+            signal_syms.update(str(s).strip().upper() for s in df[col] if str(s).strip().upper() != 'NAN')
+
+    # Keep live-breakout entries (not in any signal file) so they survive the rebuild.
+    # Re-validate their stop/target in case the original scanner used bad price data.
+    live_entries = []
+    for e in data.get('skipped_cash', []):
+        if e.get('symbol', '').upper() not in signal_syms:
+            entry = e.get('entry_price', 0) or 0
+            stop  = e.get('stop', 0) or 0
+            target = e.get('target', 0) or 0
+            if entry > 0 and (stop <= 0 or stop >= entry or (entry - stop) / entry > 0.40):
+                e = dict(e, stop=round(entry * 0.95, 4))
+            if entry > 0 and (target <= 0 or target <= entry):
+                e = dict(e, target=round(entry * 1.10, 4))
+            live_entries.append(e)
+
+    data['skipped_cash'] = list(live_entries)   # start with preserved live entries
+    seen_syms = {e['symbol'].upper() for e in live_entries}
+
     if not all_fnames:
         _save(data)
-        return {'found': 0, 'data': data}
+        return {'found': len(data['skipped_cash']), 'data': data}
 
     for fname in all_fnames:
         date_str  = _date_from_filename(fname)
@@ -766,6 +802,12 @@ def rebuild_skipped_cash() -> dict:
             mode = str(row.get('Mode', file_mode)).lower().strip() or file_mode
 
             entry_price, current_price = _fetch_entry_and_current(sym, date_str, price)
+
+            # Guard: stop must be below entry and not based on wrong price scale
+            if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.40):
+                stop = round(entry_price * 0.95, 4)
+            if target <= entry_price:
+                target = round(entry_price * 1.10, 4)
 
             position_value = data['capital'] * POSITION_SIZE_PCT
             shares = max(1, int(position_value / entry_price))

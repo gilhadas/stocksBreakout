@@ -6,11 +6,15 @@ Usage:
   python check_signal.py AAPL --mode daytrade
   python check_signal.py AAPL TSLA NVDA
   python check_signal.py AAPL --mode swing --spy-perf 1.5
+  python check_signal.py AAPL --no-surge       # force non-surge mode
 """
 
 import argparse
 import asyncio
+import json
 import logging
+from datetime import datetime
+from pathlib import Path
 
 # Python 3.14 compatibility: must create event loop before importing ib_insync
 # (pulled in transitively via scanner → market_data → ib_insync)
@@ -19,15 +23,19 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
+import pytz
 import yfinance as yf
 import numpy as np
 import pandas as pd
 
 import utils  # registers custom SCAN log level before scanner imports it
-from config import MODES, SCORING_WEIGHTS, SCORE_THRESHOLDS
+from config import MODES, SCORING_WEIGHTS, SCORE_THRESHOLDS, SURGE_DAY_CONFIG, OUTPUT_DIR
 from indicators import calculate_all_indicators, calculate_minervini_template
 from scanner import BreakoutDetector
+from utils import classify_market_regime
 from yfinance_adapter import YFinanceAdapter
+
+_NY_TZ = pytz.timezone('America/New_York')
 
 logging.basicConfig(level=logging.WARNING)  # suppress scanner noise
 
@@ -233,10 +241,44 @@ def print_rejection(symbol: str, df: pd.DataFrame, mode: str, reasons, spy_perf:
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
-def check_symbol(symbol: str, mode: str, spy_perf: float):
+def _load_surge_context(spy_perf_pct: float, force_no_surge: bool) -> dict | None:
+    """Mirror the orchestrator's surge context detection logic."""
+    if force_no_surge or not SURGE_DAY_CONFIG.get('enabled'):
+        return None
+    # 1. Try premarket file written by premarket_monitor.py
+    surge_file = Path(OUTPUT_DIR) / 'lists' / 'surge_context.json'
+    if surge_file.exists():
+        try:
+            ctx = json.loads(surge_file.read_text())
+            if ctx.get('date') == datetime.now(_NY_TZ).strftime('%Y-%m-%d'):
+                return ctx
+        except Exception:
+            pass
+    # 2. Intraday fallback: SPY moved enough on its own
+    if spy_perf_pct >= SURGE_DAY_CONFIG.get('spy_intraday_fallback_pct', 1.5):
+        return {'spy_gap_pct': spy_perf_pct, 'num_gappers': 0}
+    return None
+
+
+def check_symbol(symbol: str, mode: str, spy_perf: float, force_no_surge: bool = False):
     cfg       = MODES[mode]
     timeframe = cfg.get('default_timeframe', '1 day')
     adapter   = YFinanceAdapter(use_disk_cache=False)
+
+    # Mirror orchestrator: detect surge + regime before scanning
+    surge_context = _load_surge_context(spy_perf, force_no_surge)
+    spy_vol = 0.5  # not available without IB; use neutral value
+    regime = classify_market_regime(spy_perf / 100, spy_vol, surge_context=surge_context)
+    is_surge = (regime == 'SURGE')
+
+    # Print context header
+    surge_label = ''
+    if is_surge:
+        surge_label = (
+            f"  SPY gap {surge_context.get('spy_gap_pct', 0):+.1f}%  "
+            f"gappers {surge_context.get('num_gappers', 0)}"
+        )
+    print(f"\n  Regime: {regime}  {'(SURGE MODE ACTIVE)' if is_surge else ''}  {surge_label}")
 
     print(f"\n  Fetching {symbol} ({timeframe}) …", end='', flush=True)
     df = adapter.get_historical_data(symbol, timeframe)
@@ -250,8 +292,18 @@ def check_symbol(symbol: str, mode: str, spy_perf: float):
 
     detector = BreakoutDetector()
 
+    # Common kwargs matching the live orchestrator
+    detect_kwargs = dict(
+        use_scoring=True,
+        use_legacy_momentum=False,
+        use_v4_overextension=True,
+        sector_hot=False,
+        regime=regime,
+        is_surge=is_surge,
+    )
+
     # 1. Breakout
-    signal = detector.detect(df, symbol, mode, timeframe, spy_perf)
+    signal = detector.detect(df, symbol, mode, timeframe, spy_perf / 100, **detect_kwargs)
     if signal:
         signal['Type'] = signal.get('Type') or 'BREAKOUT'
         print_signal(symbol, signal, df, mode, spy_perf)
@@ -265,7 +317,7 @@ def check_symbol(symbol: str, mode: str, spy_perf: float):
         return
 
     # 3. SMA20 Cross
-    sma20 = detector.detect_sma20_cross(df, symbol, mode, timeframe, spy_perf)
+    sma20 = detector.detect_sma20_cross(df, symbol, mode, timeframe, spy_perf / 100)
     if sma20:
         sma20['Type'] = 'SMA20_CROSS'
         print_signal(symbol, sma20, df, mode, spy_perf)
@@ -284,6 +336,8 @@ def main():
                         help='Trading mode (default: swing)')
     parser.add_argument('--spy-perf', type=float, default=None,
                         help='SPY pct performance override (auto-fetched if omitted)')
+    parser.add_argument('--no-surge', action='store_true',
+                        help='Force non-surge mode (ignore surge_context.json + intraday fallback)')
     args = parser.parse_args()
 
     spy_perf = args.spy_perf
@@ -294,7 +348,7 @@ def main():
         print(f" {spy_perf:+.2f}%")
 
     for symbol in args.symbols:
-        check_symbol(symbol.upper(), args.mode, spy_perf)
+        check_symbol(symbol.upper(), args.mode, spy_perf, force_no_surge=args.no_surge)
 
     print()
 

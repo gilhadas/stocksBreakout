@@ -570,11 +570,15 @@ def update_position_stops(positions_file: str, price_map: Dict[str, float]) -> L
     return updated
 
 
-def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
+def classify_market_regime(spy_perf: float, spy_vol: float,
+                           surge_context: dict | None = None) -> str:
     """
     Classify market regime based on SPY performance and volatility.
 
-    Returns: RED_MARKET | BEARISH | CHOPPY | EXPANSION | NORMAL
+    Returns: SURGE | RED_MARKET | BEARISH | CHOPPY | EXPANSION | NORMAL
+
+    SURGE (highest priority): broad market gap-up day detected from premarket data.
+      Requires SPY gap >= threshold AND breadth (gapper count) >= threshold.
 
     V9-H thresholds (15-day SPY return, proven in 2022/2023/2024 backtest):
       RED_MARKET : spy_perf <= -1.5%  (SPY in strong downtrend — keep trading, +55.8% P&L share)
@@ -583,7 +587,20 @@ def classify_market_regime(spy_perf: float, spy_vol: float) -> str:
       EXPANSION  : spy_perf >= +2.0%
       NORMAL     : everything else
     """
-    from config import V9H_REGIME_GATE
+    from config import V9H_REGIME_GATE, SURGE_DAY_CONFIG
+
+    # SURGE takes highest priority — broad market gap-up day
+    if SURGE_DAY_CONFIG.get('enabled') and surge_context:
+        spy_gap = surge_context.get('spy_gap_pct', 0)
+        breadth = surge_context.get('num_gappers', 0)
+        # Pre-market path: SPY gap + breadth confirmation
+        if (spy_gap >= SURGE_DAY_CONFIG['spy_gap_min_pct']
+                and breadth >= SURGE_DAY_CONFIG['breadth_min_gappers']):
+            return 'SURGE'
+        # Intraday fallback: SPY moved strongly from open (no breadth data)
+        intraday_thresh = SURGE_DAY_CONFIG.get('spy_intraday_fallback_pct', 1.5)
+        if spy_gap >= intraday_thresh and breadth == 0:
+            return 'SURGE'
 
     if spy_perf <= V9H_REGIME_GATE['red_market_thresh']:
         return 'RED_MARKET'
@@ -669,7 +686,7 @@ def filter_signals_by_regime(
             or (s.get('Type') == 'BOUNCE' and s.get('Quality') == 'GOLD')
         ]
     else:
-        # NORMAL / EXPANSION / None — only BOUNCE-GOLD universal rule
+        # NORMAL / EXPANSION / SURGE / None — only BOUNCE-GOLD universal rule
         filtered = [s for s in signals if _bounce_gold_only(s)]
 
     return filtered, len(signals) - len(filtered)

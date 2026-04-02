@@ -1041,7 +1041,14 @@ def run_once(decisions_date: Optional[str] = None,
             _bo_quality  = _scanner_signal.get('Quality', '')
             _bo_rr       = _scanner_signal.get('R:R', 0)
             _bo_patterns = _scanner_signal.get('Patterns', '')
-            if not _bo_stop_px or _bo_stop_px >= current_price:
+            # Sanity check: stop must be below entry and not absurdly far
+            # (catches stale/split-adjusted yfinance data returning wrong price scale)
+            _max_stop_dist = {'daytrade': 0.10, 'swing': 0.25, 'longterm': 0.40}
+            _stop_too_far = (
+                current_price > 0 and _bo_stop_px and _bo_stop_px < current_price
+                and (current_price - _bo_stop_px) / current_price > _max_stop_dist.get(sym_mode, 0.25)
+            )
+            if not _bo_stop_px or _bo_stop_px >= current_price or _stop_too_far:
                 # Fallback to ATR-based stops if scanner signal has bad data
                 _bo_stop_px, _bo_target_px = _compute_stops(symbol, current_price, sym_mode)
             if _bo_stop_px is None or _bo_stop_px >= current_price:

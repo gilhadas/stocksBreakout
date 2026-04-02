@@ -16,7 +16,8 @@ from pathlib import Path
 import pandas as pd
 
 from config import (MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR,
-                    V9H_REGIME_GATE, SECTOR_EXCEPTION, VIX_CONFIG)
+                    V9H_REGIME_GATE, SECTOR_EXCEPTION, VIX_CONFIG,
+                    SURGE_DAY_CONFIG)
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
@@ -67,7 +68,38 @@ class ScannerOrchestrator:
             spy_perf, spy_vol = await self.market_data.get_spy_performance(
                 timeframe, lb
             )
-            raw_regime = classify_market_regime(spy_perf, spy_vol)
+            # Load surge context from premarket_monitor (if today's file exists)
+            surge_context = None
+            if SURGE_DAY_CONFIG.get('enabled'):
+                import json
+                surge_file = Path(OUTPUT_DIR) / 'lists' / 'surge_context.json'
+                if surge_file.exists():
+                    try:
+                        ctx = json.loads(surge_file.read_text())
+                        if ctx.get('date') == datetime.now(_NY_TZ).strftime('%Y-%m-%d'):
+                            surge_context = ctx
+                            logger.info(
+                                f"Surge context: SPY gap {ctx['spy_gap_pct']:+.1f}%, "
+                                f"{ctx['num_gappers']} gappers"
+                            )
+                    except Exception as e:
+                        logger.debug(f"Surge context load failed: {e}")
+
+                # Fallback: no premarket file but SPY intraday move is strong
+                if surge_context is None:
+                    spy_intraday_pct = spy_perf * 100
+                    if spy_intraday_pct >= SURGE_DAY_CONFIG['spy_intraday_fallback_pct']:
+                        surge_context = {
+                            'spy_gap_pct': spy_intraday_pct,
+                            'num_gappers': 0,
+                        }
+                        logger.info(
+                            f"Surge fallback: SPY intraday {spy_intraday_pct:+.1f}% "
+                            f"(no premarket data)"
+                        )
+
+            raw_regime = classify_market_regime(spy_perf, spy_vol,
+                                               surge_context=surge_context)
             regime, regime_debug = get_smoothed_regime(raw_regime)
 
             # V9-H: compute bear_macro once per scan (SPY < 200-day SMA)
@@ -174,7 +206,8 @@ class ScannerOrchestrator:
                     sector_hot_map=sector_hot_map,
                     sector_scores_map=sector_scores_map,
                     bear_macro=bear_macro,
-                    cooldown_active=cooldown_active
+                    cooldown_active=cooldown_active,
+                    is_surge=(regime == 'SURGE'),
                 )
 
                 await asyncio.sleep(SCAN_DELAY)
@@ -188,6 +221,22 @@ class ScannerOrchestrator:
                 logger.warning(f"Symbol scan failed: {r}")
             elif r:
                 results.append(r)
+
+        # SURGE cap: keep top N signals by score, stamp surge metadata
+        if regime == 'SURGE' and SURGE_DAY_CONFIG.get('enabled'):
+            max_surge = SURGE_DAY_CONFIG.get('max_signals_per_scan', 10)
+            surge_mult = SURGE_DAY_CONFIG.get('pos_size_mult', 0.7)
+            for sig in results:
+                sig['Surge_Day'] = True
+                sig['Surge_Sizing_Mult'] = surge_mult
+            if len(results) > max_surge:
+                quality_rank = {'GOLD': 4, 'PREMIUM': 3, 'HIGH': 2, 'STANDARD': 1}
+                results.sort(
+                    key=lambda s: quality_rank.get(s.get('Quality', ''), 0),
+                    reverse=True
+                )
+                results = results[:max_surge]
+                logger.info(f"SURGE CAP: kept top {len(results)} signals")
 
         # Stamp sizing context onto signals (for auto_portfolio)
         # Combine event-day and VIX multipliers (multiplicative)
@@ -242,7 +291,8 @@ class ScannerOrchestrator:
                           sector_hot_map: Optional[Dict] = None,
                           sector_scores_map: Optional[Dict] = None,
                           bear_macro: bool = False,
-                          cooldown_active: bool = False) -> Optional[Dict]:
+                          cooldown_active: bool = False,
+                          is_surge: bool = False) -> Optional[Dict]:
         """Scan a single symbol with retry logic and optional Level 2 analysis"""
         max_retries = 3
         
@@ -283,7 +333,8 @@ class ScannerOrchestrator:
                     use_scoring=True,
                     use_legacy_momentum=False,
                     use_v4_overextension=True,
-                    sector_hot=sector_hot
+                    sector_hot=sector_hot,
+                    is_surge=is_surge,
                 )
                 
                 # V5: Multi-TF confirmation for swing mode

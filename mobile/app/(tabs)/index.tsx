@@ -1,7 +1,63 @@
 import React, { useState, useCallback } from 'react';
-import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable } from 'react-native';
+import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable, Alert, Platform } from 'react-native';
+import { cacheDirectory, writeAsStringAsync, EncodingType } from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+
+function buildCSV(rows: any[]): string {
+  const headers = ['Symbol','Mode','Quality','Entry','Date','Current','Stop','Gain%','GainDollar','ClosePrice','ExitDate','Stopped'];
+  const escape = (v: any) => {
+    const s = v == null ? '' : String(v);
+    return s.includes(',') || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [
+    headers.join(','),
+    ...rows.map(r => [
+      r.symbol, r.mode, r.quality,
+      r.entry_price?.toFixed(2),
+      r.date_added,
+      r.current_price?.toFixed(2),
+      r.stop?.toFixed(2),
+      r.gain_pct?.toFixed(2),
+      r.gain_dollar?.toFixed(2),
+      r.close_price != null ? r.close_price.toFixed(2) : '',
+      r.exit_date ?? '',
+      r.stopped ? 'YES' : 'NO',
+    ].map(escape).join(',')),
+  ];
+  return lines.join('\n');
+}
+
+async function exportSkippedCSV(rows: any[]) {
+  try {
+    const csv = buildCSV(rows);
+    if (Platform.OS === 'web') {
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'skipped_signals.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+    if (!cacheDirectory) {
+      Alert.alert('Export Error', 'File system not available.');
+      return;
+    }
+    const path = `${cacheDirectory}skipped_signals.csv`;
+    await writeAsStringAsync(path, csv, { encoding: EncodingType.UTF8 });
+    const isAvailable = await Sharing.isAvailableAsync();
+    if (!isAvailable) {
+      Alert.alert('Export Error', 'Sharing is not available on this device.');
+      return;
+    }
+    await Sharing.shareAsync(path, { mimeType: 'text/csv', UTI: 'public.comma-separated-values-text' });
+  } catch (err: any) {
+    Alert.alert('Export Failed', err?.message ?? String(err));
+  }
+}
 import { useFocusEffect, router } from 'expo-router';
-import { fetchPortfolio, refreshPortfolio, getToken, clearToken } from '../../lib/api';
+import { fetchPortfolio, refreshPortfolio, fetchSkipped, getToken, clearToken } from '../../lib/api';
 import SummaryBar from '../../components/SummaryBar';
 import PositionCard from '../../components/PositionCard';
 
@@ -50,10 +106,88 @@ function TradeRow({ trade }: { trade: any }) {
   );
 }
 
+const MODE_BADGE_COLORS: Record<string, string> = {
+  longterm: '#818cf8', swing: '#34d399', daytrade: '#fb923c', scalping: '#f472b6',
+};
+
+function SkippedCard({ item }: { item: any }) {
+  const modeColor = item.mode ? (MODE_BADGE_COLORS[item.mode] ?? '#888') : '#888';
+  const stopped: boolean = item.stopped === true;
+  const gainPct: number = item.gain_pct ?? 0;
+  const gainColor = gainPct >= 0 ? '#22c55e' : '#ef4444';
+  return (
+    <View style={[styles.skippedCard, stopped && styles.skippedCardStopped]}>
+      {/* Header: symbol + badges + gain % */}
+      <View style={styles.skippedHeader}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={styles.skippedSymbol}>{item.symbol}</Text>
+          <Text style={[styles.modeBadge, { color: modeColor, borderColor: modeColor }]}>
+            {(item.mode || '').toUpperCase()}
+          </Text>
+          <Text style={[styles.qualityBadge, item.quality === 'GOLD' ? styles.qualityGold : styles.qualityPremium]}>
+            {item.quality}
+          </Text>
+          {stopped && <Text style={styles.stoppedBadge}>SOLD</Text>}
+        </View>
+        <Text style={[styles.skippedColValue, { color: gainColor }]}>
+          {gainPct >= 0 ? '+' : ''}{gainPct.toFixed(1)}%
+        </Text>
+      </View>
+      {/* Row 1: Entry / Date / Current / Stop */}
+      <View style={styles.skippedCols}>
+        <View style={styles.skippedCol}>
+          <Text style={styles.skippedColLabel}>Entry</Text>
+          <Text style={styles.skippedColValue}>${item.entry_price?.toFixed(2)}</Text>
+        </View>
+        <View style={styles.skippedCol}>
+          <Text style={styles.skippedColLabel}>Date</Text>
+          <Text style={styles.skippedColValue}>{item.date_added}</Text>
+        </View>
+        <View style={styles.skippedCol}>
+          <Text style={styles.skippedColLabel}>Current</Text>
+          <Text style={[styles.skippedColValue, { color: gainColor }]}>
+            ${item.current_price?.toFixed(2) ?? '—'}
+          </Text>
+        </View>
+        <View style={styles.skippedCol}>
+          <Text style={styles.skippedColLabel}>Stop</Text>
+          <Text style={[styles.skippedColValue, { color: '#f59e0b' }]}>
+            ${item.stop?.toFixed(2) ?? '—'}
+          </Text>
+        </View>
+      </View>
+      {/* Row 2: exit details when stopped */}
+      {stopped && (
+        <View style={styles.skippedCols}>
+          <View style={styles.skippedCol}>
+            <Text style={styles.skippedColLabel}>Close price</Text>
+            <Text style={[styles.skippedColValue, { color: '#ef4444' }]}>
+              ${item.close_price?.toFixed(2) ?? '—'}
+            </Text>
+          </View>
+          <View style={styles.skippedCol}>
+            <Text style={styles.skippedColLabel}>Exit date</Text>
+            <Text style={styles.skippedColValue}>{item.exit_date ?? '—'}</Text>
+          </View>
+          <View style={styles.skippedCol}>
+            <Text style={styles.skippedColLabel}>P&L</Text>
+            <Text style={[styles.skippedColValue, { color: '#ef4444' }]}>
+              {item.gain_dollar >= 0 ? '+' : ''}${item.gain_dollar?.toFixed(0)}
+            </Text>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
 export default function PortfolioScreen() {
-  const [activeTab, setActiveTab] = useState<'positions' | 'history'>('positions');
+  const [activeTab, setActiveTab] = useState<'positions' | 'history' | 'skipped'>('positions');
   const [positions, setPositions] = useState<any[]>([]);
   const [closed, setClosed] = useState<any[]>([]);
+  const [skipped, setSkipped] = useState<any[]>([]);
+  const [skippedTotalGainPct, setSkippedTotalGainPct] = useState(0);
+  const [skippedTotalNorm, setSkippedTotalNorm] = useState(0);
   const [summary, setSummary] = useState<any>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
@@ -63,7 +197,7 @@ export default function PortfolioScreen() {
     try {
       const token = await getToken();
       if (!token) { router.replace('/login'); return; }
-      const data = await fetchPortfolio();
+      const [data, skippedData] = await Promise.all([fetchPortfolio(), fetchSkipped()]);
       setPositions(data.positions || []);
       setClosed(
         (data.closed || []).sort((a: any, b: any) =>
@@ -72,6 +206,10 @@ export default function PortfolioScreen() {
       );
       setSummary(data.summary);
       setLastUpdated(data.last_updated || '');
+      setSkipped(skippedData.skipped || []);
+
+      setSkippedTotalGainPct(skippedData.total_gain_pct || 0);
+      setSkippedTotalNorm(skippedData.total_gain_normalized || 0);
       setError('');
     } catch (e: any) {
       if (e.message === 'Session expired') router.replace('/login');
@@ -84,7 +222,7 @@ export default function PortfolioScreen() {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const data = await refreshPortfolio();
+      const [data, skippedData] = await Promise.all([refreshPortfolio(), fetchSkipped()]);
       setPositions(data.positions || []);
       setClosed(
         (data.closed || []).sort((a: any, b: any) =>
@@ -93,6 +231,10 @@ export default function PortfolioScreen() {
       );
       setSummary(data.summary);
       setLastUpdated(data.last_updated || '');
+      setSkipped(skippedData.skipped || []);
+
+      setSkippedTotalGainPct(skippedData.total_gain_pct || 0);
+      setSkippedTotalNorm(skippedData.total_gain_normalized || 0);
     } catch (e: any) {
       setError(e.message);
     }
@@ -118,6 +260,14 @@ export default function PortfolioScreen() {
         >
           <Text style={[styles.tabBtnText, activeTab === 'positions' && styles.tabBtnTextActive]}>
             Positions ({positions.length})
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[styles.tabBtn, activeTab === 'skipped' && styles.tabBtnActive]}
+          onPress={() => setActiveTab('skipped')}
+        >
+          <Text style={[styles.tabBtnText, activeTab === 'skipped' && styles.tabBtnTextActive]}>
+            Skipped ({skipped.length})
           </Text>
         </Pressable>
         <Pressable
@@ -150,7 +300,7 @@ export default function PortfolioScreen() {
             </View>
           }
         />
-      ) : (
+      ) : activeTab === 'history' ? (
         <FlatList
           data={closed}
           keyExtractor={(item, i) => `${item.symbol}-${i}`}
@@ -165,6 +315,31 @@ export default function PortfolioScreen() {
                 color={realized >= 0 ? '#22c55e' : '#ef4444'} />
               <StatBox label="Win Rate" value={`${winRate}%`} />
               <StatBox label="Avg Hold" value={`${avgHold}d`} />
+            </View>
+          }
+        />
+      ) : (
+        <FlatList
+          data={skipped}
+          keyExtractor={(item, i) => `${item.symbol}-${i}`}
+          renderItem={({ item }) => <SkippedCard item={item} />}
+          ListEmptyComponent={<Text style={styles.empty}>No skipped positions</Text>}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#6366f1" />
+          }
+          ListHeaderComponent={
+            <View>
+              <View style={styles.statsBar}>
+                <StatBox label="Skipped" value={`${skipped.length}`} color="#f59e0b" />
+                <StatBox
+                  label={`Total ($1k ea)\n${skippedTotalNorm >= 0 ? '+' : ''}$${skippedTotalNorm.toFixed(0)}`}
+                  value={`${skippedTotalGainPct >= 0 ? '+' : ''}${skippedTotalGainPct.toFixed(1)}%`}
+                  color={skippedTotalNorm >= 0 ? '#22c55e' : '#ef4444'}
+                />
+                <Pressable style={styles.csvBtn} onPress={() => exportSkippedCSV(skipped)}>
+                  <Text style={styles.csvBtnText}>↓ CSV</Text>
+                </Pressable>
+              </View>
             </View>
           }
         />
@@ -212,4 +387,30 @@ const styles = StyleSheet.create({
   reasonBadge: { color: '#fbbf24', fontSize: 10, fontWeight: '600' },
   tradeModeBadge: { fontSize: 9, fontWeight: '700', borderWidth: 1, borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
   tradeDate: { color: '#444', fontSize: 10, marginTop: 4 },
+
+  skippedCard: {
+    backgroundColor: '#1a1a2e', padding: 10, borderRadius: 8,
+    marginHorizontal: 12, marginBottom: 6, borderLeftWidth: 3, borderLeftColor: '#f59e0b',
+  },
+  skippedCardStopped: { borderLeftColor: '#ef4444' },
+  skippedHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  skippedSymbol: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  skippedDate: { color: '#555', fontSize: 10 },
+  skippedRow: { flexDirection: 'row', gap: 10, alignItems: 'center', marginBottom: 3 },
+  skippedPrice: { color: '#ccc', fontSize: 13, fontWeight: '600' },
+  skippedUpside: { color: '#22c55e', fontSize: 11 },
+  skippedRisk: { color: '#ef4444', fontSize: 11 },
+  skippedCost: { color: '#666', fontSize: 10 },
+  modeBadge: { fontSize: 9, fontWeight: '700', borderWidth: 1, borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
+  qualityBadge: { fontSize: 9, fontWeight: '700', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
+  qualityGold: { backgroundColor: '#854d0e', color: '#fef08a' },
+  qualityPremium: { backgroundColor: '#312e81', color: '#a5b4fc' },
+
+  stoppedBadge: { fontSize: 9, fontWeight: '700', color: '#ef4444', borderWidth: 1, borderColor: '#ef4444', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
+  csvBtn: { marginLeft: 'auto', backgroundColor: '#1e3a5f', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#3b82f6' },
+  csvBtnText: { color: '#60a5fa', fontSize: 12, fontWeight: '700' },
+  skippedCols: { flexDirection: 'row', gap: 8, marginVertical: 6 },
+  skippedCol: { flex: 1, alignItems: 'center' },
+  skippedColLabel: { color: '#555', fontSize: 10, marginBottom: 2 },
+  skippedColValue: { color: '#ccc', fontSize: 12, fontWeight: '600' },
 });

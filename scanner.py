@@ -133,9 +133,20 @@ class BreakoutDetector:
             df, cfg['trend_type'], cfg.get('trend_period'), timeframe
         )
         
+        # Surge day mode: relaxed thresholds for broad market gap-ups
+        is_surge = kwargs.get('is_surge', False)
+        if is_surge:
+            from config import SURGE_DAY_CONFIG as _sc
+
         # Get values
         prev_high = df['high'].rolling(lookback).max().iloc[-2]
         latest = df.iloc[-1]
+
+        # Surge day: use previous bar's high instead of rolling max.
+        # On broad surge days after selloffs, price won't break the rolling high
+        # but a strong gap above yesterday's high is a valid momentum signal.
+        if is_surge:
+            prev_high = df['high'].iloc[-2]
         
         # Scalping price filter
         if mode_name == 'scalping':
@@ -214,9 +225,16 @@ class BreakoutDetector:
             (latest['close'] - df['close'].iloc[-2]) / df['close'].iloc[-2] * 100
             if len(df) >= 2 and df['close'].iloc[-2] > 0 else 0.0
         )
+        # Surge day: lower move & vol thresholds to catch broad gap-ups
+        if is_surge:
+            _ms_move = _sc.get('move_thresh_pct', 3.0)
+            _ms_vol = _sc.get('vol_ratio_min', 1.5)
+        else:
+            _ms_move, _ms_vol = 4.0, 2.0
         momentum_surge = (
-            gap_percent >= 5.0 or intraday_move_pct >= 5.0 or daily_move_pct >= 5.0
-        ) and latest['Vol_Ratio'] >= 3.0
+            gap_percent >= _ms_move or intraday_move_pct >= _ms_move
+            or daily_move_pct >= _ms_move
+        ) and latest['Vol_Ratio'] >= _ms_vol
         
         # 7. Volume spike for scalping
         if mode_name == 'scalping':
@@ -398,13 +416,16 @@ class BreakoutDetector:
                 checks['rs_ok'] = rs_ok
                 # Momentum surge / VCP / high-momentum plays bypass consolidation
                 from config import MOMENTUM_OVERRIDE as _mo_cfg
+                _mo_max_rsi = _sc.get('mo_max_rsi', 85) if is_surge else _mo_cfg['max_rsi']
+                _mo_min_vol = _sc.get('mo_min_vol', 1.5) if is_surge else _mo_cfg['min_vol_ratio']
                 _momentum_override = (
                     latest.get('Momentum_Score', 0) >= _mo_cfg['min_momentum']
-                    and latest['Vol_Ratio'] >= _mo_cfg['min_vol_ratio']
-                    and latest.get('RSI', 50) < _mo_cfg['max_rsi']
+                    and latest['Vol_Ratio'] >= _mo_min_vol
+                    and latest.get('RSI', 50) < _mo_max_rsi
                 )
                 checks['consolidation'] = (
                     was_consolidating or momentum_surge
+                    or is_surge  # Surge day bypasses consolidation entirely
                     or (vcp_quality > 0.3) or _momentum_override
                 )
 
@@ -422,7 +443,10 @@ class BreakoutDetector:
                         not_overextended = sma_dist_pct <= v4_thresholds['mild']
                         checks['not_overextended'] = not_overextended
 
-            score, max_score, quality = self._calculate_signal_score(checks)
+            _surge_thresholds = _sc.get('score_thresholds') if is_surge else None
+            score, max_score, quality = self._calculate_signal_score(
+                checks, score_thresholds_override=_surge_thresholds
+            )
 
             if quality == 'REJECT':
                 logger.scan(f"{symbol}: skip — score too low ({score}/{max_score})")
@@ -767,9 +791,14 @@ class BreakoutDetector:
     # Scoring weights are imported from config.SCORING_WEIGHTS (optimizer output).
     # Legacy V1 keys not in config are given default weight 5 via .get() fallback.
 
-    def _calculate_signal_score(self, checks: dict) -> tuple:
+    def _calculate_signal_score(self, checks: dict,
+                               score_thresholds_override: dict | None = None) -> tuple:
         """Calculate weighted signal score from boolean checks.
         Float values in [0.0, 1.0] contribute proportionally (e.g., minervini_template).
+
+        Args:
+            score_thresholds_override: Optional dict with GOLD/PREMIUM/HIGH/STANDARD
+                thresholds to use instead of config defaults (used for surge day).
         """
         score = 0
         max_score = 0
@@ -783,14 +812,15 @@ class BreakoutDetector:
 
         pct = (score / max_score * 100) if max_score > 0 else 0
 
-        # Quality thresholds from config.py (optimizer output)
-        if pct >= SCORE_THRESHOLDS.get('GOLD', 99):
+        # Quality thresholds — surge day uses relaxed thresholds from config
+        th = score_thresholds_override or SCORE_THRESHOLDS
+        if pct >= th.get('GOLD', 99):
             quality = 'GOLD'
-        elif pct >= SCORE_THRESHOLDS.get('PREMIUM', 69):
+        elif pct >= th.get('PREMIUM', 69):
             quality = 'PREMIUM'
-        elif pct >= SCORE_THRESHOLDS.get('HIGH', 65):
+        elif pct >= th.get('HIGH', 65):
             quality = 'HIGH'
-        elif pct >= SCORE_THRESHOLDS.get('STANDARD', 50):
+        elif pct >= th.get('STANDARD', 50):
             quality = 'STANDARD'
         else:
             quality = 'REJECT'

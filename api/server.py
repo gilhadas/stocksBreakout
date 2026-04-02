@@ -84,6 +84,95 @@ def refresh_portfolio(_token: str = Depends(_require_auth)):
     }
 
 
+@app.get("/portfolio/skipped")
+def get_skipped(_token: str = Depends(_require_auth)):
+    import auto_portfolio as ap
+    import yfinance as yf
+
+    data = ap.load()
+    skipped = data.get("skipped_cash", [])
+    capital = data.get("capital", 0)
+    cash = ap.available_cash(data)
+
+    # Fetch price history for all unique symbols since earliest date_added
+    symbols = list({s["symbol"] for s in skipped if s.get("symbol")})
+    # hist_data[sym] = DataFrame with DatetimeIndex, columns Close etc.
+    hist_data: dict = {}
+    if symbols:
+        try:
+            tickers = yf.Tickers(" ".join(symbols))
+            for sym in symbols:
+                try:
+                    h = tickers.tickers[sym].history(period="60d")
+                    if not h.empty:
+                        hist_data[sym] = h
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    enriched = []
+    total_gain = 0.0
+    for item in skipped:
+        sym = item.get("symbol", "")
+        entry = item.get("entry_price", 0) or 0
+        stop = item.get("stop", 0) or 0
+        shares = item.get("shares", 0) or 0
+        date_added = item.get("date_added", "")
+
+        hist = hist_data.get(sym)
+        current = entry
+        exit_date = None
+
+        if hist is not None and not hist.empty:
+            # Only look at bars on/after date_added
+            try:
+                hist_from = hist[hist.index.strftime('%Y-%m-%d') >= date_added]
+            except Exception:
+                hist_from = hist
+            current = float(hist_from["Close"].iloc[-1]) if not hist_from.empty else entry
+            # Find first bar where close <= stop (stop hit date)
+            if stop > 0:
+                crossed = hist_from[hist_from["Close"] <= stop]
+                if not crossed.empty:
+                    exit_date = crossed.index[0].strftime('%Y-%m-%d')
+
+        stopped = exit_date is not None
+        effective_price = stop if stopped else current
+        gain_pct = ((effective_price - entry) / entry * 100) if entry else 0
+        gain_dollar = (effective_price - entry) * shares
+
+        total_gain += gain_dollar
+
+        enriched.append({
+            **item,
+            "current_price": round(current, 2),
+            "close_price": round(stop, 2) if stopped else None,
+            "exit_date": exit_date,
+            "stopped": stopped,
+            "gain_pct": round(gain_pct, 2),
+            "gain_dollar": round(gain_dollar, 2),
+        })
+
+    total_cost = sum(e.get("cost", 0) or 0 for e in enriched)
+    total_gain_pct = (total_gain / total_cost * 100) if total_cost else 0
+    # Normalized: simulate each trade as $1000 invested
+    total_gain_normalized = sum((e.get("gain_pct", 0) / 100) * 1000 for e in enriched)
+
+    # Sort newest-first
+    enriched_sorted = sorted(enriched, key=lambda x: x.get("date_added", ""), reverse=True)
+    return {
+        "skipped": enriched_sorted,
+        "count": len(enriched_sorted),
+        "capital": capital,
+        "available_cash": cash,
+        "total_gain": round(total_gain, 2),
+        "total_gain_pct": round(total_gain_pct, 2),
+        "total_gain_normalized": round(total_gain_normalized, 2),
+        "last_updated": data.get("last_updated", ""),
+    }
+
+
 # ── Manual Portfolio ────────────────────────────────────────────────────────
 
 def _load_portfolio_json() -> dict:

@@ -57,7 +57,7 @@ SCORING_WEIGHTS = {
     'rsi_divergence': 14,       # V5: RSI bullish divergence — optimizer raised
     'sector_momentum': 8,       # V5: Sector ETF momentum
     'pattern_vol_confirmed': 12,# V6: Pattern confirmed by volume — optimizer raised
-    'momentum_surge': 2,        # V7: Explosive gap/intraday move + high volume — optimizer reduced
+    'momentum_surge': 15,       # V7: Explosive gap/intraday move + high volume — raised to catch single-stock surges
     'minervini_template': 0,    # V8: Minervini Stage 2 — optimizer eliminated
     'vcp_quality': 15,          # V10: VCP proportional score (0.0-1.0)
     'sr_breakout': 11,          # V11: Breaking above tested resistance (≥2 touches)
@@ -89,7 +89,7 @@ ATR_SIZING = {
     'reference_atr_pct': 0.025,    # 2.5% = median ATR% for liquid US stocks
     'min_adjustment': 0.3,         # Floor: never shrink below 30% of base size
     'max_adjustment': 1.0,         # Cap: never oversize (low-vol stocks stay at base)
-    'max_single_position_pct': 0.20,  # Hard cap: no position > 20% of capital
+    'max_single_position_pct': 0.05,  # Hard cap: no position > 5% of capital
     'atr_period': 14,              # ATR lookback (Wilder's)
     'atr_history_days': 30,        # Days of price data for ATR calc
 }
@@ -109,7 +109,7 @@ CASH_MANAGEMENT = {
     'max_per_sector': 3,             # Max positions in same sector
     'max_per_mode': 5,               # Max positions in same mode (swing/daytrade/longterm)
     'ideal_etf_pct': 0.20,          # Target 20% of positions in ETFs for stability
-    'max_single_position_pct': 0.20, # Largest position should not exceed 20% of portfolio value
+    'max_single_position_pct': 0.05, # Largest position should not exceed 5% of portfolio value
     # ── 70/30 Risk Balance ──
     'safe_allocation_pct': 0.70,     # 70% of portfolio value in safe positions (risk < 40)
     'risky_threshold': 40,           # Risk score >= this = "risky" position
@@ -311,6 +311,13 @@ REGIME_CONFIG = {
         'description': 'Strong downtrend (SPY < -1.5%) — keep trading, +55.8% P&L share',
         'spy_perf_threshold': None,
         'spy_vol_threshold': None
+    },
+    'SURGE': {
+        'vol_mult': 0.7,
+        'atr_mult': 0.7,
+        'description': 'Broad market surge day — relaxed filters, size-controlled',
+        'spy_perf_threshold': 0.01,
+        'spy_vol_threshold': 2.0
     }
 }
 
@@ -354,6 +361,35 @@ V9H_REGIME_GATE = {
         'max_per_day':       2,     # cap exception entries per scan session
         'pos_size_mult':     0.5,   # 50% normal position size in bear macro
     },
+}
+
+# --- Surge Day Mode (broad market gap-up detection) ---
+# On broad market surge days (SPY gaps up + many stocks gapping), relax scanner
+# filters to catch obvious movers that fail consolidation/RSI gates.
+# Triggered when BOTH conditions met: SPY gap >= threshold AND breadth >= threshold.
+# All changes gated behind is_surge=True — zero impact on normal days.
+SURGE_DAY_CONFIG = {
+    'enabled': True,
+    # --- Detection thresholds ---
+    'spy_gap_min_pct': 1.0,           # SPY pre-market gap >= 1.0%
+    'breadth_min_gappers': 15,        # At least 15 symbols in premarket_watch.txt
+    'spy_intraday_fallback_pct': 1.5, # Fallback: SPY intraday move >= 1.5% (no premarket data)
+    # --- Relaxed filter thresholds ---
+    'vol_ratio_min': 1.5,             # momentum_surge vol: 1.5x (was 3.0x)
+    'move_thresh_pct': 3.0,           # momentum_surge move: 3% (was 5%)
+    'mo_max_rsi': 85,                 # MOMENTUM_OVERRIDE RSI cap (was 75)
+    'mo_min_vol': 1.5,                # MOMENTUM_OVERRIDE vol (was 2.5)
+    # --- Score adjustments ---
+    'score_thresholds': {
+        'GOLD': 90,                   # Was 99
+        'PREMIUM': 60,                # Was 69
+        'HIGH': 55,                   # Was 65
+        'STANDARD': 40,               # Was 50
+    },
+    # --- Safety rails ---
+    'max_signals_per_scan': 10,       # Cap total surge signals (prevent alert flood)
+    'min_quality': 'HIGH',            # Minimum quality to emit on surge day
+    'pos_size_mult': 0.7,             # 70% position sizing (risk control on volatile days)
 }
 
 # V9-H Sector Exception: allow PREMIUM+ breakouts in sectors with strong

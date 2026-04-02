@@ -780,6 +780,44 @@ def _run_opening_check(args, now_et: datetime) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Surge context
+# ---------------------------------------------------------------------------
+
+def _write_surge_context(
+    all_watch: List[str],
+    gappers: List[Dict],
+    etf_context: List[Dict],
+    now_et: datetime,
+) -> None:
+    """Write surge_context.json for the scanner's SURGE regime detection.
+
+    Fetches SPY pre-market gap and records breadth (number of gappers).
+    The scanner reads this file at 9:35 AM to decide whether SURGE regime applies.
+    """
+    import json
+
+    spy_gap_pct = 0.0
+    spy_data = get_premarket_gap('SPY', now_et)
+    if spy_data:
+        spy_gap_pct = spy_data['gap_pct']
+
+    surge_ctx = {
+        'date': now_et.strftime('%Y-%m-%d'),
+        'spy_gap_pct': spy_gap_pct,
+        'num_gappers': len(gappers),
+        'total_watch': len(all_watch),
+        'gapper_symbols': [g['symbol'] for g in gappers],
+        'etf_gaps': {e['symbol']: e.get('gap_pct', 0) for e in etf_context},
+    }
+
+    surge_file = LISTS_DIR / 'surge_context.json'
+    surge_file.write_text(json.dumps(surge_ctx, indent=2))
+    logger.info(
+        f"Surge context: SPY gap {spy_gap_pct:+.1f}%, "
+        f"{len(gappers)} gappers → {surge_file.name}"
+    )
+
+
 # Main
 # ---------------------------------------------------------------------------
 
@@ -934,6 +972,9 @@ def main() -> int:
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text('\n'.join(all_watch))
             logger.info(f"Written {len(all_watch)} symbols → {out}")
+
+            # Write surge_context.json for scanner regime detection
+            _write_surge_context(all_watch, gappers, etf_context, now_et)
         else:
             logger.info("No symbols to write — premarket_watch.txt not updated.")
     else:

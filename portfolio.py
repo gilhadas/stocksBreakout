@@ -52,6 +52,17 @@ class Portfolio:
         loaded = load_json(PORTFOLIO_FILE)
         if loaded is not None:
             self._data = loaded
+            # Backfill missing keys in case the file was written by a different schema
+            # (e.g. auto_portfolio uses 'capital' instead of 'initial_capital'/'cash')
+            if 'initial_capital' not in self._data:
+                self._data['initial_capital'] = self._data.get('capital', PORTFOLIO['initial_capital'])
+            if 'cash' not in self._data:
+                invested = sum(p.get('cost', 0) for p in (self._data.get('positions') or {}).values())
+                self._data['cash'] = self._data['initial_capital'] - invested
+            if 'trade_history' not in self._data:
+                self._data['trade_history'] = self._data.get('closed', [])
+            if not isinstance(self._data.get('positions'), dict):
+                self._data['positions'] = {}
         else:
             init_capital = capital or PORTFOLIO['initial_capital']
             self._data = {
