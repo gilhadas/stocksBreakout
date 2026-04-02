@@ -803,6 +803,21 @@ def rebuild_skipped_cash() -> dict:
 
             entry_price, current_price = _fetch_entry_and_current(sym, date_str, price)
 
+            # Guard: if yfinance fell back to the CSV price (rate-limit / stale data),
+            # do a quick live-price sanity check using a broader daily fetch.
+            if price > 0 and entry_price == price:
+                try:
+                    import yfinance as _yf
+                    _live = _yf.Ticker(sym).history(period='5d', auto_adjust=True)
+                    if _live is not None and not _live.empty:
+                        _live_price = float(_live['Close'].dropna().iloc[-1])
+                        # If live price differs by >20%, it means csv_price was stale
+                        if _live_price > 0 and max(_live_price, price) / min(_live_price, price) > 1.20:
+                            # Re-fetch with the corrected price reference
+                            entry_price, current_price = _fetch_entry_and_current(sym, date_str, _live_price)
+                except Exception:
+                    pass
+
             # Guard: stop must be below entry and not based on wrong price scale
             if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.40):
                 stop = round(entry_price * 0.95, 4)
