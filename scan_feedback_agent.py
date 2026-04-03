@@ -1309,26 +1309,31 @@ def main() -> None:
         fcntl.flock(_lock_file, fcntl.LOCK_EX | (0 if args.loop else fcntl.LOCK_NB))
     except BlockingIOError:
         logger.info("Feedback agent already running — skipping this invocation")
+        _lock_file.close()
         return
 
-    logger.info(
-        f"Scan feedback agent started "
-        f"{'(loop every %ds, rescan every %ds)' % (args.interval, args.rescan_interval) if args.loop else '(single run)'}"
-    )
+    try:
+        logger.info(
+            f"Scan feedback agent started "
+            f"{'(loop every %ds, rescan every %ds)' % (args.interval, args.rescan_interval) if args.loop else '(single run)'}"
+        )
 
-    while True:
-        try:
-            run_once(args.date, rescan_interval=args.rescan_interval)
-        except Exception as e:
-            logger.error(f"Feedback agent error: {e}", exc_info=True)
+        while True:
+            try:
+                run_once(args.date, rescan_interval=args.rescan_interval)
+            except Exception as e:
+                logger.error(f"Feedback agent error: {e}", exc_info=True)
 
-        if not args.loop:
-            break
+            if not args.loop:
+                break
 
-        logger.info(f"Next check in {args.interval}s …")
-        time.sleep(args.interval)
+            logger.info(f"Next check in {args.interval}s …")
+            time.sleep(args.interval)
 
-    print_summary(args.date)
+        print_summary(args.date)
+    finally:
+        fcntl.flock(_lock_file, fcntl.LOCK_UN)
+        _lock_file.close()
 
 
 if __name__ == '__main__':

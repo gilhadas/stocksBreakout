@@ -253,8 +253,9 @@ class BreakoutDetector:
         rr_ok = rr >= cfg['min_rr']
 
         # --- R:R GRADE + GRADE D REJECTION (V3) ---
+        # Check from highest threshold down: B(≥2.0) → C(≥1.5) → A(≥0.66) → D
         rr_grade = 'D'
-        for grade in ['A', 'B', 'C']:
+        for grade in ['B', 'C', 'A']:
             if rr >= RR_GRADE_CONFIG[grade]['min_rr']:
                 rr_grade = grade
                 break
@@ -361,7 +362,7 @@ class BreakoutDetector:
                     'trend_ok': trend_ok,
                     'dist_confirm': dist_confirm,
                     'candle_ok': candle_ok,
-                    'rr_ok': {'A': 0.7, 'B': 1.0, 'C': 0.5, 'D': 0.0}.get(rr_grade, 0.0),  # V9: graded (B=sweet spot)
+                    'rr_ok': {'A': 0.3, 'B': 1.0, 'C': 0.65, 'D': 0.0}.get(rr_grade, 0.0),  # V9: B(≥2.0)=best, C(≥1.5)=good, A(≥0.66)=marginal
                     'no_vol_divergence': not vol_divergence,
                     'vwap_ok': vwap_ok,
                     'rsi_favorable': rsi_favorable,
@@ -377,7 +378,7 @@ class BreakoutDetector:
                     'momentum_strong': momentum_strong,
                     'dist_confirm': dist_confirm,
                     'candle_ok': candle_ok,
-                    'rr_ok': {'A': 0.7, 'B': 1.0, 'C': 0.5, 'D': 0.0}.get(rr_grade, 0.0),  # V9: graded (B=sweet spot)
+                    'rr_ok': {'A': 0.3, 'B': 1.0, 'C': 0.65, 'D': 0.0}.get(rr_grade, 0.0),  # V9: B(≥2.0)=best, C(≥1.5)=good, A(≥0.66)=marginal
                     'no_vol_divergence': not vol_divergence,
                     'conviction_strong': conviction_strong,
                     'has_bullish_pattern': has_bullish_pattern,
@@ -657,9 +658,9 @@ class BreakoutDetector:
         if max_consecutive < 3:
             return False
 
-        # Check volume during consolidation is below average
+        # Check volume during consolidation is below average (use same window)
         consol_vol = check_window.loc[is_narrow, 'volume'].mean() if is_narrow.any() else float('inf')
-        avg_vol = df['volume'].rolling(20).mean().iloc[-2]
+        avg_vol = check_window['volume'].mean()
         if pd.isna(avg_vol) or pd.isna(consol_vol):
             return max_consecutive >= 3
         return consol_vol < avg_vol * 0.8

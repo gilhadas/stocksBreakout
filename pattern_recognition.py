@@ -1608,10 +1608,13 @@ def detect_vcp(df: pd.DataFrame, ticker: str = "", mode: str = "swing") -> Optio
     if first_pb < cfg['first_pullback_min_pct'] or first_pb > cfg['first_pullback_max_pct']:
         return None
 
-    # Each subsequent pullback must be shallower (allow some tolerance)
-    for i in range(1, len(pullback_pcts)):
-        ratio = pullback_pcts[i] / pullback_pcts[i - 1]
-        if ratio > 0.95:  # Not contracting enough (must shrink by at least 5%)
+    # Overall progressive tightening: average decay ratio must show contraction
+    # (allows one non-contracting pullback if the overall trend is tightening)
+    if len(pullback_pcts) >= 2:
+        decay_ratios = [pullback_pcts[i] / pullback_pcts[i - 1]
+                        for i in range(1, len(pullback_pcts))]
+        avg_decay = np.mean(decay_ratios)
+        if avg_decay > 0.90:  # Overall must shrink by at least 10% on average
             return None
 
     # --- Step 5: Higher lows ---
@@ -1624,12 +1627,7 @@ def detect_vcp(df: pd.DataFrame, ticker: str = "", mode: str = "swing") -> Optio
     contraction_vols = [c['avg_volume'] for c in contractions if c['avg_volume'] > 0]
     vol_dryup = True
     if len(contraction_vols) >= 2:
-        for i in range(1, len(contraction_vols)):
-            if contraction_vols[i] > contraction_vols[i - 1] * cfg['vol_dryup_threshold']:
-                # Volume didn't decrease enough in one transition — not a deal breaker
-                # but reduces quality
-                pass
-        # Overall: final contraction volume vs first
+        # Overall: final contraction volume vs first must show dry-up
         vol_dryup = contraction_vols[-1] < contraction_vols[0] * cfg['vol_dryup_threshold']
 
     # --- Step 7: Pivot point and tight area ---

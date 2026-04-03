@@ -7,14 +7,15 @@ import numpy as np
 
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Calculate Average True Range"""
+    """Calculate Average True Range using Wilder's smoothing (EMA with alpha=1/period)."""
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
-    
+
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
-    return true_range.rolling(period).mean()
+    # Wilder's smoothing: equivalent to EMA with span=period (alpha = 1/period)
+    return true_range.ewm(span=period, adjust=False).mean()
 
 
 def calculate_volume_ratio(df: pd.DataFrame, period: int = 20) -> pd.Series:

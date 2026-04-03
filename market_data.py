@@ -4,6 +4,7 @@ Market data fetching and processing module
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Optional, Tuple
 import pandas as pd
 from ib_insync import IB, Stock, util
@@ -193,7 +194,7 @@ class MarketDataHandler:
         Falls back to yfinance if IB is unavailable.
         Returns: (performance, volatility)
         """
-        cache_key = f"{timeframe}_{lookback}"
+        cache_key = f"{timeframe}_{lookback}_{datetime.now().strftime('%Y-%m-%d')}"
 
         if cache_key in self.spy_cache:
             return self.spy_cache[cache_key]

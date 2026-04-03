@@ -61,6 +61,9 @@ class ScannerOrchestrator:
         Returns:
             List of signal dictionaries
         """
+        # Clear rejection reasons from previous scan to prevent memory leak
+        self.detector.rejection_reasons.clear()
+
         # Get market context
         if mode != 'scalping':
             # Use provided lookback or default from config
@@ -451,8 +454,8 @@ class ScannerOrchestrator:
                     elif regime == 'BEARISH':
                         # Short-term pullback: breakouts still allowed, but no BOUNCE/SMA20_CROSS
                         if signal is not None:
-                            # Breakout found — let it through
-                            pass
+                            # Breakout found — return directly to skip BOUNCE/SMA20_CROSS cascade
+                            return signal
                         else:
                             # No breakout — allow continuation, block BOUNCE/SMA20_CROSS
                             signal = self.detector.detect_continuation(

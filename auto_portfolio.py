@@ -60,10 +60,13 @@ def _save(data: dict):
         import fcntl, os
         abs_path = _to_local_abs(_PORTFOLIO_PATH)
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        with open(abs_path, 'a') as lf:
+        lock_path = abs_path + '.lock'
+        with open(lock_path, 'w') as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
-            save_json(data, _PORTFOLIO_PATH)
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            try:
+                save_json(data, _PORTFOLIO_PATH)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -877,45 +880,60 @@ def add_position_direct(
     Directly add a position without scanning CSV files.
     Used by scan_feedback_agent.py when a real-time BREAKOUT is detected.
     Returns {'added': bool, 'reason': str}.
+
+    Load + duplicate check + save are performed atomically under the file lock
+    to prevent two concurrent processes from adding the same symbol.
     """
-    data = load()
+    from utils import save_json, load_json, _is_cloud, _to_local_abs
+    import fcntl, os
 
-    if symbol.upper() in open_symbols(data):
-        return {'added': False, 'reason': 'duplicate'}
+    abs_path = _to_local_abs(_PORTFOLIO_PATH)
+    lock_path = abs_path + '.lock'
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
-    pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
-    cost  = entry_price * max(1, int(data['capital'] * pct / entry_price))
-    shares = int(data['capital'] * pct / entry_price)
-    if shares < 1:
-        return {'added': False, 'reason': 'shares_zero'}
+    with open(lock_path, 'w') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            # Re-load inside lock to get latest state
+            data = load()
 
-    cost = round(entry_price * shares, 2)
-    if cost > available_cash(data):
-        return {'added': False, 'reason': 'no_cash'}
+            if symbol.upper() in open_symbols(data):
+                return {'added': False, 'reason': 'duplicate'}
 
-    # Guard: stop must be BELOW entry price
-    if stop >= entry_price:
-        _trail_pct = {'longterm': 0.05, 'swing': 0.03, 'daytrade': 0.01, 'scalping': 0.01}
-        stop = entry_price * (1.0 - _trail_pct.get(mode, 0.05))
+            pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
+            shares = int(data['capital'] * pct / entry_price)
+            if shares < 1:
+                return {'added': False, 'reason': 'shares_zero'}
 
-    now_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
-    position = {
-        'symbol':          symbol.upper(),
-        'date_added':      now_str,
-        'mode':            mode,
-        'quality':         quality,
-        'minervini_score': 0,
-        'entry_price':     round(entry_price, 4),
-        'stop':            round(stop, 4),
-        'target':          round(target, 4),
-        'shares':          shares,
-        'cost':            cost,
-        'current_price':   round(entry_price, 4),
-        'vol_ratio':       round(vol_ratio, 2),
-    }
-    data['positions'].append(position)
-    _save(data)
-    return {'added': True, 'reason': 'ok'}
+            cost = round(entry_price * shares, 2)
+            if cost > available_cash(data):
+                return {'added': False, 'reason': 'no_cash'}
+
+            # Guard: stop must be BELOW entry price
+            if stop >= entry_price:
+                _trail_pct = {'longterm': 0.05, 'swing': 0.03, 'daytrade': 0.01, 'scalping': 0.01}
+                stop = entry_price * (1.0 - _trail_pct.get(mode, 0.05))
+
+            now_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
+            position = {
+                'symbol':          symbol.upper(),
+                'date_added':      now_str,
+                'mode':            mode,
+                'quality':         quality,
+                'minervini_score': 0,
+                'entry_price':     round(entry_price, 4),
+                'stop':            round(stop, 4),
+                'target':          round(target, 4),
+                'shares':          shares,
+                'cost':            cost,
+                'current_price':   round(entry_price, 4),
+                'vol_ratio':       round(vol_ratio, 2),
+            }
+            data['positions'].append(position)
+            save_json(data, _PORTFOLIO_PATH)
+            return {'added': True, 'reason': 'ok'}
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 # ── Manual close (UI) ─────────────────────────────────────────────────────────
