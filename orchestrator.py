@@ -251,6 +251,31 @@ class ScannerOrchestrator:
                 if combined_sizing < 1.0:
                     sig['Event_Sizing_Mult'] = round(combined_sizing, 2)
 
+        # Earnings-aware sizing: reduce position size when ER is within 2 trading days
+        for sig in results:
+            try:
+                import yfinance as yf
+                from datetime import timedelta
+                tkr = yf.Ticker(sig['Symbol'])
+                cal = tkr.calendar
+                if cal is not None and not (hasattr(cal, 'empty') and cal.empty):
+                    # yfinance returns earnings date as Timestamp or in calendar dict
+                    er_date = None
+                    if isinstance(cal, dict):
+                        er_date = cal.get('Earnings Date', [None])[0] if cal.get('Earnings Date') else None
+                    elif hasattr(cal, 'columns') and 'Earnings Date' in cal.columns:
+                        er_date = cal['Earnings Date'].iloc[0] if len(cal['Earnings Date']) > 0 else None
+                    if er_date is not None:
+                        er_date = pd.Timestamp(er_date)
+                        days_to_er = (er_date - pd.Timestamp.now(tz='America/New_York')).days
+                        if 0 <= days_to_er <= 2:
+                            existing_mult = sig.get('Event_Sizing_Mult', 1.0)
+                            sig['Event_Sizing_Mult'] = round(existing_mult * 0.5, 2)
+                            sig['ER_Warning'] = f"ER in {days_to_er}d — position halved"
+                            logger.info(f"  {sig['Symbol']}: ER in {days_to_er} days — sizing halved")
+            except Exception:
+                pass  # Earnings data unavailable — proceed with normal sizing
+
         print()  # Clear progress line
 
         # Missed-movers summary: log symbols that moved ≥5% but were not signaled

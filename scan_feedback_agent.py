@@ -1051,6 +1051,16 @@ def run_once(decisions_date: Optional[str] = None,
             if not _bo_stop_px or _bo_stop_px >= current_price or _stop_too_far:
                 # Fallback to ATR-based stops if scanner signal has bad data
                 _bo_stop_px, _bo_target_px = _compute_stops(symbol, current_price, sym_mode)
+            # Post-entry confirmation: reject if price moved >5% from scanner signal price
+            _sig_price = _scanner_signal.get('Price', 0)
+            if _sig_price and current_price > 0:
+                _drift_pct = abs(current_price - _sig_price) / _sig_price
+                if _drift_pct > 0.05:
+                    logger.warning(
+                        f"  BREAKOUT {symbol}: price drifted {_drift_pct:.1%} from signal "
+                        f"(signal=${_sig_price:.2f} vs current=${current_price:.2f}) — skipping"
+                    )
+                    event = 'OK'
             if _bo_stop_px is None or _bo_stop_px >= current_price:
                 logger.warning(f"  BREAKOUT {symbol}: skipping portfolio add — invalid stop/target")
                 event = 'OK'   # suppress alert; don't add to portfolio
