@@ -255,7 +255,6 @@ class ScannerOrchestrator:
         for sig in results:
             try:
                 import yfinance as yf
-                from datetime import timedelta
                 tkr = yf.Ticker(sig['Symbol'])
                 cal = tkr.calendar
                 if cal is not None and not (hasattr(cal, 'empty') and cal.empty):

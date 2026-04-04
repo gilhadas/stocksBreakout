@@ -14,8 +14,8 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
-    # Wilder's smoothing: equivalent to EMA with span=period (alpha = 1/period)
-    return true_range.ewm(span=period, adjust=False).mean()
+    # Wilder's smoothing: alpha = 1/period (com = period-1 in pandas)
+    return true_range.ewm(com=period - 1, adjust=False).mean()
 
 
 def calculate_volume_ratio(df: pd.DataFrame, period: int = 20) -> pd.Series:

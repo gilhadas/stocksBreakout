@@ -930,6 +930,7 @@ def add_position_direct(
                 'vol_ratio':       round(vol_ratio, 2),
             }
             data['positions'].append(position)
+            data['last_updated'] = datetime.now(_NY_TZ).isoformat()
             save_json(data, _PORTFOLIO_PATH)
             return {'added': True, 'reason': 'ok'}
         finally:

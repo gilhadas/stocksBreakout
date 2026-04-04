@@ -6,6 +6,7 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
 import pandas as pd
 from ib_insync import IB, Stock, util
 
@@ -194,7 +195,7 @@ class MarketDataHandler:
         Falls back to yfinance if IB is unavailable.
         Returns: (performance, volatility)
         """
-        cache_key = f"{timeframe}_{lookback}_{datetime.now().strftime('%Y-%m-%d')}"
+        cache_key = f"{timeframe}_{lookback}_{datetime.now(ZoneInfo('America/New_York')).strftime('%Y-%m-%d')}"
 
         if cache_key in self.spy_cache:
             return self.spy_cache[cache_key]

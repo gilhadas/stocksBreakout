@@ -1061,7 +1061,9 @@ def run_once(decisions_date: Optional[str] = None,
                         f"(signal=${_sig_price:.2f} vs current=${current_price:.2f}) — skipping"
                     )
                     event = 'OK'
-            if _bo_stop_px is None or _bo_stop_px >= current_price:
+            if event != 'BREAKOUT':
+                pass  # drift or earlier check already rejected
+            elif _bo_stop_px is None or _bo_stop_px >= current_price:
                 logger.warning(f"  BREAKOUT {symbol}: skipping portfolio add — invalid stop/target")
                 event = 'OK'   # suppress alert; don't add to portfolio
             else:
