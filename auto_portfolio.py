@@ -221,7 +221,7 @@ def scan_and_add(min_date: str | None = None,
 
             # Guard: stop must be below entry and not based on wrong price scale
             # (catches stale/split-adjusted data returning wrong close in scanner)
-            if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.40):
+            if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.30):
                 stop = round(entry_price * 0.95, 4)
 
             # Position sizing: pos_pct × quality_mult × ATR adjustment × event mult
@@ -765,7 +765,7 @@ def rebuild_skipped_cash() -> dict:
             entry = e.get('entry_price', 0) or 0
             stop  = e.get('stop', 0) or 0
             target = e.get('target', 0) or 0
-            if entry > 0 and (stop <= 0 or stop >= entry or (entry - stop) / entry > 0.40):
+            if entry > 0 and (stop <= 0 or stop >= entry or (entry - stop) / entry > 0.30):
                 e = dict(e, stop=round(entry * 0.95, 4))
             if entry > 0 and (target <= 0 or target <= entry):
                 e = dict(e, target=round(entry * 1.10, 4))
@@ -836,7 +836,7 @@ def rebuild_skipped_cash() -> dict:
                     pass
 
             # Guard: stop must be below entry and not based on wrong price scale
-            if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.40):
+            if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.30):
                 stop = round(entry_price * 0.95, 4)
             if target <= entry_price:
                 target = round(entry_price * 1.10, 4)

@@ -229,13 +229,21 @@ def load_market_data_once(watchlist_file: str, spy_timeframe: str = 'daily') -> 
 
 
 def save_cache(cache: CachedMarketData) -> Optional[Path]:
-    """Save cache to file. Returns cache file path."""
+    """Save cache to file atomically (temp file + rename) to prevent corruption."""
     try:
+        import tempfile
         timestamp = datetime.now(_NY_TZ).strftime('%Y%m%d_%H%M%S')
         cache_file = _CACHE_DIR / f'market_data_{timestamp}.pkl'
 
-        with open(cache_file, 'wb') as f:
-            pickle.dump(cache, f)
+        # Write to temp file first, then atomic rename
+        fd, tmp_path = tempfile.mkstemp(dir=_CACHE_DIR, suffix='.pkl.tmp')
+        try:
+            with open(fd, 'wb') as f:
+                pickle.dump(cache, f)
+            Path(tmp_path).rename(cache_file)
+        except Exception:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
 
         logger.info(f"✓ Cached market data: {cache_file}")
         return cache_file

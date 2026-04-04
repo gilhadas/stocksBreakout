@@ -62,14 +62,32 @@ class Notifier:
         return set()
 
     def _save_cache(self):
-        """Persist sent notification keys to disk."""
+        """Persist sent notification keys to disk (locked to prevent race conditions)."""
         try:
+            import fcntl
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                'date': datetime.now().strftime('%Y-%m-%d'),
-                'keys': list(self._sent_cache),
-            }
-            self._cache_file.write_text(json.dumps(data))
+            lock_path = str(self._cache_file) + '.lock'
+            with open(lock_path, 'w') as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+                try:
+                    # Re-read cache under lock to merge with concurrent writers
+                    existing_keys = set()
+                    if self._cache_file.exists():
+                        try:
+                            disk = json.loads(self._cache_file.read_text())
+                            if disk.get('date') == datetime.now().strftime('%Y-%m-%d'):
+                                existing_keys = set(disk.get('keys', []))
+                        except Exception:
+                            pass
+                    merged = existing_keys | self._sent_cache
+                    self._sent_cache = merged
+                    data = {
+                        'date': datetime.now().strftime('%Y-%m-%d'),
+                        'keys': list(merged),
+                    }
+                    self._cache_file.write_text(json.dumps(data))
+                finally:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
         except Exception as e:
             logger.debug(f"Cache save failed: {e}")
 
@@ -125,12 +143,20 @@ class Notifier:
         # Expo push (always attempt if tokens exist)
         results.append(('Expo Push', self.send_expo_push(subject, message, signals)))
 
-        # Log results
+        # Log results — warn loudly if ALL channels fail (trader misses alerts)
+        failures = []
         for channel, success in results:
             if success:
                 logger.info(f"✓ {channel} notification sent")
             else:
+                failures.append(channel)
                 logger.warning(f"✗ {channel} notification failed")
+
+        if failures and len(failures) == len(results):
+            logger.critical(
+                f"ALL notification channels failed for '{subject}' — "
+                f"trader will NOT receive this alert! Channels: {', '.join(failures)}"
+            )
     
     def send_email(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
                    csv_path: Optional[str] = None) -> bool:

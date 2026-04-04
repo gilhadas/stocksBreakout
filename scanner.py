@@ -334,12 +334,13 @@ class BreakoutDetector:
         rsi_bull_div = bool(latest.get('RSI_Bull_Div', False))
         sector_hot = kwargs.get('sector_hot', False)
 
-        # V8: Minervini Stage 2 Trend Template
+        # V8: Minervini Stage 2 Trend Template (weight=0 — optimizer eliminated as scorer,
+        # but still computed for CSV diagnostics and used as screener gate in backtest)
         from indicators import calculate_minervini_template
         _minervini_conditions, minervini_score = calculate_minervini_template(
             df, high_52w=float(high_52w), low_52w=float(low_52w)
         )
-        minervini_pass = minervini_score >= 7   # kept for reference; checks uses proportional value
+        minervini_pass = minervini_score >= 7
 
         # --- SIGNAL SCORING SYSTEM ---
         use_scoring = kwargs.get('use_scoring', True)
@@ -403,11 +404,14 @@ class BreakoutDetector:
                 checks['vcp_quality'] = vcp_quality
 
             # V11: Support & Resistance levels (uses cached df — no extra fetch)
+            # Mode-adaptive tolerance: tighter for intraday, looser for swing/longterm
+            _sr_tol = {'scalping': 0.005, 'daytrade': 0.010, 'swing': 0.015, 'longterm': 0.020}
             from pattern_recognition import detect_sr_levels
             sr_data = detect_sr_levels(
                 df,
                 current_price=float(latest['close']),
                 atr=float(latest['ATR']) if not pd.isna(latest.get('ATR', float('nan'))) else 1.0,
+                tolerance_pct=_sr_tol.get(mode_name, 0.015),
             )
             checks['sr_breakout'] = sr_data['breaking_resistance']
             checks['at_key_support'] = sr_data['at_key_support']
