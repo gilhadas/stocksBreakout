@@ -184,6 +184,26 @@ def fetch_headlines(symbol: str, max_count: int = 8,
         except Exception:
             continue
 
+    # Supplement with Alpha Vantage headlines if yfinance returned fewer than max_count
+    if len(texts) < max_count:
+        try:
+            from alphavantage_news import fetch_av_headlines
+            av_headlines = fetch_av_headlines(
+                symbol, limit=max_count - len(texts),
+                hours_back=max_age_hours
+            )
+            # Deduplicate by checking if title prefix already exists
+            existing_titles = {t.split('.')[0].lower().strip() for t in texts}
+            for h in av_headlines:
+                if len(texts) >= max_count:
+                    break
+                h_prefix = h.split('.')[0].lower().strip()
+                if h_prefix not in existing_titles:
+                    texts.append(h)
+                    existing_titles.add(h_prefix)
+        except Exception as exc:
+            logger.debug(f"Alpha Vantage headline supplement skipped: {exc}")
+
     return texts
 
 

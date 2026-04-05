@@ -211,10 +211,21 @@ def get_sector_buzz():
                 if rs_20d > 2:
                     score += 1
 
-                # 4. News mentions (0-1) — requires Tavily
-                keyword = _SECTOR_KEYWORDS.get(sector_name, sector_name)
-                results = _tavily_search(f"{keyword} today", max_results=3)
-                if len(results) >= 2:
+                # 4. News mentions (0-1) — Alpha Vantage preferred, Tavily fallback
+                _news_hit = False
+                try:
+                    from alphavantage_news import get_news_sentiment as _av_news
+                    _av = _av_news(etf_ticker, limit=5, hours_back=24)
+                    if _av['articles'] >= 2:
+                        _news_hit = True
+                except Exception:
+                    pass
+                if not _news_hit:
+                    keyword = _SECTOR_KEYWORDS.get(sector_name, sector_name)
+                    results = _tavily_search(f"{keyword} today", max_results=3)
+                    if len(results) >= 2:
+                        _news_hit = True
+                if _news_hit:
                     score += 1
 
                 # Sentiment label

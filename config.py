@@ -460,6 +460,9 @@ DATA_DURATION = {
 # --- Output Settings ---
 OUTPUT_DIR = 'scanner_output'  # Directory for all output files
 
+# --- Alpha Vantage News Sentiment ---
+ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', '')
+
 # --- Sentiment & Sector Analysis ---
 SENTIMENT = {
     'enabled': True,

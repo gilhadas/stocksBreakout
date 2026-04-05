@@ -129,10 +129,42 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 sig['Sentiment'] = sent['sentiment']
                 sig['Buzz'] = sent['buzz_score']
 
-    # FinBERT sentiment for HIGH / PREMIUM / GOLD signals only
-    # Runs unconditionally when quality signals are present — no extra flag required.
-    # Adds FinBERT, FinBERT_Score, FinBERT_Net, FinBERT_Headline keys to each signal dict.
+    # ── Alpha Vantage News Sentiment (HIGH+ signals) ─────────────────────────
+    # Runs BEFORE FinBERT so the headline cache is warm — FinBERT's
+    # fetch_headlines() pulls from cache instead of making extra API calls.
+    # Adds AV_Sentiment, AV_Score, AV_Articles, AV_Headline, AV_Topics keys.
     _quality_sigs = [s for s in results if s.get('Quality') in ('HIGH', 'PREMIUM', 'GOLD')]
+    if _quality_sigs:
+        try:
+            from alphavantage_news import batch_news_sentiment as _av_batch
+            _av_syms = [s.get('Symbol') or s.get('symbol', '') for s in _quality_sigs]
+            _av_syms = [s for s in _av_syms if s]
+            if _av_syms:
+                logger.info(f"Alpha Vantage news: fetching sentiment for {len(_av_syms)} HIGH+ signal(s)…")
+                _av_results = _av_batch(_av_syms, limit_per_symbol=5, hours_back=48)
+                for sig in results:
+                    sym = sig.get('Symbol') or sig.get('symbol', '')
+                    if sym in _av_results:
+                        av = _av_results[sym]
+                        if av['articles'] > 0:
+                            sig['AV_Sentiment'] = av['label']
+                            sig['AV_Score'] = av['score']
+                            sig['AV_Articles'] = av['articles']
+                            sig['AV_Headline'] = av['top_headline'][:100]
+                            sig['AV_Topics'] = ','.join(av['topics'][:5])
+                            logger.info(
+                                f"  AV {sym:<8} {av['label']:<18} "
+                                f"score={av['score']:+.3f}  articles={av['articles']}  "
+                                f'"{av["top_headline"][:65]}"'
+                            )
+        except ImportError:
+            logger.debug("alphavantage_news not available or requests not installed")
+        except Exception as _av_e:
+            logger.warning(f"Alpha Vantage news enrichment failed: {_av_e}")
+
+    # ── FinBERT sentiment for HIGH / PREMIUM / GOLD signals ──────────────────
+    # Runs after AV so fetch_headlines() can pull from the AV headline cache.
+    # Adds FinBERT, FinBERT_Score, FinBERT_Net, FinBERT_Headline keys to each signal dict.
     if _quality_sigs:
         try:
             from finbert_sentiment import batch_sentiment as _fb_batch
