@@ -7,8 +7,8 @@ from typing import Optional, Dict, Any
 import pandas as pd
 import numpy as np
 
-from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, BB_TREND_FILTER,
-                    WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS)
+from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, RR_GRADE_SCORES,
+                    BB_TREND_FILTER, WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS)
 from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
@@ -363,7 +363,7 @@ class BreakoutDetector:
                     'trend_ok': trend_ok,
                     'dist_confirm': dist_confirm,
                     'candle_ok': candle_ok,
-                    'rr_ok': {'A': 0.3, 'B': 1.0, 'C': 0.65, 'D': 0.0}.get(rr_grade, 0.0),  # V9: B(≥2.0)=best, C(≥1.5)=good, A(≥0.66)=marginal
+                    'rr_ok': RR_GRADE_SCORES.get(rr_grade, 0.0),  # V9: B(≥2.0)=best, C(≥1.5)=good, A(≥0.66)=marginal
                     'no_vol_divergence': not vol_divergence,
                     'vwap_ok': vwap_ok,
                     'rsi_favorable': rsi_favorable,
@@ -379,7 +379,7 @@ class BreakoutDetector:
                     'momentum_strong': momentum_strong,
                     'dist_confirm': dist_confirm,
                     'candle_ok': candle_ok,
-                    'rr_ok': {'A': 0.3, 'B': 1.0, 'C': 0.65, 'D': 0.0}.get(rr_grade, 0.0),  # V9: B(≥2.0)=best, C(≥1.5)=good, A(≥0.66)=marginal
+                    'rr_ok': RR_GRADE_SCORES.get(rr_grade, 0.0),  # V9: B(≥2.0)=best, C(≥1.5)=good, A(≥0.66)=marginal
                     'no_vol_divergence': not vol_divergence,
                     'conviction_strong': conviction_strong,
                     'has_bullish_pattern': has_bullish_pattern,
@@ -808,7 +808,7 @@ class BreakoutDetector:
         score = 0
         max_score = 0
         for key, passed in checks.items():
-            weight = self.scoring_weights.get(key, 5)
+            weight = self.scoring_weights.get(key, 0)
             max_score += weight
             if isinstance(passed, float) and not isinstance(passed, bool):
                 score += weight * passed  # proportional: 6/8 → 0.75 × 15 = 11.25 pts

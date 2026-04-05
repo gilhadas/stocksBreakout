@@ -74,14 +74,30 @@ def _passes_filter(quality: str, min_quality: str) -> bool:
 
 
 def rescore(candidates: list, weights: dict, thresholds: dict,
-            min_quality: str = 'HIGH') -> list:
-    """Re-score signal candidates from stored checks without re-scanning."""
+            min_quality: str = 'HIGH', rr_grade_scores: dict = None) -> list:
+    """Re-score signal candidates from stored checks without re-scanning.
+
+    Args:
+        rr_grade_scores: Optional override for RR grade-to-score mapping.
+            If None, uses the stored float values in checks as-is.
+    """
     out = []
     for c in candidates:
         checks = c.get('checks', {})
         if not checks:
             continue
-        score = sum(weights.get(k, 0) for k, v in checks.items() if v)
+        score = 0
+        for k, v in checks.items():
+            w = weights.get(k, 0)
+            if isinstance(v, float) and not isinstance(v, bool):
+                # Proportional check (e.g. rr_ok=0.65, minervini_template=0.875)
+                # If optimizer provided rr_grade_scores, re-map rr_ok from raw grade
+                if k == 'rr_ok' and rr_grade_scores is not None:
+                    grade = c.get('rr_grade', 'D')
+                    v = rr_grade_scores.get(grade, 0.0)
+                score += w * v
+            elif v:
+                score += w
         quality = _score_to_quality(score, thresholds)
         if _passes_filter(quality, min_quality):
             sig = dict(c)
@@ -120,6 +136,14 @@ def make_objective(fold_candidates: dict, end_prices: dict,
         # ── Sample weights ─────────────────────────────────────────────────
         weights = {k: trial.suggest_int(k, 0, 25) for k in WEIGHT_KEYS}
 
+        # ── Sample RR grade scores (B must be best, D=0 fixed) ────────────
+        rr_grade_scores = {
+            'B': 1.0,  # Best R:R always scores highest
+            'C': trial.suggest_float('rr_score_C', 0.3, 0.9),
+            'A': trial.suggest_float('rr_score_A', 0.0, 0.6),
+            'D': 0.0,
+        }
+
         # ── Sample thresholds with monotonicity constraint ─────────────────
         thresh_gold     = trial.suggest_int('thresh_gold',     82, 100)
         thresh_premium  = trial.suggest_int('thresh_premium',  65, 90)
@@ -142,6 +166,7 @@ def make_objective(fold_candidates: dict, end_prices: dict,
             signals = rescore(
                 fold_candidates[fold['id']],
                 weights, thresholds, min_quality,
+                rr_grade_scores=rr_grade_scores,
             )
             if len(signals) < 3:
                 continue
@@ -175,12 +200,19 @@ def stability_report(study: optuna.Study, fold_candidates: dict,
         'HIGH':     best.params['thresh_high'],
         'STANDARD': best.params['thresh_standard'],
     }
+    rr_grade_scores = {
+        'B': 1.0,
+        'C': round(best.params.get('rr_score_C', 0.65), 2),
+        'A': round(best.params.get('rr_score_A', 0.3), 2),
+        'D': 0.0,
+    }
 
     per_fold = {}
     for fold in FOLDS:
         signals = rescore(
             fold_candidates[fold['id']],
             weights, thresholds, min_quality,
+            rr_grade_scores=rr_grade_scores,
         )
         result = run_simulation(
             signals,
@@ -205,6 +237,7 @@ def stability_report(study: optuna.Study, fold_candidates: dict,
     return {
         'weights':    weights,
         'thresholds': thresholds,
+        'rr_grade_scores': rr_grade_scores,
         'best_value': round(best.value, 4),
         'per_fold':   per_fold,
         'generated':  datetime.now().isoformat(),
@@ -213,7 +246,8 @@ def stability_report(study: optuna.Study, fold_candidates: dict,
 
 # ── Config.py patch printer ──────────────────────────────────────────────────
 
-def print_config_patch(weights: dict, thresholds: dict) -> None:
+def print_config_patch(weights: dict, thresholds: dict,
+                       rr_grade_scores: dict = None) -> None:
     orig_w = config.SCORING_WEIGHTS
     orig_t = config.SCORE_THRESHOLDS
 
@@ -232,6 +266,14 @@ def print_config_patch(weights: dict, thresholds: dict) -> None:
         note = f"  # was {orig}" if v != orig else ""
         print(f"    '{k}': {v},{note}")
     print("}")
+    if rr_grade_scores:
+        orig_rr = config.RR_GRADE_SCORES
+        print("\nRR_GRADE_SCORES = {")
+        for k, v in rr_grade_scores.items():
+            orig = orig_rr.get(k, 0)
+            note = f"  # was {orig}" if v != orig else ""
+            print(f"    '{k}': {v},{note}")
+        print("}")
     print("=" * 62 + "\n")
 
 
@@ -343,7 +385,8 @@ def main():
         pass
 
     if args.apply:
-        print_config_patch(report['weights'], report['thresholds'])
+        print_config_patch(report['weights'], report['thresholds'],
+                          report.get('rr_grade_scores'))
 
 
 if __name__ == '__main__':

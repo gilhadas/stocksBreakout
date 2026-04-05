@@ -63,6 +63,13 @@ SCORING_WEIGHTS = {
     'sr_breakout': 11,          # V11: Breaking above tested resistance (≥2 touches)
     'at_key_support': 24,       # V11: Price hugging a key support zone — optimizer top signal
     'trendline_break': 9,       # V11b: Breaking above angled resistance trendline (≥3 swing highs)
+    # V1 legacy checks (explicit weights — were phantom 5 via default fallback)
+    'vwap_ok': 5,               # V1: Price above VWAP
+    'rsi_favorable': 5,         # V1: RSI in favorable zone
+    'macd_favorable': 5,        # V1: MACD bullish
+    'adx_trending': 5,          # V1: ADX showing trend strength
+    # Shared checks
+    'not_overextended': 5,      # V4: Not blown off from SMA (swing/longterm only)
 }
 
 SCORE_THRESHOLDS = {
@@ -122,6 +129,11 @@ RR_GRADE_CONFIG = {
     'C': {'min_rr': 1.5, 'reject': False},
     'D': {'min_rr': 0.0, 'reject': True},  # R:R < 1.5 = reject
 }
+
+# Grade-to-score mapping for rr_ok check (proportional 0.0-1.0, used in scoring)
+# These values are multiplied by SCORING_WEIGHTS['rr_ok'] to get final contribution.
+# Optimizable by weight_optimizer.py.
+RR_GRADE_SCORES = {'A': 0.53, 'B': 1.0, 'C': 0.57, 'D': 0.0}
 
 # --- Momentum Override (bypasses consolidation for high-momentum breakouts) ---
 MOMENTUM_OVERRIDE = {

@@ -262,6 +262,30 @@ def run_all_scans(historical, start_date, end_date, modes=None):
                         found = True
                         break
 
+                    # Bounce (all variants — matches backtest_regime_compare.py pipeline)
+                    try:
+                        bounce_sig = detector.detect_bounce(df_slice, symbol, mode_name, '1 day')
+                    except Exception:
+                        bounce_sig = None
+
+                    if bounce_sig:
+                        results[variant].append(_make_signal(symbol, mode_name, sim_date, bounce_sig, 'BOUNCE'))
+                        cooldowns[variant][symbol] = sim_date
+                        found = True
+                        break
+
+                    # SMA20 Cross (all variants — matches backtest_regime_compare.py pipeline)
+                    try:
+                        sma20_sig = detector.detect_sma20_cross(df_slice, symbol, mode_name, '1 day', spy_perf)
+                    except Exception:
+                        sma20_sig = None
+
+                    if sma20_sig:
+                        results[variant].append(_make_signal(symbol, mode_name, sim_date, sma20_sig, 'SMA20_CROSS'))
+                        cooldowns[variant][symbol] = sim_date
+                        found = True
+                        break
+
                     # Pullback (only v2/v5x — pullback uses composite logic)
                     if not flags['use_legacy_momentum']:
                         try:
