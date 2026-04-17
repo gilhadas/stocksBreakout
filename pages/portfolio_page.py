@@ -476,7 +476,7 @@ def _render_auto_portfolio():
 
     # Row 2: action buttons
     col_scan, col_recalc, col_refresh, col_trail, col_missed, col_swap, col_reset = st.columns(
-        [1.2, 1.5, 1.3, 1.5, 1.4, 0.8]
+        [1.2, 1.5, 1.3, 1.5, 1.4, 1.2, 0.8]
     )
 
     with col_scan:
