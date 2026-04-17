@@ -703,15 +703,18 @@ def _portfolio_avg_atr(data: dict) -> float | None:
 def _compute_priority_score(quality: str, win_prob: float, rr: float, vol: float) -> float:
     """Composite score to rank skipped signals — higher = better predicted outcome.
 
-    Formula: WinProb (0-100) × quality_mult × rr_bonus × vol_bonus
-      quality_mult : GOLD=1.3, PREMIUM=1.0, else 0.8
+    When WinProb is available (BREAKOUT path): WinProb × quality_mult × rr_bonus × vol_bonus
+    When WinProb is 0 (BOUNCE/SMA20_CROSS path): falls back to quality_base × rr_bonus × vol_bonus
+      quality_base : GOLD=75, PREMIUM=50, HIGH=35  (empirical win-rate proxies)
       rr_bonus     : min(R:R / 2.0, 1.5)  — caps at 3:1
       vol_bonus    : min(Vol / 1.5, 1.3)  — rewards strong volume but caps
     """
-    quality_mult = {'GOLD': 1.3, 'PREMIUM': 1.0}.get(quality, 0.8)
-    rr_bonus     = min(rr / 2.0, 1.5) if rr > 0 else 0.5
+    quality_base = {'GOLD': 75.0, 'PREMIUM': 50.0, 'HIGH': 35.0}.get(quality, 30.0)
+    base         = win_prob if win_prob > 0 else quality_base
+    rr_capped    = min(rr, 5.0)   # cap at 5:1 — avoids inflated S/R targets
+    rr_bonus     = min(rr_capped / 2.0, 1.5) if rr_capped > 0 else 0.5
     vol_bonus    = min(vol / 1.5, 1.3) if vol > 0 else 1.0
-    return round(win_prob * quality_mult * rr_bonus * vol_bonus, 1)
+    return round(base * rr_bonus * vol_bonus, 1)
 
 
 def _build_skipped_entry(
@@ -1707,7 +1710,7 @@ def suggest_swaps(
 
     today = datetime.now(_NY_TZ).date()
 
-    # Filter skipped: fresh, not already open, positive momentum
+    # Filter skipped: fresh, not already open, positive momentum, sane target
     open_syms = {p['symbol'] for p in positions}
     fresh_skipped = []
     for s in skipped:
@@ -1721,6 +1724,14 @@ def suggest_swaps(
         if age_days > fresh_days:
             continue
         if s.get('missed_pnl_pct', 0) < _SWAP_MIN_MOMENTUM:
+            continue
+        # Reject corrupted targets (S/R resolver artefact: target > 3× entry)
+        ep = s.get('entry_price', 0) or 0
+        tgt = s.get('target', 0) or 0
+        if ep > 0 and tgt > ep * 3.0:
+            continue
+        # Reject if target upside < 3% (daytrade signals have tiny targets, not suitable as replacements)
+        if ep > 0 and tgt > 0 and (tgt - ep) / ep < 0.03:
             continue
         fresh_skipped.append(s)
 
