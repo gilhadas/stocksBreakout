@@ -163,6 +163,12 @@ HC_BASE=https://hc-ping.com
 # Every weekday at 10:00 AM ET - After morning scans, check cash + diversity + stale positions
 0 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
+# ============================================
+# SWAP ADVISOR (daily at 4:15 PM ET after prices settled)
+# Compares open positions vs top skipped signals; notifies if a swap is worthwhile
+# ============================================
+15 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN -c "from auto_portfolio import suggest_swaps; suggest_swaps(notify=True)" >> scanner_output/logs/cron_swap_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
 # Every weekday at 3:00 PM ET - Afternoon check before close
 0 15 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN position_health.py >> scanner_output/logs/cron_health_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 

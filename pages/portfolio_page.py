@@ -475,7 +475,7 @@ def _render_auto_portfolio():
             scan_min_date = scan_from.strftime('%Y-%m-%d')
 
     # Row 2: action buttons
-    col_scan, col_recalc, col_refresh, col_trail, col_missed, col_reset = st.columns(
+    col_scan, col_recalc, col_refresh, col_trail, col_missed, col_swap, col_reset = st.columns(
         [1.2, 1.5, 1.3, 1.5, 1.4, 0.8]
     )
 
@@ -549,6 +549,17 @@ def _render_auto_portfolio():
             data    = result['data']
             summary = ap.get_summary(data)
             st.toast(f"Found {result['found']} missed trade(s).")
+            st.rerun()
+
+    with col_swap:
+        if st.button("⚡ Swap Advisor", key="ap_swap",
+                     help="Find skipped signals that could replace weaker open positions"):
+            with st.spinner("Analysing swap opportunities..."):
+                swaps = ap.suggest_swaps(notify=True)
+            if swaps:
+                st.toast(f"Found {len(swaps)} swap suggestion(s) — check notifications.")
+            else:
+                st.toast("No swap opportunities found (no weak positions or no fresh strong signals).")
             st.rerun()
 
     with col_reset:
@@ -892,40 +903,47 @@ def _render_auto_portfolio():
             )
             st.dataframe(styled_history, use_container_width=True, hide_index=True)
 
-    # ── Missed Trades (skipped due to insufficient cash) ─────────────────────
+    # ── Missed Trades (skipped — sorted by priority_score) ───────────────────
     skipped = data.get('skipped_cash', [])
     if skipped:
-        st.markdown(f"**Missed Trades — Insufficient Cash ({len(skipped)})**")
+        skip_reason_counts = {}
+        for s in skipped:
+            r = s.get('skip_reason', 'unknown')
+            skip_reason_counts[r] = skip_reason_counts.get(r, 0) + 1
+        reason_str = ' | '.join(f"{v} {k}" for k, v in skip_reason_counts.items())
+        st.markdown(f"**Missed Trades ({len(skipped)}) — sorted by predicted quality**")
         st.caption(
-            "Signals that were not taken because available cash was below the required position size. "
-            "P&L shown is hypothetical (entry price on signal date → today's price)."
+            f"Skipped signals: {reason_str}. "
+            "Priority score = WinProb × quality × R:R × volume. "
+            "Momentum% = actual return since signal date."
         )
         missed_rows = []
         total_hyp_pnl = 0.0
-        for s in reversed(skipped):
+        # Already sorted by priority_score desc from auto_portfolio
+        for s in skipped:
             ep  = s.get('entry_price', 0)
             cur = s.get('current_price', ep)
             shares = s.get('shares', 0)
             hyp_pnl     = round((cur - ep) * shares, 0) if ep else 0
             hyp_pnl_pct = round((cur - ep) / ep * 100, 1) if ep else 0
             total_hyp_pnl += hyp_pnl
-            dist_stop   = round((cur - s['stop'])   / ep * 100, 1) if ep else 0
             dist_target = round((s['target'] - cur) / ep * 100, 1) if ep else 0
             missed_rows.append({
                 'Symbol':    s['symbol'],
-                'Date':      s['date_added'],
-                'Type':      s.get('mode', ''),
+                'Date':      s['date_added'][:10],
+                'Reason':    s.get('skip_reason', ''),
                 'Quality':   s.get('quality', ''),
-                'Minervini': s.get('minervini_score', ''),
+                'Type':      s.get('type', s.get('mode', '')),
+                'WinProb%':  s.get('win_prob', ''),
+                'Grade':     s.get('win_grade', ''),
+                'R:R':       s.get('rr', ''),
+                'Vol×':      s.get('vol', ''),
+                'Priority':  s.get('priority_score', ''),
+                'Momentum%': hyp_pnl_pct,
+                'Hyp. P&L':  hyp_pnl,
                 'Entry $':   f"${ep:.2f}",
                 'Current $': f"${cur:.2f}",
-                'Chg%':      hyp_pnl_pct,
-                'Hyp. P&L':  hyp_pnl,
-                'Stop $':    f"${s['stop']:.2f}",
-                'To Stop%':  dist_stop,
-                'Target $':  f"${s['target']:.2f}",
                 'To Tgt%':   dist_target,
-                'Cost $':    f"${s.get('cost', 0):,.0f}",
             })
         total_hyp_wins = sum(1 for s in skipped
                              if s.get('current_price', 0) > s.get('entry_price', 0))
@@ -937,7 +955,7 @@ def _render_auto_portfolio():
         df_missed = pd.DataFrame(missed_rows)
         styled_missed = df_missed.style.map(
             _color_pnl,
-            subset=[c for c in ['Chg%', 'Hyp. P&L'] if c in df_missed.columns]
+            subset=[c for c in ['Momentum%', 'Hyp. P&L'] if c in df_missed.columns]
         )
         st.dataframe(styled_missed, use_container_width=True, hide_index=True)
 

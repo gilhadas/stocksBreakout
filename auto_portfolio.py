@@ -197,6 +197,25 @@ def scan_and_add(min_date: str | None = None,
             processed.add(fname)
             continue
 
+        # Sort within each file by priority: GOLD first, then WinProb desc, then R:R desc.
+        # This ensures the daily cap (MAX_ADDS_PER_SCAN) keeps the best signals, not
+        # just whichever happened to appear first alphabetically in the CSV.
+        sort_cols, sort_asc = [], []
+        if 'Quality' in v9h.columns:
+            v9h = v9h.copy()
+            v9h['_q_rank'] = v9h['Quality'].map({'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2}).fillna(3)
+            sort_cols.append('_q_rank'); sort_asc.append(True)
+        if 'WinProb' in v9h.columns:
+            v9h['_wp'] = pd.to_numeric(v9h['WinProb'], errors='coerce').fillna(0)
+            sort_cols.append('_wp'); sort_asc.append(False)
+        if 'R:R' in v9h.columns:
+            v9h['_rr'] = pd.to_numeric(v9h['R:R'], errors='coerce').fillna(0)
+            sort_cols.append('_rr'); sort_asc.append(False)
+        if sort_cols:
+            v9h = v9h.sort_values(sort_cols, ascending=sort_asc).drop(
+                columns=[c for c in ['_q_rank', '_wp', '_rr'] if c in v9h.columns]
+            )
+
         for _, row in v9h.iterrows():
             sym = str(row.get('Symbol', '')).strip().upper()
             if not sym or sym == 'NAN':
@@ -205,11 +224,6 @@ def scan_and_add(min_date: str | None = None,
             # Dedup: only block if CURRENTLY open
             if sym in open_syms:
                 skipped_dup.append(sym)
-                continue
-
-            # Daily deployment cap — prevent all capital spent in one scan
-            if adds_this_scan >= MAX_ADDS_PER_SCAN:
-                skipped_cap.append(sym)
                 continue
 
             price = _safe_float(row.get('Price'))
@@ -223,6 +237,19 @@ def scan_and_add(min_date: str | None = None,
             minervini = int(_ms) if (_ms is not None and _ms == _ms) else 0
             # Mode: prefer from signal row, fall back to filename
             mode = str(row.get('Mode', file_mode)).lower().strip() or file_mode
+
+            # Daily deployment cap — prevent all capital spent in one scan.
+            # Signals are now sorted by priority above, so we skip the lowest-ranked ones.
+            if adds_this_scan >= MAX_ADDS_PER_SCAN:
+                skipped_cap.append(sym)
+                entry_price, current_price = _fetch_entry_and_current(sym, date_str, price)
+                if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.30):
+                    stop = round(entry_price * 0.95, 4)
+                data['skipped_cash'].append(_build_skipped_entry(
+                    row, sym, date_str, mode, quality, minervini,
+                    entry_price, current_price, stop, target, skip_reason='cap',
+                ))
+                continue
 
             # Fetch actual entry price on date_added + today's current price
             entry_price, current_price = _fetch_entry_and_current(
@@ -262,19 +289,11 @@ def scan_and_add(min_date: str | None = None,
             cash = available_cash(data)
             if cost > cash:
                 skipped_cash.append(sym)
-                data['skipped_cash'].append({
-                    'symbol':          sym,
-                    'date_added':      date_str,
-                    'mode':            mode,
-                    'quality':         quality,
-                    'minervini_score': minervini,
-                    'entry_price':     entry_price,
-                    'current_price':   current_price,
-                    'stop':            round(stop, 4),
-                    'target':          round(target, 4),
-                    'shares':          shares,
-                    'cost':            cost,
-                })
+                data['skipped_cash'].append(_build_skipped_entry(
+                    row, sym, date_str, mode, quality, minervini,
+                    entry_price, current_price, stop, target,
+                    shares=shares, cost=cost, skip_reason='cash',
+                ))
                 continue
 
             # Resolve sector for diversity tracking
@@ -314,6 +333,10 @@ def scan_and_add(min_date: str | None = None,
         processed.add(fname)
 
     data['processed_files'] = sorted(processed)
+
+    # Sort skipped list: best priority first so the UI surfaces top missed trades
+    data['skipped_cash'].sort(key=lambda e: e.get('priority_score', 0), reverse=True)
+
     _save(data)
 
     # ── Notify on newly added positions ──────────────────────────────────────
@@ -675,6 +698,83 @@ def _portfolio_avg_atr(data: dict) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _compute_priority_score(quality: str, win_prob: float, rr: float, vol: float) -> float:
+    """Composite score to rank skipped signals — higher = better predicted outcome.
+
+    Formula: WinProb (0-100) × quality_mult × rr_bonus × vol_bonus
+      quality_mult : GOLD=1.3, PREMIUM=1.0, else 0.8
+      rr_bonus     : min(R:R / 2.0, 1.5)  — caps at 3:1
+      vol_bonus    : min(Vol / 1.5, 1.3)  — rewards strong volume but caps
+    """
+    quality_mult = {'GOLD': 1.3, 'PREMIUM': 1.0}.get(quality, 0.8)
+    rr_bonus     = min(rr / 2.0, 1.5) if rr > 0 else 0.5
+    vol_bonus    = min(vol / 1.5, 1.3) if vol > 0 else 1.0
+    return round(win_prob * quality_mult * rr_bonus * vol_bonus, 1)
+
+
+def _build_skipped_entry(
+    row,
+    sym: str,
+    date_str: str,
+    mode: str,
+    quality: str,
+    minervini: int,
+    entry_price: float,
+    current_price: float,
+    stop: float,
+    target: float,
+    shares: int = 0,
+    cost: float = 0.0,
+    skip_reason: str = 'cash',
+) -> dict:
+    """Build a skipped-signal record with full predictive metadata.
+
+    Captures Vol, R:R, Type, WinProb, WinGrade from the signal row so the
+    Streamlit UI can rank missed opportunities by predicted outcome quality.
+    missed_pnl_pct shows what the trade would have returned by now.
+    """
+    vol      = _safe_float(row.get('Vol'))       if row is not None else 0.0
+    rr       = _safe_float(row.get('R:R'))       if row is not None else 0.0
+    win_prob = _safe_float(row.get('WinProb'))   if row is not None else 0.0
+    win_grade = str(row.get('WinGrade', ''))     if row is not None else ''
+    sig_type  = str(row.get('Type', ''))         if row is not None else ''
+    sector    = str(row.get('Sector', ''))       if row is not None else ''
+    rsi       = _safe_float(row.get('RSI'))      if row is not None else 0.0
+
+    missed_pnl_pct = round((current_price / entry_price - 1) * 100, 2) if entry_price > 0 else 0.0
+    priority       = _compute_priority_score(quality, win_prob, rr, vol)
+
+    if shares == 0 and entry_price > 0:
+        from config import ATR_SIZING
+        pos_value = INITIAL_CAPITAL * POSITION_SIZE_PCT
+        shares    = max(1, int(pos_value / entry_price))
+        cost      = round(shares * entry_price, 2)
+
+    return {
+        'symbol':          sym,
+        'date_added':      date_str,
+        'mode':            mode,
+        'quality':         quality,
+        'minervini_score': minervini,
+        'entry_price':     entry_price,
+        'current_price':   current_price,
+        'stop':            round(stop, 4),
+        'target':          round(target, 4),
+        'shares':          shares,
+        'cost':            cost,
+        'vol':             round(vol, 2),
+        'rr':              round(rr, 2),
+        'win_prob':        round(win_prob, 1),
+        'win_grade':       win_grade,
+        'type':            sig_type,
+        'sector':          sector,
+        'rsi':             round(rsi, 1) if rsi else '',
+        'missed_pnl_pct':  missed_pnl_pct,
+        'priority_score':  priority,
+        'skip_reason':     skip_reason,
+    }
 
 
 def _safe_float(val) -> float:
@@ -1109,21 +1209,14 @@ def rebuild_skipped_cash() -> dict:
             shares = max(1, int(position_value / entry_price))
             cost   = round(shares * entry_price, 2)
 
-            data['skipped_cash'].append({
-                'symbol':          sym,
-                'date_added':      date_str,
-                'mode':            mode,
-                'quality':         quality,
-                'minervini_score': minervini,
-                'entry_price':     entry_price,
-                'current_price':   current_price,
-                'stop':            round(stop, 4),
-                'target':          round(target, 4),
-                'shares':          shares,
-                'cost':            cost,
-            })
+            data['skipped_cash'].append(_build_skipped_entry(
+                row, sym, date_str, mode, quality, minervini,
+                entry_price, current_price, stop, target,
+                shares=shares, cost=cost, skip_reason='unknown',
+            ))
             seen_syms.add(sym)
 
+    data['skipped_cash'].sort(key=lambda e: e.get('priority_score', 0), reverse=True)
     _save(data)
     return {'found': len(data['skipped_cash']), 'data': data}
 
@@ -1542,3 +1635,203 @@ def get_summary(data: dict) -> dict:
         'closed_count': len(data['closed']),
         'win_count':    sum(1 for t in data['closed'] if t.get('pnl', 0) > 0),
     }
+
+
+# ── Swap Advisor ──────────────────────────────────────────────────────────────
+
+_SWAP_WEAK_PNL_PCT    = -2.0   # position must be down ≥2% to be considered weak
+_SWAP_STOP_PROXIMITY  = 0.04   # OR within 4% of its stop
+_SWAP_MIN_FRESH_DAYS  = 5      # skipped signal must be ≤5 trading days old
+_SWAP_MIN_SCORE_DELTA = 20.0   # skipped priority_score must beat pos score by ≥20pts
+_SWAP_MIN_MOMENTUM    = 0.0    # skipped signal must be up since signal date (not falling)
+
+
+def _position_weakness_score(pos: dict) -> float:
+    """Score how weak/risky an open position is — higher = weaker.
+
+    Factors:
+      - current P&L% (negative amplifies weakness)
+      - proximity to stop (< 4% buffer is dangerous)
+      - days held without progress (stagnant capital)
+      - quality tier (LOW quality held longer = more liability)
+    """
+    entry   = pos.get('entry_price', 0) or 1
+    current = pos.get('current_price', entry)
+    stop    = pos.get('stop', entry * 0.95)
+
+    pnl_pct      = (current - entry) / entry * 100
+    stop_dist_pct = (current - stop) / current * 100 if current > 0 else 0
+
+    try:
+        date_added = pos.get('date_added', '')[:10]
+        days_held  = (datetime.now(_NY_TZ).date() -
+                      datetime.strptime(date_added, '%Y-%m-%d').date()).days
+    except Exception:
+        days_held = 0
+
+    quality_penalty = {'GOLD': 0, 'PREMIUM': 5, 'HIGH': 15}.get(
+        pos.get('quality', 'PREMIUM'), 10
+    )
+
+    score = 0.0
+    score -= pnl_pct * 2           # down 5% → +10 pts weakness
+    score += max(0, 4 - stop_dist_pct) * 5   # tight stop → up to +20 pts
+    score += max(0, days_held - 10) * 0.3    # stagnant >10 days
+    score += quality_penalty
+    return round(score, 1)
+
+
+def suggest_swaps(
+    max_suggestions: int = 3,
+    fresh_days: int = _SWAP_MIN_FRESH_DAYS,
+    min_score_delta: float = _SWAP_MIN_SCORE_DELTA,
+    notify: bool = True,
+) -> list[dict]:
+    """Compare open positions against top skipped signals and suggest swaps.
+
+    A swap is suggested when:
+      1. An open position is weak (down ≥2% OR within 4% of stop)
+      2. A recent skipped signal (≤fresh_days old) has priority_score ≥ the
+         weak position's implied score + min_score_delta
+      3. The skipped signal has positive momentum since signal date
+
+    Returns list of swap dicts, sorted by improvement desc.
+    Sends a notification if notify=True and any swaps found.
+    """
+    data      = load()
+    positions = data.get('positions', [])
+    skipped   = data.get('skipped_cash', [])
+
+    if not positions or not skipped:
+        return []
+
+    today = datetime.now(_NY_TZ).date()
+
+    # Filter skipped: fresh, not already open, positive momentum
+    open_syms = {p['symbol'] for p in positions}
+    fresh_skipped = []
+    for s in skipped:
+        if s.get('symbol') in open_syms:
+            continue
+        try:
+            sig_date = datetime.strptime(s.get('date_added', '')[:10], '%Y-%m-%d').date()
+            age_days = (today - sig_date).days
+        except Exception:
+            continue
+        if age_days > fresh_days:
+            continue
+        if s.get('missed_pnl_pct', 0) < _SWAP_MIN_MOMENTUM:
+            continue
+        fresh_skipped.append(s)
+
+    if not fresh_skipped:
+        return []
+
+    # Score each open position for weakness
+    weak_positions = []
+    for p in positions:
+        entry   = p.get('entry_price', 0) or 1
+        current = p.get('current_price', entry)
+        stop    = p.get('stop', entry * 0.95)
+
+        pnl_pct       = (current - entry) / entry * 100
+        stop_dist_pct = (current - stop) / current * 100 if current > 0 else 0
+
+        is_weak = pnl_pct <= _SWAP_WEAK_PNL_PCT or stop_dist_pct <= _SWAP_STOP_PROXIMITY * 100
+        if not is_weak:
+            continue
+
+        weakness = _position_weakness_score(p)
+        # Implied priority score of the open position (estimated from quality + R:R)
+        held_rr = ((p.get('target', entry * 1.1) - entry) /
+                   max(entry - stop, entry * 0.01))
+        implied_score = _compute_priority_score(
+            p.get('quality', 'PREMIUM'), 50.0, held_rr, 1.0
+        )
+        weak_positions.append({**p, '_weakness': weakness, '_implied_score': implied_score})
+
+    if not weak_positions:
+        return []
+
+    # Sort weak positions worst-first
+    weak_positions.sort(key=lambda p: p['_weakness'], reverse=True)
+
+    # Match each weak position to the best available skipped signal
+    swaps = []
+    used_skipped = set()
+
+    for pos in weak_positions:
+        if len(swaps) >= max_suggestions:
+            break
+        best_skip = None
+        best_delta = min_score_delta - 1
+
+        for s in fresh_skipped:
+            if s['symbol'] in used_skipped:
+                continue
+            delta = s.get('priority_score', 0) - pos['_implied_score']
+            if delta > best_delta:
+                best_delta = delta
+                best_skip  = s
+
+        if best_skip is None:
+            continue
+
+        used_skipped.add(best_skip['symbol'])
+        entry   = pos.get('entry_price', 0) or 1
+        current = pos.get('current_price', entry)
+        pnl_pct = (current - entry) / entry * 100
+
+        swaps.append({
+            'close_symbol':    pos['symbol'],
+            'close_pnl_pct':   round(pnl_pct, 2),
+            'close_current':   current,
+            'close_stop':      pos.get('stop'),
+            'close_quality':   pos.get('quality'),
+            'close_weakness':  pos['_weakness'],
+            'open_symbol':     best_skip['symbol'],
+            'open_quality':    best_skip.get('quality'),
+            'open_win_prob':   best_skip.get('win_prob'),
+            'open_win_grade':  best_skip.get('win_grade'),
+            'open_rr':         best_skip.get('rr'),
+            'open_vol':        best_skip.get('vol'),
+            'open_type':       best_skip.get('type'),
+            'open_entry':      best_skip.get('entry_price'),
+            'open_stop':       best_skip.get('stop'),
+            'open_target':     best_skip.get('target'),
+            'open_momentum':   best_skip.get('missed_pnl_pct'),
+            'open_priority':   best_skip.get('priority_score'),
+            'score_improvement': round(best_delta, 1),
+            'signal_date':     best_skip.get('date_added', '')[:10],
+            'skip_reason':     best_skip.get('skip_reason', ''),
+        })
+
+    if not swaps or not notify:
+        return swaps
+
+    try:
+        from notifier import Notifier
+        lines = []
+        for sw in swaps:
+            lines.append(
+                f"• CLOSE {sw['close_symbol']} ({sw['close_pnl_pct']:+.1f}%) → "
+                f"OPEN {sw['open_symbol']} [{sw['open_quality']}]  "
+                f"R:R {sw['open_rr']} | WinProb {sw['open_win_prob']}% | "
+                f"+{sw['open_momentum']:.1f}% since signal  "
+                f"(score +{sw['score_improvement']:.0f}pts)"
+            )
+        Notifier().send_all(
+            subject=f"⚡ Swap Advisor: {len(swaps)} opportunity{'s' if len(swaps) > 1 else ''}",
+            message=(
+                "Better signals are available to replace weaker positions:\n\n"
+                + "\n".join(lines)
+                + "\n\nThese are suggestions only — review before acting."
+            ),
+            signals=[],
+            notification_type='signals',
+        )
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger(__name__).warning(f"Swap advisor notification failed: {_e}")
+
+    return swaps
