@@ -99,19 +99,21 @@ class Notifier:
         return subject
     
     def send_all(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
-                 csv_path: Optional[str] = None, notification_type: str = 'signals'):
+                 csv_path: Optional[str] = None, notification_type: str = 'signals',
+                 force: bool = False):
         """Send notification via all enabled channels (prevents duplicates)
-        
+
         Args:
             subject: Email subject / notification title
             message: Body message
             signals: List of signal dictionaries
             csv_path: Optional path to CSV file to attach to email
             notification_type: Type of notification ('signals', 'exits', 'errors', 'alerts')
+            force: Skip dedup check (for user-triggered notifications)
         """
         # Check if already sent
         cache_key = self._generate_cache_key(subject, signals)
-        if cache_key in self._sent_cache:
+        if not force and cache_key in self._sent_cache:
             logger.debug(f"Skipping duplicate notification: {subject}")
             return
         

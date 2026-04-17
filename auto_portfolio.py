@@ -1838,8 +1838,9 @@ def suggest_swaps(
                 + "\n".join(lines)
                 + "\n\nThese are suggestions only — review before acting."
             ),
-            signals=[],
+            signals=None,
             notification_type='signals',
+            force=True,
         )
     except Exception as _e:
         import logging as _log
