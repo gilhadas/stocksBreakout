@@ -14,7 +14,7 @@ Rules
 - File tracking: each signal file is processed only once (via 'processed_files' set)
 """
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 _NY_TZ          = ZoneInfo('America/New_York')
@@ -25,6 +25,8 @@ INITIAL_CAPITAL    = 100_000
 POSITION_SIZE_PCT  = 0.05      # 5% of capital per trade
 MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
+MAX_ADDS_PER_SCAN  = 3         # Max new positions per scan (prevents capital dump)
+MAX_PORTFOLIO_ATR_RISK = 0.12  # Max total portfolio risk as ATR% (12% = aggressive)
 
 
 # ── Persistence ──────────────────────────────────────────────────────────────
@@ -131,8 +133,11 @@ def scan_and_add(min_date: str | None = None,
     added_syms    = []
     skipped_dup   = []
     skipped_cash  = []
+    skipped_risk  = []
+    skipped_cap   = []
     skipped_no_v9c = 0
     files_scanned  = 0
+    adds_this_scan = 0
 
     # Sort oldest-first so chronological order is respected.
     # list_files() returns newest-first; alphabetical sort gives oldest-first
@@ -202,6 +207,11 @@ def scan_and_add(min_date: str | None = None,
                 skipped_dup.append(sym)
                 continue
 
+            # Daily deployment cap — prevent all capital spent in one scan
+            if adds_this_scan >= MAX_ADDS_PER_SCAN:
+                skipped_cap.append(sym)
+                continue
+
             price = _safe_float(row.get('Price'))
             if not price:
                 continue
@@ -224,12 +234,23 @@ def scan_and_add(min_date: str | None = None,
             if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.30):
                 stop = round(entry_price * 0.95, 4)
 
-            # Position sizing: pos_pct × quality_mult × ATR adjustment × event mult
+            # ── Portfolio balance guards (includes ATR checks) ────────────
+            balance_result = _check_portfolio_balance(data, sym, mode, pos_pct)
+            if balance_result['blocked']:
+                import logging
+                logging.getLogger(__name__).info(
+                    f"BALANCE: skipped {sym} — {balance_result['reason']}"
+                )
+                skipped_risk.append(sym)
+                continue
+            balance_sizing_mult = balance_result.get('sizing_mult', 1.0)
+
+            # Position sizing: pos_pct × quality_mult × ATR adjustment × event mult × balance
             from config import QUALITY_SIZING, ATR_SIZING
             quality_mult = QUALITY_SIZING.get(quality, 1.0)
             atr_adj = _compute_atr_adjustment(sym)
             event_mult = _safe_float(row.get('Event_Sizing_Mult')) or 1.0
-            position_value = data['capital'] * pos_pct * quality_mult * atr_adj * event_mult
+            position_value = data['capital'] * pos_pct * quality_mult * atr_adj * event_mult * balance_sizing_mult
 
             # Hard cap: no position > max_single_position_pct of capital
             hard_cap = data['capital'] * ATR_SIZING.get('max_single_position_pct', 0.20)
@@ -280,6 +301,7 @@ def scan_and_add(min_date: str | None = None,
             data['positions'].append(pos_dict)
             open_syms.add(sym)
             added_syms.append(sym)
+            adds_this_scan += 1
 
             # IB execution hook — place bracket order if enabled
             try:
@@ -349,14 +371,21 @@ def scan_and_add(min_date: str | None = None,
             import logging as _log
             _log.getLogger(__name__).warning(f"Auto portfolio notification failed: {_e}")
 
+    # Log new guard stats
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+    if skipped_cap:
+        _logger.info(f"DAILY CAP: skipped {len(skipped_cap)} signals (max {MAX_ADDS_PER_SCAN}/scan): {', '.join(skipped_cap)}")
+    if skipped_risk:
+        _logger.info(f"ATR RISK: skipped {len(skipped_risk)} high-risk signals: {', '.join(skipped_risk)}")
+
     # Advisory health check — trigger when signals skipped due to low cash
     if skipped_cash:
         try:
             from position_health import run_health_check
             run_health_check(data)
         except Exception as _e:
-            import logging as _log
-            _log.getLogger(__name__).warning(f"Health check failed: {_e}")
+            _logger.warning(f"Health check failed: {_e}")
 
     return _build_result(added_syms, skipped_dup, skipped_cash,
                          skipped_no_v9c, files_scanned, data)
@@ -390,6 +419,30 @@ def _queue_ib_order(pos: dict):
         _logger.warning(f"IB queue failed for {pos['symbol']}: {e}")
 
 
+def _compute_atr_pct(symbol: str) -> float | None:
+    """Return ATR as a fraction of price for a symbol, or None on failure."""
+    try:
+        from yfinance_adapter import YFinanceAdapter
+        from indicators import calculate_atr
+        from datetime import datetime, timedelta
+
+        adapter = YFinanceAdapter(use_disk_cache=True)
+        end = datetime.now().strftime('%Y-%m-%d')
+        start = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')
+        df = adapter.get_historical_data(symbol, '1 day',
+                                         start_date=start, end_date=end)
+        if df is None or len(df) < 15:
+            return None
+        atr_series = calculate_atr(df, period=14)
+        atr_val = float(atr_series.iloc[-1])
+        close_val = float(df['close'].iloc[-1])
+        if close_val > 0 and atr_val > 0:
+            return atr_val / close_val
+    except Exception:
+        pass
+    return None
+
+
 def _compute_atr_adjustment(symbol: str) -> float:
     """
     Compute ATR-based position size adjustment.
@@ -399,18 +452,229 @@ def _compute_atr_adjustment(symbol: str) -> float:
     from config import ATR_SIZING
     if not ATR_SIZING.get('enabled'):
         return 1.0
-    try:
-        from position_health import _fetch_atr_pcts
-        atr_map = _fetch_atr_pcts([symbol])
-        atr_pct = atr_map.get(symbol)
-        if atr_pct is None or atr_pct <= 0:
-            return 1.0
-        ref = ATR_SIZING['reference_atr_pct']
-        raw = ref / atr_pct
-        return max(ATR_SIZING['min_adjustment'],
-                   min(ATR_SIZING['max_adjustment'], raw))
-    except Exception:
+    atr_pct = _compute_atr_pct(symbol)
+    if atr_pct is None:
         return 1.0
+    ref = ATR_SIZING['reference_atr_pct']
+    raw = ref / atr_pct
+    return max(ATR_SIZING['min_adjustment'],
+               min(ATR_SIZING['max_adjustment'], raw))
+
+
+def _portfolio_atr_risk(data: dict) -> float:
+    """
+    Compute total portfolio-weighted ATR risk.
+
+    Sum of (position_value / capital) × stock_atr_pct for all open positions.
+    A value of 0.10 means the portfolio's total weighted daily risk is ~10%.
+    """
+    capital = data.get('capital', INITIAL_CAPITAL)
+    if capital <= 0:
+        return 0.0
+    positions = data.get('positions', [])
+    if not positions:
+        return 0.0
+
+    total_risk = 0.0
+    for pos in positions:
+        atr_pct = _compute_atr_pct(pos['symbol'])
+        if atr_pct is None or atr_pct <= 0:
+            continue
+        pos_value = pos.get('shares', 0) * pos.get('entry_price', 0)
+        weight = pos_value / capital
+        total_risk += weight * atr_pct
+
+    return total_risk
+
+
+def _check_portfolio_balance(data: dict, new_symbol: str,
+                             new_mode: str,
+                             pos_pct: float = POSITION_SIZE_PCT) -> dict:
+    """
+    Enforce portfolio balance rules before adding a new position.
+
+    Returns dict:
+        blocked: bool      — True if position should be rejected
+        reason: str        — human-readable reason
+        sizing_mult: float — multiplier to shrink position (1.0 = full, <1 = reduced)
+
+    Rules enforced:
+      1. Sector concentration: max 3 positions per sector (from config)
+      2. Mode concentration: max 5 positions per mode
+      3. Regime cash reserve: keep 30%/40% cash in bearish/red markets
+      4. Loss concentration: if ≥50% of positions underwater, half-size new entries
+      5. Sector drawdown guard: block if same-sector + 2+ losers
+      6. Portfolio ATR risk cap: total weighted ATR% can't exceed MAX_PORTFOLIO_ATR_RISK
+      7. ATR outlier rejection: block stocks >3× portfolio avg ATR%
+      8. ATR-aware sizing: scale down high-ATR adds even when below cap
+    """
+    from config import CASH_MANAGEMENT
+
+    positions = data.get('positions', [])
+    capital = data.get('capital', INITIAL_CAPITAL)
+    result = {'blocked': False, 'reason': '', 'sizing_mult': 1.0}
+
+    max_per_sector = CASH_MANAGEMENT.get('max_per_sector', 3)
+    max_per_mode = CASH_MANAGEMENT.get('max_per_mode', 5)
+
+    # ── 1. Sector concentration ──────────────────────────────────────────
+    try:
+        from sentiment import get_sector_for_ticker
+        new_sector = get_sector_for_ticker(new_symbol)
+    except Exception:
+        new_sector = ''
+
+    if new_sector:
+        sector_count = sum(
+            1 for p in positions
+            if p.get('sector', '') == new_sector
+        )
+        if sector_count >= max_per_sector:
+            result['blocked'] = True
+            result['reason'] = (
+                f"sector '{new_sector}' already has {sector_count} positions "
+                f"(max {max_per_sector})"
+            )
+            return result
+
+    # ── 2. Mode concentration ────────────────────────────────────────────
+    mode_count = sum(1 for p in positions if p.get('mode', '') == new_mode)
+    if mode_count >= max_per_mode:
+        result['blocked'] = True
+        result['reason'] = (
+            f"mode '{new_mode}' already has {mode_count} positions "
+            f"(max {max_per_mode})"
+        )
+        return result
+
+    # ── 3. Regime-based cash reserve ─────────────────────────────────────
+    try:
+        from yfinance_adapter import YFinanceAdapter
+        from datetime import datetime, timedelta
+        _adapter = YFinanceAdapter(use_disk_cache=True)
+        _end = datetime.now().strftime('%Y-%m-%d')
+        _start = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        spy_df = _adapter.get_historical_data('SPY', '1 day',
+                                              start_date=_start, end_date=_end)
+        if spy_df is not None and len(spy_df) >= 15:
+            spy_ret_15d = (
+                float(spy_df['close'].iloc[-1]) /
+                float(spy_df['close'].iloc[-15]) - 1
+            )
+            if spy_ret_15d <= -0.015:
+                min_cash_pct = 0.40
+                regime_label = 'RED_MARKET'
+            elif spy_ret_15d <= -0.005:
+                min_cash_pct = 0.30
+                regime_label = 'BEARISH'
+            else:
+                min_cash_pct = 0.0
+                regime_label = None
+
+            if min_cash_pct > 0:
+                cash = available_cash(data)
+                cash_pct = cash / capital if capital > 0 else 0
+                if cash_pct < min_cash_pct:
+                    result['blocked'] = True
+                    result['reason'] = (
+                        f"{regime_label} regime — cash {cash_pct:.0%} < "
+                        f"required reserve {min_cash_pct:.0%}"
+                    )
+                    return result
+    except Exception:
+        pass
+
+    # ── 4. Loss concentration ────────────────────────────────────────────
+    if len(positions) >= 4:
+        underwater = sum(
+            1 for p in positions
+            if p.get('current_price', p.get('entry_price', 0)) < p.get('entry_price', 0)
+        )
+        underwater_pct = underwater / len(positions)
+        if underwater_pct >= 0.75:
+            result['sizing_mult'] = 0.25
+        elif underwater_pct >= 0.50:
+            result['sizing_mult'] = 0.50
+
+    # ── 5. Sector drawdown guard ─────────────────────────────────────────
+    if new_sector:
+        sector_positions = [p for p in positions if p.get('sector') == new_sector]
+        if sector_positions:
+            sector_losses = sum(
+                1 for p in sector_positions
+                if p.get('current_price', p.get('entry_price', 0)) < p.get('entry_price', 0)
+            )
+            if sector_losses >= 2:
+                result['blocked'] = True
+                result['reason'] = (
+                    f"sector '{new_sector}' has {sector_losses} underwater positions"
+                )
+                return result
+            elif sector_losses == 1:
+                result['sizing_mult'] = min(result['sizing_mult'], 0.50)
+
+    # ── 6. Portfolio ATR risk cap ────────────────────────────────────────
+    # Total portfolio-weighted ATR% must not exceed MAX_PORTFOLIO_ATR_RISK.
+    sig_atr_pct = _compute_atr_pct(new_symbol)
+    if sig_atr_pct and capital > 0:
+        existing_risk = _portfolio_atr_risk(data)
+        est_contribution = pos_pct * result['sizing_mult'] * sig_atr_pct
+        projected_risk = existing_risk + est_contribution
+
+        if projected_risk > MAX_PORTFOLIO_ATR_RISK:
+            result['blocked'] = True
+            result['reason'] = (
+                f"portfolio ATR risk would be {projected_risk:.1%} "
+                f"(cap {MAX_PORTFOLIO_ATR_RISK:.0%}), "
+                f"stock ATR% = {sig_atr_pct:.1%}, "
+                f"existing = {existing_risk:.1%}"
+            )
+            return result
+
+        # ── 7+8. ATR-aware sizing ────────────────────────────────────────
+        # Scale position size inversely with volatility relative to portfolio.
+        # High-ATR stocks are allowed but get smaller positions so they
+        # contribute equal risk to the portfolio.
+        #   >4× avg → 20% size    (e.g. CIFR 10% ATR vs 2% avg)
+        #   >3× avg → 25% size
+        #   >2× avg → 50% size
+        #   >1.5× avg → 75% size
+        if positions:
+            portfolio_avg_atr = _portfolio_avg_atr(data)
+            if portfolio_avg_atr and portfolio_avg_atr > 0:
+                atr_ratio = sig_atr_pct / portfolio_avg_atr
+                if atr_ratio > 4.0:
+                    result['sizing_mult'] = min(result['sizing_mult'], 0.20)
+                elif atr_ratio > 3.0:
+                    result['sizing_mult'] = min(result['sizing_mult'], 0.25)
+                elif atr_ratio > 2.0:
+                    result['sizing_mult'] = min(result['sizing_mult'], 0.50)
+                elif atr_ratio > 1.5:
+                    result['sizing_mult'] = min(result['sizing_mult'], 0.75)
+
+    return result
+
+
+def _portfolio_avg_atr(data: dict) -> float | None:
+    """
+    Average ATR% across all open positions.
+
+    Used to detect outliers — a stock 3× the portfolio average would
+    disproportionately dominate the risk budget.
+    """
+    positions = data.get('positions', [])
+    if not positions:
+        return None
+
+    values = []
+    for p in positions:
+        atr_pct = _compute_atr_pct(p['symbol'])
+        if atr_pct and atr_pct > 0:
+            values.append(atr_pct)
+
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _safe_float(val) -> float:
@@ -967,6 +1231,267 @@ def close_position(symbol: str, exit_price: float, reason: str = 'manual') -> di
         data['capital'] += closed_rec['pnl']  # realized P&L flows back into capital
     _save(data)
     return closed_rec or {}
+
+
+# ── Rebalance ────────────────────────────────────────────────────────────────
+
+def rebalance(dry_run: bool = True) -> dict:
+    """
+    Enforce portfolio balance rules on EXISTING positions.
+
+    Scans open positions and either closes or trims those that violate:
+      1. Mode concentration (>max_per_mode → close worst P&L in that mode)
+      2. Sector concentration (>max_per_sector → close worst P&L in sector)
+      3. ATR-aware sizing (position too large for its volatility → trim shares)
+      4. Cash reserve (cash% below safe threshold → close worst performers)
+
+    Args:
+        dry_run: If True, only prints actions without executing. Default True
+                 for safety — run with dry_run=False to actually rebalance.
+
+    Returns dict with lists of actions taken.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    from config import CASH_MANAGEMENT
+
+    data = load()
+    positions = data['positions']
+    capital = data['capital']
+
+    if not positions:
+        print("No open positions — nothing to rebalance.")
+        return {'closed': [], 'trimmed': []}
+
+    max_per_sector = CASH_MANAGEMENT.get('max_per_sector', 3)
+    max_per_mode = CASH_MANAGEMENT.get('max_per_mode', 5)
+    low_cash_pct = CASH_MANAGEMENT.get('low_cash_pct', 0.15)
+
+    # Refresh current prices
+    _refresh_current_prices(data)
+
+    actions_close = []
+    actions_trim = []
+
+    # Helper: P&L% for sorting (worst first)
+    def _pnl_pct(p):
+        cur = p.get('current_price', p['entry_price'])
+        return (cur - p['entry_price']) / p['entry_price'] if p['entry_price'] > 0 else 0
+
+    # ── 1. Mode concentration ────────────────────────────────────────────
+    from collections import Counter
+    mode_counts = Counter(p.get('mode', '') for p in positions)
+    for mode, count in mode_counts.items():
+        if count <= max_per_mode:
+            continue
+        excess = count - max_per_mode
+        # Close the worst performers in this mode
+        mode_positions = sorted(
+            [p for p in positions if p.get('mode') == mode],
+            key=_pnl_pct
+        )
+        for p in mode_positions[:excess]:
+            cur = p.get('current_price', p['entry_price'])
+            pnl = _pnl_pct(p) * 100
+            actions_close.append({
+                'symbol': p['symbol'],
+                'reason': f"mode '{mode}' over limit ({count}>{max_per_mode})",
+                'exit_price': cur,
+                'pnl_pct': round(pnl, 1),
+            })
+
+    # ── 2. Sector concentration ──────────────────────────────────────────
+    sector_counts = Counter(p.get('sector', '') for p in positions if p.get('sector'))
+    for sector, count in sector_counts.items():
+        if count <= max_per_sector:
+            continue
+        excess = count - max_per_sector
+        sector_positions = sorted(
+            [p for p in positions if p.get('sector') == sector],
+            key=_pnl_pct
+        )
+        for p in sector_positions[:excess]:
+            # Skip if already marked for close by mode rule
+            if any(a['symbol'] == p['symbol'] for a in actions_close):
+                continue
+            cur = p.get('current_price', p['entry_price'])
+            pnl = _pnl_pct(p) * 100
+            actions_close.append({
+                'symbol': p['symbol'],
+                'reason': f"sector '{sector}' over limit ({count}>{max_per_sector})",
+                'exit_price': cur,
+                'pnl_pct': round(pnl, 1),
+            })
+
+    # ── 3. ATR-aware sizing — trim oversized volatile positions ──────────
+    avg_atr = _portfolio_avg_atr(data)
+    if avg_atr and avg_atr > 0:
+        for p in positions:
+            # Skip if already marked for close
+            if any(a['symbol'] == p['symbol'] for a in actions_close):
+                continue
+            atr = _compute_atr_pct(p['symbol'])
+            if not atr or atr <= 0:
+                continue
+            ratio = atr / avg_atr
+            if ratio <= 1.5:
+                continue  # fine
+
+            # Determine target sizing mult
+            if ratio > 4.0:
+                target_mult = 0.20
+            elif ratio > 3.0:
+                target_mult = 0.25
+            elif ratio > 2.0:
+                target_mult = 0.50
+            else:  # 1.5-2.0
+                target_mult = 0.75
+
+            # Current position value vs what it should be
+            cur_price = p.get('current_price', p['entry_price'])
+            cur_shares = p['shares']
+            cur_value = cur_shares * cur_price
+
+            base_value = capital * POSITION_SIZE_PCT
+            target_value = base_value * target_mult
+            if cur_value <= target_value * 1.1:
+                continue  # within 10% tolerance
+
+            target_shares = max(1, int(target_value / cur_price))
+            trim_shares = cur_shares - target_shares
+            if trim_shares < 1:
+                continue
+
+            actions_trim.append({
+                'symbol': p['symbol'],
+                'reason': f"ATR {atr:.1%} ({ratio:.1f}x avg) → {target_mult:.0%} size",
+                'current_shares': cur_shares,
+                'target_shares': target_shares,
+                'trim_shares': trim_shares,
+                'trim_value': round(trim_shares * cur_price, 2),
+                'current_price': cur_price,
+            })
+
+    # ── 4. Cash reserve — close worst performers if cash too low ─────────
+    # Calculate projected cash after closes above
+    projected_cash = available_cash(data)
+    for a in actions_close:
+        # Each close frees up the cost basis
+        pos = next((p for p in positions if p['symbol'] == a['symbol']), None)
+        if pos:
+            projected_cash += pos['cost']
+    for a in actions_trim:
+        projected_cash += a['trim_value']
+
+    projected_cash_pct = projected_cash / capital if capital > 0 else 0
+
+    if projected_cash_pct < low_cash_pct:
+        needed = capital * low_cash_pct - projected_cash
+        # Close worst P&L positions until we meet the target
+        remaining = sorted(
+            [p for p in positions if not any(a['symbol'] == p['symbol'] for a in actions_close)],
+            key=_pnl_pct
+        )
+        freed = 0
+        for p in remaining:
+            if freed >= needed:
+                break
+            cur = p.get('current_price', p['entry_price'])
+            pnl = _pnl_pct(p) * 100
+            actions_close.append({
+                'symbol': p['symbol'],
+                'reason': f"cash reserve — need {low_cash_pct:.0%}, "
+                          f"projected {projected_cash_pct:.1%}",
+                'exit_price': cur,
+                'pnl_pct': round(pnl, 1),
+            })
+            freed += p['cost']
+
+    # ── Print plan ───────────────────────────────────────────────────────
+    print(f"\n{'='*70}")
+    print(f"REBALANCE {'(DRY RUN)' if dry_run else 'EXECUTING'}")
+    print(f"{'='*70}")
+    print(f"Open positions: {len(positions)} | Cash: ${available_cash(data):,.2f} "
+          f"({available_cash(data)/capital:.1%})")
+
+    if actions_close:
+        print(f"\n  CLOSE ({len(actions_close)} positions):")
+        for a in actions_close:
+            print(f"    {a['symbol']:<8} P&L {a['pnl_pct']:>+5.1f}% "
+                  f"@ ${a['exit_price']:>8.2f} — {a['reason']}")
+    if actions_trim:
+        print(f"\n  TRIM ({len(actions_trim)} positions):")
+        for a in actions_trim:
+            print(f"    {a['symbol']:<8} {a['current_shares']}→{a['target_shares']} shares "
+                  f"(-{a['trim_shares']}, frees ${a['trim_value']:,.0f}) — {a['reason']}")
+
+    if not actions_close and not actions_trim:
+        print("\n  Portfolio is balanced — no actions needed.")
+        return {'closed': [], 'trimmed': []}
+
+    # Estimate post-rebalance state
+    est_cash = available_cash(data)
+    for a in actions_close:
+        pos = next((p for p in positions if p['symbol'] == a['symbol']), None)
+        if pos:
+            est_cash += pos['cost'] + (a['exit_price'] - pos['entry_price']) * pos['shares']
+    for a in actions_trim:
+        est_cash += a['trim_value']
+    print(f"\n  Estimated cash after rebalance: ${est_cash:,.2f} ({est_cash/capital:.1%})")
+
+    # ── Execute ──────────────────────────────────────────────────────────
+    if dry_run:
+        print("\n  → Dry run — no changes made. Run rebalance(dry_run=False) to execute.")
+        return {'closed': actions_close, 'trimmed': actions_trim}
+
+    # Execute closes
+    for a in actions_close:
+        result = close_position(a['symbol'], a['exit_price'],
+                                reason=f"rebalance: {a['reason']}")
+        if result:
+            logger.info(f"REBALANCE CLOSED {a['symbol']} @ ${a['exit_price']:.2f} "
+                        f"({a['reason']})")
+
+    # Execute trims (reduce shares, free cash)
+    data = load()  # reload after closes
+    for a in actions_trim:
+        for p in data['positions']:
+            if p['symbol'] == a['symbol']:
+                old_shares = p['shares']
+                p['shares'] = a['target_shares']
+                p['cost'] = round(p['shares'] * p['entry_price'], 2)
+                freed = round((old_shares - a['target_shares']) * a['current_price'], 2)
+                # Freed capital goes back to cash (realized at current price)
+                pnl_on_trimmed = (a['current_price'] - p['entry_price']) * (old_shares - a['target_shares'])
+                data['capital'] += pnl_on_trimmed  # P&L on trimmed shares
+                logger.info(
+                    f"REBALANCE TRIMMED {a['symbol']} {old_shares}→{a['target_shares']} shares "
+                    f"(freed ${freed:,.0f}, {a['reason']})"
+                )
+                break
+    _save(data)
+
+    print(f"\n  ✓ Rebalance complete. Closed {len(actions_close)}, trimmed {len(actions_trim)}.")
+    return {'closed': actions_close, 'trimmed': actions_trim}
+
+
+def _refresh_current_prices(data: dict):
+    """Update current_price for all open positions."""
+    positions = data.get('positions', [])
+    if not positions:
+        return
+    try:
+        from yfinance_adapter import YFinanceAdapter
+        adapter = YFinanceAdapter(use_disk_cache=True)
+        for p in positions:
+            df = adapter.get_historical_data(p['symbol'], '1 day',
+                                             start_date=(datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d'),
+                                             end_date=datetime.now().strftime('%Y-%m-%d'))
+            if df is not None and len(df) > 0:
+                p['current_price'] = float(df['close'].iloc[-1])
+    except Exception:
+        pass
 
 
 # ── Reset ─────────────────────────────────────────────────────────────────────

@@ -13,7 +13,8 @@ from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
     check_volume_divergence,
-    check_candle_structure
+    check_candle_structure,
+    compute_volume_profile,
 )
 from market_data import check_liquidity
 from pattern_recognition import get_pattern_score
@@ -1228,12 +1229,58 @@ class BreakoutDetector:
         if not pd.isna(rsi) and rsi > 80:
             return None
 
+        # ── Resistance awareness (S/R + Volume Profile) ─────────────────
+        atr = latest['ATR']
+        current_price = float(latest['close'])
+
+        # 1. Structural S/R — reuse the same detect_sr_levels from main detect()
+        _sr_tol = {'scalping': 0.005, 'daytrade': 0.010, 'swing': 0.015, 'longterm': 0.020}
+        from pattern_recognition import detect_sr_levels
+        sr_data = detect_sr_levels(
+            df, current_price=current_price,
+            atr=float(atr) if not pd.isna(atr) else 1.0,
+            tolerance_pct=_sr_tol.get(mode_name, 0.015),
+        )
+        nearest_res = sr_data.get('nearest_resistance')
+        res_strength = sr_data.get('resistance_strength', 0)
+        breaking_res = sr_data.get('breaking_resistance', False)
+
+        # 2. Volume Profile — detect high-volume nodes above price
+        vp = compute_volume_profile(df, lookback=60)
+        hvn_above = [n for n in vp['high_volume_nodes'] if n > current_price]
+        # Nearest HVN ceiling within 2 ATR
+        hvn_ceiling = None
+        if hvn_above and not pd.isna(atr) and atr > 0:
+            nearest_hvn = min(hvn_above)
+            if (nearest_hvn - current_price) <= 2.0 * atr:
+                hvn_ceiling = nearest_hvn
+
+        # Approaching resistance: within 1.5% of a tested structural level (not breaking through)
+        approaching_structural = (
+            nearest_res is not None
+            and res_strength >= 2
+            and not breaking_res
+            and 0 < (nearest_res - current_price) / current_price <= 0.015
+        )
+        # Approaching volume ceiling: surging into a high-volume node
+        approaching_volume = hvn_ceiling is not None
+
+        # Reject: approaching strong structural resistance AND volume ceiling
+        if approaching_structural and approaching_volume and res_strength >= 3:
+            logger.info(
+                f"❌ CONTINUATION {symbol} REJECTED — approaching resistance "
+                f"${nearest_res:.2f} ({res_strength} touches) + HVN ${hvn_ceiling:.2f}"
+            )
+            return None
+
+        # Flag resistance proximity for quality downgrade later
+        _resistance_headwind = approaching_structural or approaching_volume
+
         # Relative strength vs SPY (optional bonus)
         stock_perf = cum_move_pct / 100
         rs_ok = stock_perf > spy_perf if mode_name != 'scalping' else True
 
         # Risk/Reward
-        atr = latest['ATR']
         # Stop below streak start or 1.5 ATR below current
         sl = max(streak_start['low'], latest['close'] - 1.5 * atr)
         # Target: project the streak's average daily gain forward
@@ -1264,6 +1311,22 @@ class BreakoutDetector:
         else:
             quality = 'STANDARD'
 
+        # Downgrade quality if surging into resistance (structural OR volume)
+        if _resistance_headwind:
+            downgrade = {'PREMIUM': 'HIGH', 'HIGH': 'STANDARD'}
+            if quality in downgrade:
+                old_q = quality
+                quality = downgrade[quality]
+                res_reason = []
+                if approaching_structural:
+                    res_reason.append(f"S/R ${nearest_res:.2f} ({res_strength}T)")
+                if approaching_volume:
+                    res_reason.append(f"HVN ${hvn_ceiling:.2f}")
+                logger.info(
+                    f"⚠️ CONTINUATION {symbol} downgraded {old_q}→{quality} — "
+                    f"resistance headwind: {', '.join(res_reason)}"
+                )
+
         signal = {
             'Symbol': symbol,
             'Price': round(latest['close'], 2),
@@ -1279,6 +1342,10 @@ class BreakoutDetector:
             'Type': 'CONTINUATION',
             'RSI': round(rsi, 1) if not pd.isna(rsi) else 0,
             'Streak': streak,
+            'SR_Resistance': round(nearest_res, 2) if nearest_res else '',
+            'SR_Res_Strength': res_strength,
+            'VPOC': round(vp['vpoc'], 2),
+            'HVN_Ceiling': round(hvn_ceiling, 2) if hvn_ceiling else '',
         }
 
         logger.info(

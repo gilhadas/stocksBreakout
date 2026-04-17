@@ -241,6 +241,57 @@ class MarketDataHandler:
         self.spy_cache[cache_key] = (perf, spy_vol)
         return perf, spy_vol
 
+    async def get_regime_spy_performance(self) -> Tuple[float, float]:
+        """Get SPY performance for regime classification only.
+
+        Always uses 15 daily bars regardless of scan timeframe, and skips
+        today's incomplete bar when markets are still open. This prevents:
+        - Intraday (15-min) scans from triggering RED_MARKET on 75-min dips
+        - Incomplete daily bars during market hours from distorting regime
+        """
+        _NY = ZoneInfo('America/New_York')
+        now_et = datetime.now(_NY)
+        # After 16:00 ET the daily bar is closed; before that use previous close
+        use_today = now_et.hour >= 16
+        LOOKBACK = 15
+
+        cache_key = f"regime_{now_et.strftime('%Y-%m-%d')}_{use_today}"
+        if cache_key in self.spy_cache:
+            return self.spy_cache[cache_key]
+
+        df = None
+        if self.ib_available:
+            try:
+                spy = Stock('SPY', 'ARCA', 'USD')
+                bars = await self.ib.reqHistoricalDataAsync(
+                    spy, '', '300 D', '1 day', 'TRADES', True, 1
+                )
+                if bars:
+                    df = util.df(bars)
+            except Exception as e:
+                logger.warning(f"IB SPY regime fetch failed: {e}")
+
+        if df is None and self.yf_fallback:
+            df = self.yf_adapter.get_historical_data('SPY', '1 day')
+
+        if df is None or len(df) < LOOKBACK + 2:
+            return 0.0, 0.0
+
+        # last_idx: use today's close after market, previous close during hours
+        last_idx = -1 if use_today else -2
+        perf = (df['close'].iloc[last_idx] / df['close'].iloc[last_idx - LOOKBACK]) - 1
+
+        df2 = df.copy()
+        df2['hl'] = df2['high'] - df2['low']
+        df2['hc'] = (df2['high'] - df2['close'].shift()).abs()
+        df2['lc'] = (df2['low'] - df2['close'].shift()).abs()
+        tr = pd.concat([df2['hl'], df2['hc'], df2['lc']], axis=1).max(axis=1)
+        atr_pct = (tr.rolling(14).mean() / df2['close']) * 100
+        spy_vol = float(atr_pct.tail(LOOKBACK).mean())
+
+        self.spy_cache[cache_key] = (perf, spy_vol)
+        return perf, spy_vol
+
     async def get_spy_bear_macro(self) -> bool:
         """
         Returns True if SPY is in a structural bear market (close < 200-day SMA).

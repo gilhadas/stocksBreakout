@@ -2,6 +2,8 @@
 Technical indicators calculation module
 """
 
+from typing import Dict, List
+
 import pandas as pd
 import numpy as np
 
@@ -147,11 +149,13 @@ def check_candle_structure(latest: pd.Series, atr: float,
 
 
 def calculate_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Calculate Relative Strength Index"""
+    """Calculate RSI using Wilder's EMA — matches TradingView's standard RSI indicator."""
     delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss.replace(0, 1e-10)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
     return 100 - (100 / (1 + rs))
 
 
@@ -404,6 +408,110 @@ def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
     df['RSI_Bull_Div'], df['RSI_Bear_Div'] = detect_rsi_divergence(df)
 
     return df
+
+
+def compute_volume_profile(df: pd.DataFrame, lookback: int = 60,
+                           num_bins: int = 50) -> Dict:
+    """
+    Compute Volume-at-Price profile from OHLCV data.
+
+    Bins the price range into `num_bins` buckets, distributes each bar's
+    volume across the bins its high-low range touches (uniform allocation),
+    then identifies the Point of Control (VPOC) and Value Area (70% of volume).
+
+    Parameters
+    ----------
+    df        : OHLCV DataFrame (columns: high, low, close, volume)
+    lookback  : bars to include (default 60 ≈ 3 months daily)
+    num_bins  : resolution of the price histogram (default 50)
+
+    Returns
+    -------
+    dict with:
+      vpoc            : float — price level with the highest traded volume
+      value_area_high : float — upper bound of the 70% value area
+      value_area_low  : float — lower bound of the 70% value area
+      high_volume_nodes : list[float] — bin centers with volume > 1.5× median
+      low_volume_nodes  : list[float] — bin centers with volume < 0.5× median
+      bin_centers       : np.ndarray — all bin center prices
+      bin_volumes       : np.ndarray — volume at each bin
+    """
+    data = df.iloc[-lookback:] if len(df) > lookback else df
+    if len(data) < 10:
+        return {
+            'vpoc': float(data['close'].iloc[-1]),
+            'value_area_high': float(data['high'].max()),
+            'value_area_low': float(data['low'].min()),
+            'high_volume_nodes': [],
+            'low_volume_nodes': [],
+            'bin_centers': np.array([]),
+            'bin_volumes': np.array([]),
+        }
+
+    price_min = float(data['low'].min())
+    price_max = float(data['high'].max())
+    if price_max <= price_min:
+        price_max = price_min + 0.01
+
+    bin_edges = np.linspace(price_min, price_max, num_bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bin_volumes = np.zeros(num_bins)
+
+    # Vectorized: for each bar, spread volume across bins its range touches
+    highs = data['high'].values
+    lows = data['low'].values
+    volumes = data['volume'].values
+
+    for i in range(len(data)):
+        bar_low, bar_high, bar_vol = lows[i], highs[i], volumes[i]
+        if bar_vol <= 0 or np.isnan(bar_vol):
+            continue
+        # Find bins overlapping this bar's range
+        first_bin = np.searchsorted(bin_edges, bar_low, side='right') - 1
+        last_bin = np.searchsorted(bin_edges, bar_high, side='left')
+        first_bin = max(0, first_bin)
+        last_bin = min(num_bins - 1, last_bin)
+        n_bins_touched = last_bin - first_bin + 1
+        if n_bins_touched > 0:
+            bin_volumes[first_bin:last_bin + 1] += bar_vol / n_bins_touched
+
+    # VPOC: bin with max volume
+    vpoc_idx = int(np.argmax(bin_volumes))
+    vpoc = float(bin_centers[vpoc_idx])
+
+    # Value Area: 70% of total volume, expanding outward from VPOC
+    total_vol = bin_volumes.sum()
+    va_target = total_vol * 0.70
+    va_vol = bin_volumes[vpoc_idx]
+    va_low_idx, va_high_idx = vpoc_idx, vpoc_idx
+
+    while va_vol < va_target and (va_low_idx > 0 or va_high_idx < num_bins - 1):
+        expand_low = bin_volumes[va_low_idx - 1] if va_low_idx > 0 else 0
+        expand_high = bin_volumes[va_high_idx + 1] if va_high_idx < num_bins - 1 else 0
+        if expand_low >= expand_high and va_low_idx > 0:
+            va_low_idx -= 1
+            va_vol += bin_volumes[va_low_idx]
+        elif va_high_idx < num_bins - 1:
+            va_high_idx += 1
+            va_vol += bin_volumes[va_high_idx]
+        else:
+            va_low_idx -= 1
+            va_vol += bin_volumes[va_low_idx]
+
+    # High/low volume nodes
+    median_vol = float(np.median(bin_volumes[bin_volumes > 0])) if bin_volumes.sum() > 0 else 1.0
+    hvn = [float(bin_centers[i]) for i in range(num_bins) if bin_volumes[i] > 1.5 * median_vol]
+    lvn = [float(bin_centers[i]) for i in range(num_bins) if 0 < bin_volumes[i] < 0.5 * median_vol]
+
+    return {
+        'vpoc': vpoc,
+        'value_area_high': float(bin_centers[va_high_idx]),
+        'value_area_low': float(bin_centers[va_low_idx]),
+        'high_volume_nodes': hvn,
+        'low_volume_nodes': lvn,
+        'bin_centers': bin_centers,
+        'bin_volumes': bin_volumes,
+    }
 
 
 def calculate_minervini_template(

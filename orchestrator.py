@@ -101,7 +101,11 @@ class ScannerOrchestrator:
                             f"(no premarket data)"
                         )
 
-            raw_regime = classify_market_regime(spy_perf, spy_vol,
+            # Use fixed daily 15-bar SPY for regime — independent of scan timeframe.
+            # Prevents 75-min intraday dips (daytrade) and incomplete daily bars
+            # from incorrectly triggering RED_MARKET during volatile market hours.
+            spy_perf_regime, spy_vol_regime = await self.market_data.get_regime_spy_performance()
+            raw_regime = classify_market_regime(spy_perf_regime, spy_vol_regime,
                                                surge_context=surge_context)
             regime, regime_debug = get_smoothed_regime(raw_regime)
 

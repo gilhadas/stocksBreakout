@@ -327,7 +327,9 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     try:
         timeframe = args.timeframe or MODES[args.mode]['default_timeframe']
         lookback = args.lookback or MODES[args.mode]['lookback']
-        spy_perf, spy_vol = await orchestrator.market_data.get_spy_performance(timeframe, lookback)
+        # Always use 15-day daily SPY for regime — independent of scan timeframe.
+        # Avoids: (1) 75-min intraday window for daytrade, (2) incomplete daily bar.
+        spy_perf, spy_vol = await orchestrator.market_data.get_regime_spy_performance()
         regime = classify_market_regime(spy_perf, spy_vol)
         spy_pct = spy_perf * 100
 
@@ -548,9 +550,6 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             and s not in v9c_signals and s not in bounce_signals
         ]
         notify_signals = v9c_signals + bounce_signals + alt_signals
-        n_blocked = len(results) - len(notifiable)
-        if n_blocked:
-            logger.info(f"Regime filter: {n_blocked} signal(s) blocked from notification")
         if notify_signals:
             n_v9c   = len(v9c_signals)
             n_bnc   = len(bounce_signals)
@@ -656,9 +655,7 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     # Determine regime
     sample_mode = positions[0]['mode']
     if sample_mode != 'scalping':
-        spy_perf, spy_vol = await orchestrator.market_data.get_spy_performance(
-            args.timeframe, MODES[sample_mode]['lookback']
-        )
+        spy_perf, spy_vol = await orchestrator.market_data.get_regime_spy_performance()
         regime = classify_market_regime(spy_perf, spy_vol)
         regime_desc = REGIME_CONFIG[regime]['description']
         logger.info(

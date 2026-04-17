@@ -345,7 +345,7 @@ REGIME_CONFIG = {
 # Rule 3 — All other regimes (NORMAL, EXPANSION, RED_MARKET, CHOPPY): trade normally
 #   Note: RED_MARKET (SPY down >1.5%) is KEPT — it contributed +55.8% of P&L in backtest
 V9H_REGIME_GATE = {
-    'enabled': False,   # V9-D1 mode: BEARISH blocked via filter_signals_by_regime(); V9-H full gating disabled
+    'enabled': False,   # V9-C mode: BOUNCE-GOLD only; no regime blocking; V9-H full gating disabled
     # 15-day SPY return thresholds (fractions) for regime classification
     'red_market_thresh': -0.015,   # SPY < -1.5% over lookback → RED_MARKET (keep trading)
     'bearish_thresh':    -0.005,   # SPY < -0.5% over lookback → BEARISH (block bounce/sma20)

@@ -52,6 +52,8 @@ HC_BASE=https://hc-ping.com
 0 9 * * 1 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py "input/ALL.txt" --mode longterm --bounce --sector-buzz --export-premium scanner_output/lists/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1 && $PYTHON_BIN -c "from auto_portfolio import scan_and_add; scan_and_add()" >> scanner_output/logs/cron_longterm.log 2>&1 && SIGFILE=$(ls -t $PROJECT_ROOT/scanner_output/signals/signals_longterm_*.csv 2>/dev/null | head -1) && [ -n "$SIGFILE" ] && $PYTHON_BIN upload_to_s3.py --files "$SIGFILE" --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every Monday at 9:15 AM ET - Long-term exit evaluation (no signal file, portfolio only)
 15 9 * * 1 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/ALL.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/portfolio scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+# Every weekday at 10:00 AM ET - Daily longterm exit check (catches gaps, stop hits between Mondays)
+0 10 * * 2-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/ALL.txt --mode longterm --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_longterm_exit_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 
 # ============================================

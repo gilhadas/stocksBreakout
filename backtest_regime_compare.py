@@ -47,12 +47,14 @@ SPY_ANNUAL = {
     '2023': +26.3,
     '2024': +23.3,
     '2025': -5.0,   # approx through Mar 2026
+    '2026': +2.0,   # YTD partial (through Apr 2026)
 }
 YEAR_TYPE = {
     '2022': 'BEARISH',
     '2023': 'BULLISH',
     '2024': 'BULLISH',
     '2025': 'MIXED',
+    '2026': 'MIXED',
 }
 
 
@@ -196,7 +198,23 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
         if regime == 'BEARISH':
             pass  # BEARISH only: block bounces (-3.28% avg P&L, 22.2% WR)
         else:
-            sig = bounce
+            # Bounce quality filters (diagnose_signal_diff findings):
+            b_rsi = float(bounce.get('RSI', 50))
+            b_vol = float(bounce.get('Vol', 1.0))
+            b_rr  = float(bounce.get('R:R', 0))
+
+            # F1: NORMAL regime bounces require genuine oversold (RSI<40)
+            #     NORMAL+RSI40-60 = 18% WR, -10% avg in 2026; 21.7% WR, -6.7% in 2022
+            if regime == 'NORMAL' and b_rsi >= 40:
+                bounce = None
+
+            # F2: NORMAL + formulaic R:R + low vol = weakest bounce profile
+            #     Catches mid-fall fakes that have no volume or upside target
+            elif regime == 'NORMAL' and b_rr <= 2.01 and b_vol < 1.5:
+                bounce = None
+
+            if bounce:
+                sig = bounce
     if sig:
         return sig
 

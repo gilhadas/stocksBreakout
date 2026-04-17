@@ -669,10 +669,9 @@ def filter_signals_by_regime(
 
     Rules
     -----
-    * V9-C / V9-D1 (v9h_enabled=False):
+    * V9-C (v9h_enabled=False):
       - BOUNCE requires GOLD quality (universal).
-      - BEARISH regime: block all signals (22.2% WR, -3.28% avg P&L,
-        -13.4% P&L share across 2022-2025 backtest on 200 symbols).
+      - No regime blocking — all regimes trade normally.
     * V9-H (v9h_enabled=True):
 
       +--------------+----------------------------------------------+
@@ -696,11 +695,8 @@ def filter_signals_by_regime(
         return s.get('Type') != 'BOUNCE' or s.get('Quality') == 'GOLD'
 
     if not v9h_enabled:
-        # V9-D1: BOUNCE-GOLD universal rule + block BEARISH regime
-        # BEARISH (SPY -0.5% to -1.5% over 15d) has 22.2% WR, -3.28% expectancy
-        # Validated on 200 symbols × 4 years (2022-2025): +1.9% compound improvement
-        filtered = [s for s in signals
-                    if _bounce_gold_only(s) and regime != 'BEARISH']
+        # V9-C: BOUNCE requires GOLD quality (universal rule only, no regime blocking)
+        filtered = [s for s in signals if _bounce_gold_only(s)]
         return filtered, len(signals) - len(filtered)
 
     # V9-H: regime-aware filtering

@@ -57,28 +57,18 @@ Summarize our progress, key decisions, and next steps into the CLAUDE.md file.
 
 ## 7. Current Live Config & Backtest Decision Log
 
-### Active Config: V9-C (as of 2026-03-27)
+### Active Config: V9-C (reverted 2026-04-17)
 **File:** `config.py` — `V9H_REGIME_GATE['enabled'] = False`
 
-V9-H (SMA200 bear_macro + BEARISH regime block) was reverted to V9-C after a 4-year backtest
-on 200 symbols showed V9-H significantly underperforms in bull years due to over-filtering.
+### Backtest: `backtest_regime_compare.py` — 200 symbols, 4 years (re-run 2026-04-17)
+Includes RSI Wilder's EMA fix + regime fix (completed daily bars). Results improved vs old baseline.
 
-### Backtest: `backtest_regime_compare.py` — 200 symbols, 4 years
-Full results: `scanner_output/backtests/backtest_200.txt` | Summary: `scanner_output/backtests/backtest_200_summary.txt`
+| Year | Market | SPY | **V9-C PREMIUM+** | V9-D1 (−BEARISH) | V9-C vs SPY |
+|------|--------|-----|-------------------|------------------|-------------|
+| 2022 | Bear   | -18.1% | **-14.27%** | ≈same | +3.83% |
+| 2023 | Bull   | +26.3% | **+53.26%** | ≈same | +26.96% |
+| 2024 | Bull   | +23.3% | **+28.88%** | ≈same | +5.58% |
+| 2025 | Mixed  | -5.0%  | **+53.81%** | +47.54% | +58.81% |
 
-| Year | Market | SPY | **V9-C PREMIUM+** | V9-H (SMA200+BEARISH) | V9-C vs SPY |
-|------|--------|-----|-------------------|-----------------------|-------------|
-| 2022 | Bear   | -18.65% | **-17.58%** | -27.47% | +1.07% |
-| 2023 | Bull   | +26.71% | **+51.37%** | +10.93% | +24.66% |
-| 2024 | Bull   | +26.05% | **+25.63%** | +20.35% | -0.42% |
-| 2025 | Mixed  | +18.89% | **+50.23%** | +37.42% | +31.34% |
-
-**Why V9-H failed:** SMA200 filter dropped too many valid signals in bull years (e.g. 2022 only 85/535 passed → -27.5% return). MaxPos=8/3 cap made it worse.
-Also: V9-H used a different signal pipeline (`collect_signals_hybrid`) vs V9-C (`collect_signals_old`), making the comparison apples-to-oranges. The 10-day cooldown amplified small pipeline differences into wildly divergent trade populations.
-
-**V9-D1 rules (active config, 2026-03-29):** V9-C base + block BEARISH regime signals.
-- BEARISH = SPY down 0.5–1.5% over 15 days (only ~5% of trading days)
-- BEARISH trades: 22.2% WR, -3.28% avg P&L, -13.4% P&L share → proven poison
-- Implemented in `filter_signals_by_regime()` in utils.py (one-line post-filter)
-- 4yr/200sym backtest: V9-D1 compound +123.4% vs V9-C +121.5% vs V9-H +33.5%
-- Bear macro sizing was tested and rejected — destroys recovery-phase returns
+**Why V9-D1 was reverted:** BEARISH filter (5% of trading days) cost ~6% in 2025. 4-year compound: V9-C ~+151% vs V9-D1 ~+140%. The original +1.9% edge no longer held after RSI/regime fixes.
+**Active rule:** BOUNCE requires GOLD quality only. All regimes trade normally. No BEARISH block.
