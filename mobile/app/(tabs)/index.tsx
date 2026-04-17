@@ -191,6 +191,7 @@ export default function PortfolioScreen() {
   const [summary, setSummary] = useState<any>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [swapping, setSwapping] = useState(false);
+  const [swapResults, setSwapResults] = useState<any[] | null>(null);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
 
@@ -244,26 +245,13 @@ export default function PortfolioScreen() {
 
   const handleSwapAdvisor = async () => {
     setSwapping(true);
+    setSwapResults(null);
     try {
       const result = await suggestSwaps();
-      const swaps: any[] = result.swaps || [];
-      if (swaps.length === 0) {
-        Alert.alert('Swap Advisor', 'No swap opportunities found right now.');
-      } else {
-        const lines = swaps.map((s: any, i: number) => {
-          const upside = s.open_entry && s.open_target
-            ? ((s.open_target - s.open_entry) / s.open_entry * 100).toFixed(1)
-            : '?';
-          return (
-            `${i + 1}. Close ${s.close_symbol} (${s.close_pnl_pct?.toFixed(1)}%)\n` +
-            `   Open ${s.open_symbol} [${s.open_quality}] R:R ${s.open_rr?.toFixed(2)}\n` +
-            `   ${upside}% upside · +${s.open_momentum?.toFixed(1)}% since signal`
-          );
-        });
-        Alert.alert('Swap Advisor', lines.join('\n\n'));
-      }
+      setSwapResults(result.swaps || []);
     } catch (e: any) {
-      Alert.alert('Swap Advisor Error', e?.message ?? String(e));
+      setSwapResults([]);
+      setError(e?.message ?? String(e));
     }
     setSwapping(false);
   };
@@ -328,6 +316,30 @@ export default function PortfolioScreen() {
               >
                 <Text style={styles.swapBtnText}>{swapping ? 'Analyzing...' : '⚡ Swap Advisor'}</Text>
               </Pressable>
+              {swapResults !== null && (
+                <View style={styles.swapResults}>
+                  <Text style={styles.swapResultsTitle}>
+                    {swapResults.length === 0 ? 'No swap opportunities found.' : `${swapResults.length} swap suggestion${swapResults.length > 1 ? 's' : ''}:`}
+                  </Text>
+                  {swapResults.map((s: any, i: number) => {
+                    const upside = s.open_entry && s.open_target
+                      ? ((s.open_target - s.open_entry) / s.open_entry * 100).toFixed(1)
+                      : '?';
+                    return (
+                      <View key={i} style={styles.swapResultRow}>
+                        <Text style={styles.swapResultClose}>
+                          Close <Text style={{ color: '#ef4444' }}>{s.close_symbol}</Text>
+                          {' '}({s.close_pnl_pct?.toFixed(1)}%)
+                        </Text>
+                        <Text style={styles.swapResultOpen}>
+                          Open <Text style={{ color: '#34d399' }}>{s.open_symbol}</Text>
+                          {' '}[{s.open_quality}]{'  '}R:R {s.open_rr?.toFixed(2)}{'  '}{upside}% upside
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
               <Pressable onPress={async () => { await clearToken(); router.replace('/login'); }}>
                 <Text style={styles.logout}>Logout</Text>
               </Pressable>
@@ -446,6 +458,11 @@ const styles = StyleSheet.create({
   swapBtn: { backgroundColor: '#4c1d95', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8, borderWidth: 1, borderColor: '#7c3aed' },
   swapBtnDisabled: { opacity: 0.5 },
   swapBtnText: { color: '#c4b5fd', fontSize: 13, fontWeight: '700' },
+  swapResults: { backgroundColor: '#1a1a2e', borderRadius: 8, padding: 12, width: '100%', borderLeftWidth: 3, borderLeftColor: '#7c3aed' },
+  swapResultsTitle: { color: '#c4b5fd', fontSize: 12, fontWeight: '700', marginBottom: 8 },
+  swapResultRow: { marginBottom: 8, gap: 2 },
+  swapResultClose: { color: '#ccc', fontSize: 12 },
+  swapResultOpen: { color: '#ccc', fontSize: 12 },
   skippedCols: { flexDirection: 'row', gap: 8, marginVertical: 6 },
   skippedCol: { flex: 1, alignItems: 'center' },
   skippedColLabel: { color: '#555', fontSize: 10, marginBottom: 2 },
