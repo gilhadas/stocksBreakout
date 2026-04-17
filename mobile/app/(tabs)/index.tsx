@@ -57,7 +57,7 @@ async function exportSkippedCSV(rows: any[]) {
   }
 }
 import { useFocusEffect, router } from 'expo-router';
-import { fetchPortfolio, refreshPortfolio, fetchSkipped, getToken, clearToken } from '../../lib/api';
+import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, getToken, clearToken } from '../../lib/api';
 import SummaryBar from '../../components/SummaryBar';
 import PositionCard from '../../components/PositionCard';
 
@@ -190,6 +190,7 @@ export default function PortfolioScreen() {
   const [skippedTotalNorm, setSkippedTotalNorm] = useState(0);
   const [summary, setSummary] = useState<any>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [swapping, setSwapping] = useState(false);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
 
@@ -239,6 +240,32 @@ export default function PortfolioScreen() {
       setError(e.message);
     }
     setRefreshing(false);
+  };
+
+  const handleSwapAdvisor = async () => {
+    setSwapping(true);
+    try {
+      const result = await suggestSwaps();
+      const swaps: any[] = result.swaps || [];
+      if (swaps.length === 0) {
+        Alert.alert('Swap Advisor', 'No swap opportunities found right now.');
+      } else {
+        const lines = swaps.map((s: any, i: number) => {
+          const upside = s.open_entry && s.open_target
+            ? ((s.open_target - s.open_entry) / s.open_entry * 100).toFixed(1)
+            : '?';
+          return (
+            `${i + 1}. Close ${s.close_symbol} (${s.close_pnl_pct?.toFixed(1)}%)\n` +
+            `   Open ${s.open_symbol} [${s.open_quality}] R:R ${s.open_rr?.toFixed(2)}\n` +
+            `   ${upside}% upside · +${s.open_momentum?.toFixed(1)}% since signal`
+          );
+        });
+        Alert.alert('Swap Advisor', lines.join('\n\n'));
+      }
+    } catch (e: any) {
+      Alert.alert('Swap Advisor Error', e?.message ?? String(e));
+    }
+    setSwapping(false);
   };
 
   const wins = closed.filter(t => (t.pnl || 0) > 0).length;
@@ -294,6 +321,13 @@ export default function PortfolioScreen() {
           ListFooterComponent={
             <View style={styles.footer}>
               {lastUpdated ? <Text style={styles.updated}>Updated: {lastUpdated}</Text> : null}
+              <Pressable
+                style={[styles.swapBtn, swapping && styles.swapBtnDisabled]}
+                onPress={handleSwapAdvisor}
+                disabled={swapping}
+              >
+                <Text style={styles.swapBtnText}>{swapping ? 'Analyzing...' : '⚡ Swap Advisor'}</Text>
+              </Pressable>
               <Pressable onPress={async () => { await clearToken(); router.replace('/login'); }}>
                 <Text style={styles.logout}>Logout</Text>
               </Pressable>
@@ -409,6 +443,9 @@ const styles = StyleSheet.create({
   stoppedBadge: { fontSize: 9, fontWeight: '700', color: '#ef4444', borderWidth: 1, borderColor: '#ef4444', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
   csvBtn: { marginLeft: 'auto', backgroundColor: '#1e3a5f', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#3b82f6' },
   csvBtnText: { color: '#60a5fa', fontSize: 12, fontWeight: '700' },
+  swapBtn: { backgroundColor: '#4c1d95', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8, borderWidth: 1, borderColor: '#7c3aed' },
+  swapBtnDisabled: { opacity: 0.5 },
+  swapBtnText: { color: '#c4b5fd', fontSize: 13, fontWeight: '700' },
   skippedCols: { flexDirection: 'row', gap: 8, marginVertical: 6 },
   skippedCol: { flex: 1, alignItems: 'center' },
   skippedColLabel: { color: '#555', fontSize: 10, marginBottom: 2 },

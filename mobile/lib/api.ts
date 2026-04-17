@@ -110,6 +110,10 @@ export function buyPosition(data: {
   });
 }
 
+export function suggestSwaps() {
+  return authFetch('/portfolio/suggest-swaps', { method: 'POST' });
+}
+
 export function registerPushToken(token: string) {
   return authFetch('/push/register', {
     method: 'POST',

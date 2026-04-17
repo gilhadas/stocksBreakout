@@ -476,6 +476,16 @@ def buy_position(req: BuyRequest, _token: str = Depends(_require_auth)):
     return {"ok": True, "symbol": req.symbol, "cost_basis": cost_basis, "cash": data["cash"]}
 
 
+# ── Swap Advisor ────────────────────────────────────────────────────────────
+
+@app.post("/portfolio/suggest-swaps")
+def suggest_swaps_endpoint(_token: str = Depends(_require_auth)):
+    import auto_portfolio as ap
+
+    swaps = ap.suggest_swaps(notify=True)
+    return {"swaps": swaps, "count": len(swaps)}
+
+
 # ── Push Notifications ──────────────────────────────────────────────────────
 
 class PushTokenRequest(BaseModel):
