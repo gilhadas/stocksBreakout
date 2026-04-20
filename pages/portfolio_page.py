@@ -47,6 +47,120 @@ def _color_pnl(val):
     return ''
 
 
+# ── Earnings badge helpers ──────────────────────────────────────────────────
+# Held positions are cross-referenced with:
+#   1. input/reporting_watchlist.txt (curated earnings-this-week list)
+#   2. yfinance ticker.calendar (actual scheduled earnings date)
+# A position gets a warning badge if earnings are within 7 calendar days.
+
+_EARNINGS_WARN_DAYS = 7
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_reporting_watchlist() -> set:
+    """Return the set of symbols listed in input/reporting_watchlist.txt."""
+    from pathlib import Path as _Path
+    p = _Path('input/reporting_watchlist.txt')
+    if not p.exists():
+        return set()
+    try:
+        text = p.read_text(encoding='utf-8')
+    except Exception:
+        return set()
+    out: set = set()
+    for tok in text.replace('\n', ',').split(','):
+        s = tok.strip().split(':')[-1].strip().upper()
+        if s:
+            out.add(s)
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_earnings_info(symbols: tuple) -> dict:
+    """Fetch earnings calendar for *symbols*. Returns {SYM: {days_until, timing, date}}.
+
+    Cached per (sorted) symbol-tuple for 30 min to avoid hammering yfinance on reruns.
+    Symbols with no upcoming earnings (or fetch failures) are omitted from the result.
+    """
+    if not symbols:
+        return {}
+    from datetime import datetime as _dt
+    import yfinance as _yf
+
+    today = _dt.now().date()
+    out: dict = {}
+    for sym in symbols:
+        try:
+            cal = _yf.Ticker(sym).calendar
+            if cal is None:
+                continue
+            raw = None
+            if isinstance(cal, dict):
+                ed = cal.get('Earnings Date')
+                if ed:
+                    raw = ed[0] if isinstance(ed, list) else ed
+            elif hasattr(cal, 'iloc'):
+                try:
+                    raw = cal.iloc[0, 0]
+                except Exception:
+                    continue
+            if raw is None:
+                continue
+            if isinstance(raw, str):
+                raw = pd.Timestamp(raw)
+            ed_date = raw.date() if callable(getattr(raw, 'date', None)) else raw.date
+            days = (ed_date - today).days
+            if days < 0 or days > _EARNINGS_WARN_DAYS:
+                continue
+            timing = ''
+            if hasattr(raw, 'hour') and raw.hour > 0:
+                timing = 'AMC' if raw.hour >= 12 else 'BMO'
+            out[sym.upper()] = {
+                'days_until': days,
+                'timing': timing,
+                'date': str(ed_date),
+            }
+        except Exception:
+            continue
+    return out
+
+
+def _earnings_cell(symbol: str, earnings_info: dict, watchlist: set) -> str:
+    """Compact earnings badge for a given position symbol."""
+    sym = symbol.upper()
+    info = earnings_info.get(sym)
+    if info:
+        days = info['days_until']
+        timing = f" {info['timing']}" if info['timing'] else ''
+        if days == 0:
+            return f"⚠ today{timing}"
+        if days == 1:
+            return f"⚠ 1d{timing}"
+        return f"⚠ {days}d{timing}"
+    if sym in watchlist:
+        return "📋 watch"
+    return ''
+
+
+def _render_earnings_banner(position_symbols: list) -> None:
+    """Show a warning banner if any held position has earnings within 7 days."""
+    if not position_symbols:
+        return
+    info = _fetch_earnings_info(tuple(sorted({s.upper() for s in position_symbols})))
+    if not info:
+        return
+    alerts = []
+    for sym, meta in sorted(info.items(), key=lambda kv: kv[1]['days_until']):
+        days = meta['days_until']
+        timing = f" {meta['timing']}" if meta['timing'] else ''
+        when = 'today' if days == 0 else ('tomorrow' if days == 1 else f'in {days}d')
+        alerts.append(f"**{sym}** {when}{timing}")
+    st.warning(
+        "⚠ Earnings within 7 days for held positions: "
+        + ", ".join(alerts)
+    )
+
+
 def render_portfolio_page():
     tab_auto, tab_scalp, tab_manual, tab_lists = st.tabs([
         "📊 Auto Portfolio (V9-C)", "⚡ Scalping", "📋 Manual Portfolio", "📂 Watch Lists"
@@ -119,6 +233,11 @@ def _render_manual_portfolio():
     if positions:
         st.subheader(f"Open Positions ({len(positions)})")
 
+        _sym_list = [p['symbol'] for p in positions]
+        _earn_info = _fetch_earnings_info(tuple(sorted({s.upper() for s in _sym_list})))
+        _watchlist = _load_reporting_watchlist()
+        _render_earnings_banner(_sym_list)
+
         rows = []
         today = datetime.now(tz=None).date()
         for p in positions:
@@ -144,6 +263,7 @@ def _render_manual_portfolio():
                 'Stop': f"${p['stop']:.2f}",
                 'Target': f"${p['target']:.2f}",
                 'Sector': p.get('sector', ''),
+                'Earnings': _earnings_cell(p['symbol'], _earn_info, _watchlist),
             })
 
         # ── Total row ──
@@ -165,6 +285,7 @@ def _render_manual_portfolio():
             'Stop': '',
             'Target': '',
             'Sector': '',
+            'Earnings': '',
         })
 
         df_pos = pd.DataFrame(rows)
@@ -575,6 +696,12 @@ def _render_auto_portfolio():
     positions = data.get('positions', [])
     if positions:
         st.markdown(f"**Open Positions ({len(positions)})**")
+
+        _sym_list = [p['symbol'] for p in positions]
+        _earn_info = _fetch_earnings_info(tuple(sorted({s.upper() for s in _sym_list})))
+        _watchlist = _load_reporting_watchlist()
+        _render_earnings_banner(_sym_list)
+
         rows = []
         for p in positions:
             ep  = p['entry_price']
@@ -601,6 +728,7 @@ def _render_auto_portfolio():
                 'To Tgt%':      dist_target,
                 'Shares':       p['shares'],
                 'Cost $':       f"${p['cost']:,.0f}",
+                'Earnings':     _earnings_cell(p['symbol'], _earn_info, _watchlist),
             })
         # ── TOTAL row ──
         total_cost   = sum(p['cost'] for p in positions)
@@ -625,6 +753,7 @@ def _render_auto_portfolio():
             'To Tgt%':      '',
             'Shares':       '',
             'Cost $':       f"${total_cost:,.0f}",
+            'Earnings':     '',
         })
 
         df_open = pd.DataFrame(rows)
@@ -1027,6 +1156,12 @@ def _render_scalping_portfolio():
     positions = data.get('positions', [])
     if positions:
         st.markdown(f"**Open Positions ({len(positions)})**")
+
+        _sym_list = [p['symbol'] for p in positions]
+        _earn_info = _fetch_earnings_info(tuple(sorted({s.upper() for s in _sym_list})))
+        _watchlist = _load_reporting_watchlist()
+        _render_earnings_banner(_sym_list)
+
         rows = []
         for p in positions:
             ep  = p['entry_price']
@@ -1048,6 +1183,7 @@ def _render_scalping_portfolio():
                 'Vol':        f"{p.get('vol_ratio', 0):.1f}x",
                 'Shares':     p['shares'],
                 'Cost $':     f"${p['cost']:,.0f}",
+                'Earnings':   _earnings_cell(p['symbol'], _earn_info, _watchlist),
             })
         # TOTAL row
         total_cost = sum(p['cost'] for p in positions)
@@ -1069,6 +1205,7 @@ def _render_scalping_portfolio():
             'Vol':       '',
             'Shares':    '',
             'Cost $':    f"${total_cost:,.0f}",
+            'Earnings':  '',
         })
 
         df_open = pd.DataFrame(rows)

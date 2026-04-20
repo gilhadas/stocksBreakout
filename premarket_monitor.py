@@ -154,11 +154,25 @@ _PRIORITY_FALLBACK: List[str] = [
     'WIX', 'CRWV', 'ORBS', 'ETHA',
 ]
 
-# Merge setup file symbols with fallback (file takes precedence, then fallback fills gaps)
+# Merge setup file symbols with fallback + reporting watchlist (earnings names).
+# reporting_watchlist.txt is comma-separated; adds this week's earnings reporters
+# so they get pre-market gap detection (notifies on ≥ --threshold gap moves).
 _SETUPS_FILE = Path('input/1_26_Setups.txt')
 _setup_file_symbols: List[str] = _load_tv_watchlist(_SETUPS_FILE)
+
+_REPORTING_FILE = Path('input/reporting_watchlist.txt')
+_reporting_symbols: List[str] = []
+if _REPORTING_FILE.exists():
+    try:
+        _rw_text = _REPORTING_FILE.read_text(encoding='utf-8')
+        _reporting_symbols = [
+            s.strip().upper() for s in _rw_text.replace('\n', ',').split(',') if s.strip()
+        ]
+    except Exception:
+        pass
+
 PRIORITY_SYMBOLS: List[str] = list(
-    dict.fromkeys(_setup_file_symbols + _PRIORITY_FALLBACK)
+    dict.fromkeys(_setup_file_symbols + _reporting_symbols + _PRIORITY_FALLBACK)
 )
 
 

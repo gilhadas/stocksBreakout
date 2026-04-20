@@ -94,6 +94,22 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
+# AFTER-HOURS MONITORING (After close)
+# ============================================
+# Scans input/reporting_watchlist.txt (this-week earnings reporters) for post-close
+# moves ≥ 3%. Flags names HELD in auto_portfolio and cross-references yfinance
+# earnings calendar so AMC reporters get highlighted.
+# Writes scanner_output/lists/afterhours_watch.txt — next morning's premarket scan
+# can prioritise these names.
+
+# Every weekday at 4:15 PM ET - First post-close check (catches early AH reaction)
+15 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN afterhours_monitor.py --notify >> scanner_output/logs/cron_afterhours_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+# Every weekday at 8:00 PM ET - Second check after AMC earnings releases + reactions settle
+0 20 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN afterhours_monitor.py --notify >> scanner_output/logs/cron_afterhours_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+
+# ============================================
 # DAY TRADING (Intraday scans)
 # ============================================
 
