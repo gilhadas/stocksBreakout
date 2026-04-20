@@ -816,10 +816,27 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         except Exception:
             pass
 
-        # Filter out already-notified exits
+        # Handle mode promotions (PROMOTE_MODE): update auto_portfolio.json
+        # mode + date_added so MAX_HOLD_BARS restarts from promotion date.
+        # Drop them from the actionable-exits list so they don't alert as exits.
+        try:
+            import auto_portfolio as _ap
+            for r in exit_results:
+                if r.get('Action') == 'PROMOTE_MODE' and r.get('NewMode'):
+                    res = _ap.promote_position_mode(r['Symbol'], r['NewMode'])
+                    logger.info(
+                        f"PROMOTE {r['Symbol']}: {res.get('old_mode', '?')} → "
+                        f"{r['NewMode']} ({res.get('reason')})"
+                    )
+        except Exception as e:
+            logger.warning(f"Mode promotion failed: {e}")
+
+        # Filter out already-notified exits. PROMOTE_MODE is informational only
+        # (not a sell) so keep it out of the exit-notification stream.
         new_exits = [
             r for r in exit_results
-            if r['Action'] != 'HOLD' and r['Symbol'] not in notified_today
+            if r['Action'] not in ('HOLD', 'PROMOTE_MODE')
+            and r['Symbol'] not in notified_today
         ]
         hold_exits = [r for r in exit_results if r['Action'] == 'HOLD']
 

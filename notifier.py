@@ -514,10 +514,10 @@ class Notifier:
                 'Symbol': r['Symbol'],
                 'Quality': r['Action'],
                 'Price': r['Price'],
-                'Stop': 0,
-                'Target': 0,
+                'Stop': r.get('Stop', 0),
+                'Target': r.get('Target', 0),
                 'R:R': r['UnrealizedR'],
-                'Vol': 0
+                'Vol': r.get('VolRatio', 0),
             })
 
         self.send_all(subject, message, formatted, csv_path=csv_path)

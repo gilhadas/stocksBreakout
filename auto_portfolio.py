@@ -1298,6 +1298,27 @@ def add_position_direct(
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+# ── Mode promotion (exit_evaluator PROMOTE_MODE) ─────────────────────────────
+
+def promote_position_mode(symbol: str, new_mode: str) -> dict:
+    """Change a position's mode (e.g. daytrade → swing) and re-stamp date_added
+    so MAX_HOLD_BARS starts counting from the promotion date, not original entry.
+    Returns {'promoted': bool, 'reason': str, 'old_mode': str}.
+    """
+    data = load()
+    sym = symbol.upper()
+    for p in data['positions']:
+        if p['symbol'].upper() == sym:
+            old = p.get('mode', '')
+            if old == new_mode:
+                return {'promoted': False, 'reason': 'same_mode', 'old_mode': old}
+            p['mode'] = new_mode
+            p['date_added'] = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
+            _save(data)
+            return {'promoted': True, 'reason': 'ok', 'old_mode': old}
+    return {'promoted': False, 'reason': 'not_found', 'old_mode': ''}
+
+
 # ── Manual close (UI) ─────────────────────────────────────────────────────────
 
 def close_position(symbol: str, exit_price: float, reason: str = 'manual') -> dict:

@@ -147,13 +147,27 @@ class ExitEvaluator:
             exit_signals.append(choppy_signal)
 
         # 6b. Max hold period (V3)
+        # If trend still intact at max-hold, promote daytrade→swing instead of
+        # exiting. Keeps runners that blew past the 1-day daytrade window.
         max_hold = MAX_HOLD_BARS.get(mode_name, 30)
+        promote_to: str | None = None
         if max_hold > 0 and days_held >= max_hold:
-            exit_signals.append((
-                'EXIT_FULL',
-                f'Max hold period reached ({days_held}/{max_hold} days)',
-                55
-            ))
+            sma20 = float(df['close'].rolling(20).mean().iloc[-1]) if len(df) >= 20 else 0.0
+            trend_intact = price > entry_price and price > sma20 > 0
+            if mode_name == 'daytrade' and trend_intact:
+                promote_to = 'swing'
+                exit_signals.append((
+                    'PROMOTE_MODE',
+                    f'Held {days_held}d > {max_hold}d daytrade cap but trend intact '
+                    f'(price {price:.2f} > SMA20 {sma20:.2f}) — promote to swing',
+                    55
+                ))
+            else:
+                exit_signals.append((
+                    'EXIT_FULL',
+                    f'Max hold period reached ({days_held}/{max_hold} days)',
+                    55
+                ))
 
         # 7. Trail stop suggestion
         if tp_reached:
@@ -172,11 +186,21 @@ class ExitEvaluator:
             if trail_signal:
                 exit_signals.append(trail_signal)
 
+        # Volume ratio (today vs 20-day avg) — for the notification payload
+        vol_ratio = 0.0
+        if 'volume' in df.columns and len(df) >= 20:
+            vol_avg20 = float(df['volume'].rolling(20).mean().iloc[-1])
+            if vol_avg20 > 0:
+                vol_ratio = float(df['volume'].iloc[-1]) / vol_avg20
+
         # Build result
         result = {
             'Symbol': symbol,
             'Mode': mode_name,
             'Price': round(price, 2),
+            'Stop': round(stop_price, 2),
+            'Target': round(target_price, 2),
+            'VolRatio': round(vol_ratio, 2),
             'UnrealizedR': round(unrealized_r, 2),
             'DaysHeld': days_held,
             'TPReached': tp_reached,
@@ -188,6 +212,8 @@ class ExitEvaluator:
             action, reason, _ = exit_signals[0]
             result['Action'] = action
             result['Reason'] = reason
+            if action == 'PROMOTE_MODE' and promote_to:
+                result['NewMode'] = promote_to
             return result
 
         # Default: HOLD
