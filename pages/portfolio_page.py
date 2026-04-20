@@ -677,11 +677,59 @@ def _render_auto_portfolio():
                      help="Find skipped signals that could replace weaker open positions"):
             with st.spinner("Analysing swap opportunities..."):
                 swaps = ap.suggest_swaps(notify=True)
+            st.session_state['ap_swap_results'] = swaps
             if swaps:
-                st.toast(f"Found {len(swaps)} swap suggestion(s) — check notifications.")
+                st.toast(f"Found {len(swaps)} swap suggestion(s).")
             else:
                 st.toast("No swap opportunities found (no weak positions or no fresh strong signals).")
-            st.rerun()
+
+    # ── Swap suggestions panel (persists across reruns via session_state) ──
+    _swaps_saved = st.session_state.get('ap_swap_results')
+    if _swaps_saved:
+        with st.container(border=True):
+            st.markdown(f"**⚡ {len(_swaps_saved)} swap suggestion(s)**")
+            for _i, _sw in enumerate(_swaps_saved):
+                _c1, _c2, _c3 = st.columns([3, 3, 1.2])
+                _c1.markdown(
+                    f"Close **{_sw['close_symbol']}** ({_sw['close_pnl_pct']:+.1f}%)"
+                )
+                _upside_pct = ''
+                if _sw.get('open_entry') and _sw.get('open_target'):
+                    _upside_pct = (
+                        f"  ·  {((_sw['open_target'] - _sw['open_entry']) / _sw['open_entry'] * 100):.1f}% upside"
+                    )
+                _c2.markdown(
+                    f"Open **{_sw['open_symbol']}** [{_sw.get('open_quality', '')}]  "
+                    f"R:R {_sw.get('open_rr', 0):.2f}{_upside_pct}"
+                )
+                if _c3.button("Execute", key=f"ap_exec_swap_{_i}_{_sw['close_symbol']}_{_sw['open_symbol']}"):
+                    _res = ap.execute_swap(_sw['close_symbol'], _sw['open_symbol'])
+                    if _res.get('ok'):
+                        st.session_state['ap_swap_last_undo'] = True
+                        st.session_state['ap_swap_results'] = [
+                            s for s in _swaps_saved
+                            if not (s['close_symbol'] == _sw['close_symbol']
+                                    and s['open_symbol'] == _sw['open_symbol'])
+                        ]
+                        st.toast(
+                            f"Closed {_sw['close_symbol']} @ ${_res['closed'].get('exit_price', 0):.2f} → "
+                            f"Opened {_sw['open_symbol']} @ ${_res['opened'].get('entry_price', 0):.2f}"
+                        )
+                        st.rerun()
+                    else:
+                        st.error(f"Swap failed: {_res.get('reason')}")
+
+            if st.session_state.get('ap_swap_last_undo'):
+                if st.button("↩️ Undo last swap", key="ap_swap_undo"):
+                    _u = ap.undo_last_swap()
+                    if _u.get('ok'):
+                        st.session_state['ap_swap_last_undo'] = False
+                        st.toast(
+                            f"Restored {_u.get('restored_position')}, removed {_u.get('removed_position')}."
+                        )
+                        st.rerun()
+                    else:
+                        st.error(f"Undo failed: {_u.get('reason')}")
 
     with col_reset:
         if st.button("🗑️ Reset", key="ap_reset",

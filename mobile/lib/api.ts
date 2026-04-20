@@ -114,6 +114,17 @@ export function suggestSwaps() {
   return authFetch('/portfolio/suggest-swaps', { method: 'POST' });
 }
 
+export function executeSwap(close_symbol: string, open_symbol: string) {
+  return authFetch('/portfolio/execute-swap', {
+    method: 'POST',
+    body: JSON.stringify({ close_symbol, open_symbol }),
+  });
+}
+
+export function undoSwap() {
+  return authFetch('/portfolio/undo-swap', { method: 'POST' });
+}
+
 export function registerPushToken(token: string) {
   return authFetch('/push/register', {
     method: 'POST',

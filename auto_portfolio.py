@@ -15,6 +15,7 @@ Rules
 """
 import re
 from datetime import datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 _NY_TZ          = ZoneInfo('America/New_York')
@@ -1847,3 +1848,187 @@ def suggest_swaps(
         _log.getLogger(__name__).warning(f"Swap advisor notification failed: {_e}")
 
     return swaps
+
+
+def _fetch_live_price(symbol: str) -> Optional[float]:
+    """Fetch the most recent close for `symbol` via yfinance. None on failure."""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(symbol.replace(' ', '-')).history(period='2d')
+        if hist is not None and not hist.empty:
+            return float(hist['Close'].dropna().iloc[-1])
+    except Exception:
+        return None
+    return None
+
+
+def execute_swap(close_symbol: str, open_symbol: str) -> dict:
+    """Close a weak position and open a fresh one from the skipped_cash list.
+
+    Uses live (yfinance) prices for BOTH the close exit and the new entry.
+    The skipped signal's stop/target levels (technical S/R) are preserved;
+    `add_position_direct` auto-adjusts the stop if the live entry drifted
+    above the signal's original stop.
+
+    Returns {'ok': bool, 'reason': str, 'closed': {...}, 'opened': {...}}.
+    """
+    close_sym = close_symbol.upper()
+    open_sym  = open_symbol.upper()
+
+    data = load()
+
+    open_pos = next(
+        (p for p in data.get('positions', []) if p['symbol'].upper() == close_sym),
+        None,
+    )
+    if open_pos is None:
+        return {'ok': False, 'reason': f'{close_sym} not in open positions'}
+
+    skipped = data.get('skipped_cash', [])
+    skip_rec = next(
+        (s for s in skipped if s.get('symbol', '').upper() == open_sym),
+        None,
+    )
+    if skip_rec is None:
+        return {'ok': False, 'reason': f'{open_sym} not in skipped signals'}
+
+    exit_price = _fetch_live_price(close_sym)
+    if exit_price is None or exit_price <= 0:
+        return {'ok': False, 'reason': f'live price unavailable for {close_sym}'}
+
+    entry_price = _fetch_live_price(open_sym)
+    if entry_price is None or entry_price <= 0:
+        return {'ok': False, 'reason': f'live price unavailable for {open_sym}'}
+
+    # Snapshot pre-swap state for undo
+    pre_position = dict(open_pos)
+    pre_skipped  = dict(skip_rec)
+
+    closed = close_position(close_sym, exit_price, reason='swap')
+    if not closed:
+        return {'ok': False, 'reason': f'close failed for {close_sym}'}
+
+    stop   = float(skip_rec.get('stop') or 0.0)
+    target = float(skip_rec.get('target') or 0.0)
+    mode   = skip_rec.get('mode') or 'swing'
+    quality = skip_rec.get('quality') or ''
+    vol    = float(skip_rec.get('vol') or 0.0)
+
+    result = add_position_direct(
+        symbol=open_sym,
+        entry_price=entry_price,
+        stop=stop,
+        target=target,
+        mode=mode,
+        quality=quality,
+        vol_ratio=vol,
+    )
+    if not result.get('added'):
+        return {
+            'ok': False,
+            'reason': f"close succeeded but open failed: {result.get('reason')}",
+            'closed': closed,
+        }
+
+    # Remove the consumed skipped signal and stash undo snapshot
+    data2 = load()
+    data2['skipped_cash'] = [
+        s for s in data2.get('skipped_cash', [])
+        if s.get('symbol', '').upper() != open_sym
+    ]
+    data2['last_swap'] = {
+        'ts':            datetime.now(_NY_TZ).isoformat(),
+        'close_symbol':  close_sym,
+        'open_symbol':   open_sym,
+        'pre_position':  pre_position,
+        'pre_skipped':   pre_skipped,
+        'closed_record': closed,
+    }
+    _save(data2)
+
+    return {
+        'ok': True,
+        'reason': 'ok',
+        'closed': closed,
+        'opened': {
+            'symbol':      open_sym,
+            'entry_price': round(entry_price, 4),
+            'stop':        round(stop, 4),
+            'target':      round(target, 4),
+            'mode':        mode,
+            'quality':     quality,
+        },
+    }
+
+
+def undo_last_swap() -> dict:
+    """Reverse the most recent `execute_swap()`.
+
+    Restores the original position (with its original entry/shares/date),
+    removes the swap-opened position, puts the skipped signal back in the
+    list, and rewinds the realized P&L that was booked on close.
+
+    Returns {'ok': bool, 'reason': str}.
+    """
+    data = load()
+    snap = data.get('last_swap')
+    if not snap:
+        return {'ok': False, 'reason': 'no recent swap to undo'}
+
+    close_sym = (snap.get('close_symbol') or '').upper()
+    open_sym  = (snap.get('open_symbol')  or '').upper()
+    pre_position = snap.get('pre_position') or {}
+    pre_skipped  = snap.get('pre_skipped')  or {}
+    closed_rec   = snap.get('closed_record') or {}
+
+    # 1. Remove the swap-opened position without booking any P&L
+    data['positions'] = [
+        p for p in data.get('positions', [])
+        if p.get('symbol', '').upper() != open_sym
+    ]
+
+    # 2. Remove the swap-close record from closed[] and rewind realized P&L
+    def _is_swap_close(r):
+        return (
+            r.get('symbol', '').upper() == close_sym
+            and r.get('close_reason') == 'swap'
+            and r.get('date_closed') == closed_rec.get('date_closed')
+            and abs(float(r.get('exit_price') or 0) - float(closed_rec.get('exit_price') or 0)) < 0.01
+        )
+    removed_pnl = 0.0
+    new_closed = []
+    removed_once = False
+    for r in data.get('closed', []):
+        if not removed_once and _is_swap_close(r):
+            removed_pnl = float(r.get('pnl') or 0.0)
+            removed_once = True
+            continue
+        new_closed.append(r)
+    data['closed'] = new_closed
+    if removed_once:
+        data['capital'] = round(float(data.get('capital', 0)) - removed_pnl, 2)
+
+    # 3. Restore the original open position
+    if pre_position and not any(
+        p.get('symbol', '').upper() == close_sym for p in data['positions']
+    ):
+        data['positions'].append(pre_position)
+
+    # 4. Restore the skipped_cash entry if not already present
+    if pre_skipped and not any(
+        s.get('symbol', '').upper() == open_sym
+        for s in data.get('skipped_cash', [])
+    ):
+        data.setdefault('skipped_cash', []).append(pre_skipped)
+        data['skipped_cash'].sort(
+            key=lambda e: e.get('priority_score', 0), reverse=True
+        )
+
+    data['last_swap'] = None
+    _save(data)
+    return {
+        'ok': True,
+        'reason': 'ok',
+        'restored_position': close_sym,
+        'removed_position':  open_sym,
+    }

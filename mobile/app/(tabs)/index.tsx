@@ -57,7 +57,7 @@ async function exportSkippedCSV(rows: any[]) {
   }
 }
 import { useFocusEffect, router } from 'expo-router';
-import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, getToken, clearToken } from '../../lib/api';
+import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, executeSwap, undoSwap, getToken, clearToken } from '../../lib/api';
 import SummaryBar from '../../components/SummaryBar';
 import PositionCard from '../../components/PositionCard';
 
@@ -192,6 +192,8 @@ export default function PortfolioScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [swapping, setSwapping] = useState(false);
   const [swapResults, setSwapResults] = useState<any[] | null>(null);
+  const [executingSwap, setExecutingSwap] = useState<string | null>(null);
+  const [swapToast, setSwapToast] = useState<{ msg: string; canUndo: boolean; kind: 'ok' | 'err' } | null>(null);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
 
@@ -246,6 +248,7 @@ export default function PortfolioScreen() {
   const handleSwapAdvisor = async () => {
     setSwapping(true);
     setSwapResults(null);
+    setSwapToast(null);
     try {
       const result = await suggestSwaps();
       setSwapResults(result.swaps || []);
@@ -254,6 +257,43 @@ export default function PortfolioScreen() {
       setError(e?.message ?? String(e));
     }
     setSwapping(false);
+  };
+
+  const handleExecuteSwap = async (closeSym: string, openSym: string) => {
+    const key = `${closeSym}→${openSym}`;
+    setExecutingSwap(key);
+    setSwapToast(null);
+    try {
+      const result = await executeSwap(closeSym, openSym);
+      // Drop the executed pair from the inline list so it can't be clicked again
+      setSwapResults((prev) =>
+        prev ? prev.filter((s) => !(s.close_symbol === closeSym && s.open_symbol === openSym)) : prev
+      );
+      setSwapToast({
+        msg: `Closed ${closeSym} @ $${result.closed?.exit_price?.toFixed(2)} → Opened ${openSym} @ $${result.opened?.entry_price?.toFixed(2)}`,
+        canUndo: true,
+        kind: 'ok',
+      });
+      await loadData();
+      // Auto-dismiss toast after 8s (undo window)
+      setTimeout(() => setSwapToast((t) => (t && t.canUndo ? null : t)), 8000);
+    } catch (e: any) {
+      setSwapToast({ msg: e?.message ?? 'Swap failed', canUndo: false, kind: 'err' });
+      setTimeout(() => setSwapToast(null), 4000);
+    }
+    setExecutingSwap(null);
+  };
+
+  const handleUndoSwap = async () => {
+    try {
+      await undoSwap();
+      setSwapToast({ msg: 'Swap undone.', canUndo: false, kind: 'ok' });
+      await loadData();
+      setTimeout(() => setSwapToast(null), 3000);
+    } catch (e: any) {
+      setSwapToast({ msg: e?.message ?? 'Undo failed', canUndo: false, kind: 'err' });
+      setTimeout(() => setSwapToast(null), 4000);
+    }
   };
 
   const wins = closed.filter(t => (t.pnl || 0) > 0).length;
@@ -325,6 +365,8 @@ export default function PortfolioScreen() {
                     const upside = s.open_entry && s.open_target
                       ? ((s.open_target - s.open_entry) / s.open_entry * 100).toFixed(1)
                       : '?';
+                    const key = `${s.close_symbol}→${s.open_symbol}`;
+                    const busy = executingSwap === key;
                     return (
                       <View key={i} style={styles.swapResultRow}>
                         <Text style={styles.swapResultClose}>
@@ -335,9 +377,26 @@ export default function PortfolioScreen() {
                           Open <Text style={{ color: '#34d399' }}>{s.open_symbol}</Text>
                           {' '}[{s.open_quality}]{'  '}R:R {s.open_rr?.toFixed(2)}{'  '}{upside}% upside
                         </Text>
+                        <Pressable
+                          style={[styles.swapExecBtn, busy && styles.swapBtnDisabled]}
+                          onPress={() => handleExecuteSwap(s.close_symbol, s.open_symbol)}
+                          disabled={busy || executingSwap !== null}
+                        >
+                          <Text style={styles.swapExecBtnText}>{busy ? 'Executing…' : '⚡ Execute'}</Text>
+                        </Pressable>
                       </View>
                     );
                   })}
+                </View>
+              )}
+              {swapToast && (
+                <View style={[styles.swapToast, swapToast.kind === 'err' && styles.swapToastErr]}>
+                  <Text style={styles.swapToastText}>{swapToast.msg}</Text>
+                  {swapToast.canUndo && (
+                    <Pressable onPress={handleUndoSwap}>
+                      <Text style={styles.swapToastUndo}>UNDO</Text>
+                    </Pressable>
+                  )}
                 </View>
               )}
               <Pressable onPress={async () => { await clearToken(); router.replace('/login'); }}>
@@ -460,9 +519,15 @@ const styles = StyleSheet.create({
   swapBtnText: { color: '#c4b5fd', fontSize: 13, fontWeight: '700' },
   swapResults: { backgroundColor: '#1a1a2e', borderRadius: 8, padding: 12, width: '100%', borderLeftWidth: 3, borderLeftColor: '#7c3aed' },
   swapResultsTitle: { color: '#c4b5fd', fontSize: 12, fontWeight: '700', marginBottom: 8 },
-  swapResultRow: { marginBottom: 8, gap: 2 },
+  swapResultRow: { marginBottom: 10, gap: 2 },
   swapResultClose: { color: '#ccc', fontSize: 12 },
   swapResultOpen: { color: '#ccc', fontSize: 12 },
+  swapExecBtn: { alignSelf: 'flex-start', marginTop: 4, backgroundColor: '#4c1d95', paddingHorizontal: 12, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: '#7c3aed' },
+  swapExecBtnText: { color: '#c4b5fd', fontSize: 11, fontWeight: '700' },
+  swapToast: { marginTop: 10, backgroundColor: '#064e3b', borderRadius: 8, padding: 10, borderLeftWidth: 3, borderLeftColor: '#34d399', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  swapToastErr: { backgroundColor: '#4c1d1d', borderLeftColor: '#ef4444' },
+  swapToastText: { color: '#d1fae5', fontSize: 12, flex: 1 },
+  swapToastUndo: { color: '#fde68a', fontSize: 12, fontWeight: '700', paddingHorizontal: 8 },
   skippedCols: { flexDirection: 'row', gap: 8, marginVertical: 6 },
   skippedCol: { flex: 1, alignItems: 'center' },
   skippedColLabel: { color: '#555', fontSize: 10, marginBottom: 2 },

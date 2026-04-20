@@ -486,6 +486,31 @@ def suggest_swaps_endpoint(_token: str = Depends(_require_auth)):
     return {"swaps": swaps, "count": len(swaps)}
 
 
+class ExecuteSwapRequest(BaseModel):
+    close_symbol: str
+    open_symbol: str
+
+
+@app.post("/portfolio/execute-swap")
+def execute_swap_endpoint(req: ExecuteSwapRequest, _token: str = Depends(_require_auth)):
+    import auto_portfolio as ap
+
+    result = ap.execute_swap(req.close_symbol, req.open_symbol)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("reason", "swap failed"))
+    return result
+
+
+@app.post("/portfolio/undo-swap")
+def undo_swap_endpoint(_token: str = Depends(_require_auth)):
+    import auto_portfolio as ap
+
+    result = ap.undo_last_swap()
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("reason", "undo failed"))
+    return result
+
+
 # ── Push Notifications ──────────────────────────────────────────────────────
 
 class PushTokenRequest(BaseModel):
