@@ -119,17 +119,27 @@ def fetch_finnhub_headlines(
         except Exception:
             pass
 
-    try:
-        r = _req.get(
-            _FINNHUB_BASE_URL,
-            params={'symbol': symbol, 'from': from_date, 'to': to_date, 'token': api_key},
-            timeout=10,
-        )
-        r.raise_for_status()
-        articles = r.json() or []
-    except Exception as exc:
-        print(f"    [Finnhub] {symbol} on {from_date}→{to_date}: {exc}")
-        return []
+    articles: list = []
+    for attempt in range(4):
+        try:
+            r = _req.get(
+                _FINNHUB_BASE_URL,
+                params={'symbol': symbol, 'from': from_date, 'to': to_date, 'token': api_key},
+                timeout=10,
+            )
+            if r.status_code == 429:
+                # Free tier is 60 req/min; back off exponentially and retry.
+                backoff = 5 * (2 ** attempt)   # 5s, 10s, 20s, 40s
+                print(f"    [Finnhub] {symbol} 429 — backing off {backoff}s (attempt {attempt + 1}/4)")
+                time.sleep(backoff)
+                continue
+            r.raise_for_status()
+            articles = r.json() or []
+            break
+        except Exception as exc:
+            print(f"    [Finnhub] {symbol} on {from_date}→{to_date}: {exc}")
+            time.sleep(1.2)
+            return []
 
     headlines: List[str] = []
     for a in articles[:10]:
@@ -148,7 +158,8 @@ def fetch_finnhub_headlines(
         headlines.append(text)
 
     cache_file.write_text(json.dumps(headlines))
-    time.sleep(0.25)   # stay comfortably under 60 req/min
+    # Pace at ~55 req/min — free tier ceiling is 60 req/min.
+    time.sleep(1.2)
     return headlines
 
 

@@ -129,11 +129,41 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                 sig['Sentiment'] = sent['sentiment']
                 sig['Buzz'] = sent['buzz_score']
 
-    # ── Alpha Vantage News Sentiment (HIGH+ signals) ─────────────────────────
-    # Runs BEFORE FinBERT so the headline cache is warm — FinBERT's
-    # fetch_headlines() pulls from cache instead of making extra API calls.
-    # Adds AV_Sentiment, AV_Score, AV_Articles, AV_Headline, AV_Topics keys.
-    _quality_sigs = [s for s in results if s.get('Quality') in ('HIGH', 'PREMIUM', 'GOLD')]
+    # ── News enrichment pipeline ─────────────────────────────────────────────
+    # Order is deliberate:
+    #   1. Alpaca (Benzinga) headline prefetch → warms the cache FinBERT reads.
+    #      This gives FinBERT the highest-quality text instead of yfinance.
+    #   2. Alpha Vantage NEWS_SENTIMENT → orthogonal pre-scored signal (AV_Score).
+    #   3. FinBERT → runs on Alpaca headlines (falls back to yfinance/AV).
+    #   4. Finnhub buzz → article-volume-vs-baseline, catalyst-present flag.
+    # When --require-catalyst is set, enrich ALL signals so the gate can evaluate them.
+    _catalyst_required = getattr(args, 'require_catalyst', False)
+    if _catalyst_required:
+        _quality_sigs = list(results)
+    else:
+        _quality_sigs = [s for s in results if s.get('Quality') in ('HIGH', 'PREMIUM', 'GOLD')]
+
+    # ── 1. Alpaca headline prefetch (primary source for FinBERT) ─────────────
+    if _quality_sigs:
+        try:
+            from alpaca_news import batch_alpaca_headlines as _alp_batch
+            _alp_syms = [s.get('Symbol') or s.get('symbol', '') for s in _quality_sigs]
+            _alp_syms = [s for s in _alp_syms if s]
+            if _alp_syms:
+                logger.info(f"Alpaca news: prefetching headlines for {len(_alp_syms)} signal(s)…")
+                _alp_results = _alp_batch(_alp_syms, limit_per_symbol=8, hours_back=48)
+                for sig in results:
+                    sym = sig.get('Symbol') or sig.get('symbol', '')
+                    heads = _alp_results.get(sym.upper(), [])
+                    if heads:
+                        sig['Alpaca_Articles'] = len(heads)
+                        sig['Alpaca_Headline'] = heads[0][:100]
+        except ImportError:
+            logger.debug("alpaca_news not available")
+        except Exception as _alp_e:
+            logger.warning(f"Alpaca headline prefetch failed: {_alp_e}")
+
+    # ── 2. Alpha Vantage News Sentiment ──────────────────────────────────────
     if _quality_sigs:
         try:
             from alphavantage_news import batch_news_sentiment as _av_batch
@@ -239,6 +269,34 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     except Exception as _fp_e:
         logger.debug(f"FinBERT promotion skipped: {_fp_e}")
 
+    # ── 4. Finnhub buzz (article-volume-vs-baseline) ─────────────────────────
+    # Orthogonal to tone: tells us a name is getting unusual attention.
+    # Skipped unless --require-catalyst is set (free tier is 60 req/min and
+    # pacing adds ~1s per symbol — don't pay that cost on normal scans).
+    if _catalyst_required and _quality_sigs:
+        try:
+            from finnhub_buzz import batch_buzz as _fh_batch
+            _fh_syms = [s.get('Symbol') or s.get('symbol', '') for s in _quality_sigs]
+            _fh_syms = [s for s in _fh_syms if s]
+            if _fh_syms:
+                logger.info(f"Finnhub buzz: fetching for {len(_fh_syms)} signal(s)…")
+                _fh_results = _fh_batch(_fh_syms, throttle_sec=1.1)
+                for sig in results:
+                    sym = (sig.get('Symbol') or sig.get('symbol', '')).upper()
+                    if sym in _fh_results:
+                        b = _fh_results[sym]
+                        sig['Buzz_Ratio'] = b['buzz_ratio']
+                        sig['Buzz_Articles_Week'] = b['articles_last_week']
+                        if b['buzz_ratio'] >= 1.5:
+                            logger.info(
+                                f"  🔥 {sym} buzz ratio {b['buzz_ratio']:.2f} "
+                                f"({b['articles_last_week']} vs baseline {b['weekly_average']:.1f})"
+                            )
+        except ImportError:
+            logger.debug("finnhub_buzz not available")
+        except Exception as _fh_e:
+            logger.warning(f"Finnhub buzz enrichment failed: {_fh_e}")
+
     # ── Earnings date enrichment ──────────────────────────────────────────────
     # Adds Earnings_Date, Earnings_Timing (BMO/AMC), Earnings_Warning,
     # Earnings_This_Week (True/False), and Reporting_Watchlist (True/False) to each signal.
@@ -320,6 +378,45 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
                     logger.debug(f"Earnings fetch failed for {sym}: {_e}")
         except Exception as _earn_e:
             logger.debug(f"Earnings enrichment skipped: {_earn_e}")
+
+    # ── Catalyst gate ─────────────────────────────────────────────────────────
+    # When --require-catalyst is set, drop signals that lack a supporting news
+    # catalyst. A signal passes if ANY of the following hold:
+    #   • FinBERT_Net >= 0.10  (net bullish tilt — FinBERT on Alpaca headlines)
+    #   • AV_Score    >= 0.15  (Alpha Vantage somewhat_bullish threshold)
+    #   • AV_Articles >= 2     (AV fresh attention, regardless of tone)
+    #   • Buzz_Ratio  >= 1.5   (Finnhub: articles in last week vs baseline)
+    # Primary use-case: thematic watchlist scans where we only want to act on
+    # names with an active catalyst, not quiet technical setups.
+    if _catalyst_required and results:
+        _CAT_MIN_FB_NET = 0.10
+        _CAT_MIN_AV_SCORE = 0.15
+        _CAT_MIN_AV_ARTICLES = 2
+        _CAT_MIN_BUZZ = 1.5
+        _before = len(results)
+        _kept = []
+        for _s in results:
+            _fb_net = _s.get('FinBERT_Net', 0.0) or 0.0
+            _av_score = _s.get('AV_Score', 0.0) or 0.0
+            _av_articles = _s.get('AV_Articles', 0) or 0
+            _buzz = _s.get('Buzz_Ratio', 0.0) or 0.0
+            if (_fb_net >= _CAT_MIN_FB_NET
+                    or _av_score >= _CAT_MIN_AV_SCORE
+                    or _av_articles >= _CAT_MIN_AV_ARTICLES
+                    or _buzz >= _CAT_MIN_BUZZ):
+                _kept.append(_s)
+            else:
+                logger.info(
+                    f"Catalyst gate: dropping {_s.get('Symbol', '?')} "
+                    f"(FinBERT_Net={_fb_net:+.2f}, AV_Score={_av_score:+.2f}, "
+                    f"AV_Articles={_av_articles}, Buzz={_buzz:.2f}) — no supporting news"
+                )
+        results = _kept
+        logger.info(
+            f"Catalyst gate: {len(results)}/{_before} signals passed "
+            f"(FinBERT_Net>={_CAT_MIN_FB_NET}, AV_Score>={_CAT_MIN_AV_SCORE}, "
+            f"AV_Articles>={_CAT_MIN_AV_ARTICLES}, or Buzz_Ratio>={_CAT_MIN_BUZZ})"
+        )
 
     # Check market regime — warn if choppy or red
     market_warning = None
@@ -1395,6 +1492,14 @@ Examples:
         help='Enrich each signal with web sentiment data (requires TAVILY_API_KEY)'
     )
     parser.add_argument(
+        '--require-catalyst',
+        action='store_true',
+        help='Only notify on signals backed by a news catalyst (FinBERT_Net>=0.10, '
+             'AV_Score>=0.15, AV_Articles>=2, or Finnhub Buzz_Ratio>=1.5). Forces news '
+             'enrichment for all quality tiers, not just HIGH+. Uses Alpaca/Benzinga '
+             'as the primary headline source. Intended for thematic watchlists.'
+    )
+    parser.add_argument(
         '--auto-positions',
         type=str,
         metavar='FILE',
@@ -1451,8 +1556,31 @@ Examples:
         metavar='PATH',
         help='Load market data from cache file (used by job_launcher.py for batch execution)'
     )
+    parser.add_argument(
+        '--boosted-sizing',
+        action='store_true',
+        help='Opt into THEMATIC_BOOSTED_SIZING (raises position caps + GOLD/PREMIUM multipliers). '
+             'Thematic watchlists only — validated +11.7%% return with Sharpe unchanged on themes; '
+             '-0.17 Sharpe on general watchlists (do NOT use for general scans).'
+    )
 
     args = parser.parse_args()
+
+    # Apply thematic boosted sizing overrides (opt-in via --boosted-sizing)
+    if getattr(args, 'boosted_sizing', False):
+        from config import THEMATIC_BOOSTED_SIZING
+        import config as _cfg
+        _cfg.ATR_SIZING['max_single_position_pct'] = THEMATIC_BOOSTED_SIZING['max_single_position_pct']
+        _cfg.QUALITY_SIZING['GOLD']    = THEMATIC_BOOSTED_SIZING['GOLD_mult']
+        _cfg.QUALITY_SIZING['PREMIUM'] = THEMATIC_BOOSTED_SIZING['PREMIUM_mult']
+        try:
+            from mock_trader import MockTrader
+            MockTrader.QUALITY_MULTIPLIERS['GOLD']    = THEMATIC_BOOSTED_SIZING['GOLD_mult']
+            MockTrader.QUALITY_MULTIPLIERS['PREMIUM'] = THEMATIC_BOOSTED_SIZING['PREMIUM_mult']
+        except Exception:
+            pass
+        print(f"🚀 Boosted sizing active: max_pos_cap={THEMATIC_BOOSTED_SIZING['max_single_position_pct']:.0%}, "
+              f"GOLD={THEMATIC_BOOSTED_SIZING['GOLD_mult']}x, PREMIUM={THEMATIC_BOOSTED_SIZING['PREMIUM_mult']}x")
 
     # Setup logging
     if args.cron:

@@ -174,6 +174,47 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
+# THEMATIC WATCHLISTS (small curated baskets — alerts only, no auto-portfolio)
+# ============================================
+# Small curated lists (6-20 symbols each) scanned twice a day during market hours.
+# Uses the same BreakoutDetector pipeline as the main scanner, so quality tiers
+# (PREMIUM/GOLD) and notifications flow through the existing channels.
+# Source of truth = input/thematic_*.txt (see config.THEMATIC_WATCHLISTS for rationale).
+
+# TSMC / AI supply-chain — 10:30 AM ET + 2:30 PM ET
+30 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_tsmc.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_tsmc_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+30 14 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_tsmc.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_tsmc_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+# SPACE names — 10:35 AM ET + 2:35 PM ET
+35 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_space.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_space_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+35 14 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_space.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_space_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+# QUANTUM names — 10:40 AM ET + 2:40 PM ET
+40 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_quantum.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_quantum_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+40 14 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_quantum.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_quantum_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+# NUCLEAR / uranium / SMR — 10:45 AM ET + 2:45 PM ET
+45 10 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_nuclear.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_nuclear_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+45 14 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN breakout_scanner.py input/thematic_nuclear.txt --mode swing --bounce --sentiment --require-catalyst --boosted-sizing --live --cron --notify >> scanner_output/logs/cron_thematic_nuclear_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+
+# ============================================
+# NEWS-FIRST SCAN (discover tickers with bullish news, then scan them)
+# ============================================
+# news_scanner.py queries Alpha Vantage NEWS_SENTIMENT for last 18h of curated
+# topics, ranks tickers by article_count × avg_sentiment × avg_relevance, and
+# writes the top 30 to scanner_output/lists/news_watch.txt.
+# The subsequent scan uses --require-catalyst so only names with confirmed news
+# AND a technical setup fire notifications.
+
+# Every weekday at 9:50 AM ET — discover morning movers, scan them
+50 9 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN news_scanner.py --out scanner_output/lists/news_watch.txt --top 30 --hours 18 >> scanner_output/logs/cron_news_scan_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN breakout_scanner.py scanner_output/lists/news_watch.txt --mode swing --bounce --sentiment --require-catalyst --live --cron --notify >> scanner_output/logs/cron_news_scan_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+# Every weekday at 1:00 PM ET — midday refresh (catches afternoon catalysts)
+0 13 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN news_scanner.py --out scanner_output/lists/news_watch.txt --top 30 --hours 8 >> scanner_output/logs/cron_news_scan_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN breakout_scanner.py scanner_output/lists/news_watch.txt --mode swing --bounce --sentiment --require-catalyst --live --cron --notify >> scanner_output/logs/cron_news_scan_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+
+# ============================================
 # SIGNAL VALIDATION & LEARNING
 # ============================================
 

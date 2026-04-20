@@ -134,15 +134,31 @@ def fetch_headlines(symbol: str, max_count: int = 8,
     Returns:
         List of headline strings (title [+ summary snippet])
     """
+    texts: List[str] = []
+
+    # Primary source: Alpaca (Benzinga) — highest-quality headline feed.
+    # Pulled from cache first so we don't make extra API calls per FinBERT run.
+    try:
+        from alpaca_news import fetch_alpaca_headlines_cached
+        alp = fetch_alpaca_headlines_cached(
+            symbol, limit=max_count, hours_back=max_age_hours,
+        )
+        if alp:
+            texts.extend(alp[:max_count])
+    except Exception as exc:
+        logger.debug(f"Alpaca headline fetch skipped for {symbol}: {exc}")
+
+    if len(texts) >= max_count:
+        return texts[:max_count]
+
     try:
         import yfinance as yf
         news = yf.Ticker(symbol).news or []
     except Exception as exc:
         logger.debug(f"yfinance news fetch failed for {symbol}: {exc}")
-        return []
+        news = []
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-    texts: List[str] = []
 
     for item in news:
         try:

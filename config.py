@@ -86,6 +86,17 @@ QUALITY_SIZING = {
     'STANDARD': 1.0,  # 10% of capital (base)
 }
 
+# Thematic boosted sizing (opt-in via --boosted-sizing flag on breakout_scanner.py).
+# Validated Apr 2026 on 54 thematic symbols × 12mo: +11.7% return vs current FinBERT,
+# Sharpe unchanged (+0.01). Do NOT apply to general watchlists — same config costs
+# -0.17 Sharpe on 200-symbol universe (return +6.7% but Sharpe 4.66 → 4.50).
+# Applied at runtime by overriding ATR_SIZING + QUALITY_SIZING + MockTrader multipliers.
+THEMATIC_BOOSTED_SIZING = {
+    'max_single_position_pct': 0.20,   # override ATR_SIZING cap (10% → 20%)
+    'GOLD_mult':    4.0,               # override QUALITY_SIZING GOLD (2.0 → 4.0)
+    'PREMIUM_mult': 3.0,               # override QUALITY_SIZING PREMIUM (2.0 → 3.0)
+}
+
 # --- ATR-Adjusted Position Sizing ---
 # Scales position size inversely with stock volatility.
 # High ATR% → smaller position. Low ATR% → capped at 1.0 (no oversizing).
@@ -511,6 +522,29 @@ SECTOR_BASKETS = {
             'COIN', 'MSTR', 'HOOD', 'HUT', 'IREN', 'BITF', 'CIFR',
             'APLD', 'CLSK', 'RIOT', 'MARA', 'CORZ', 'BMNR', 'GLXY',
         ],
+    },
+}
+
+# --- Thematic Watchlists (dedicated scheduled scans) ---
+# Each list is scanned independently by its own cron entry (see cron_jobs.txt).
+# Symbols are kept in input/thematic_*.txt as the source of truth for the scanner;
+# this dict is a programmatic reference only.
+THEMATIC_WATCHLISTS = {
+    'tsmc_supply_chain': {
+        'file': 'input/thematic_tsmc.txt',
+        'rationale': 'TSMC CapEx / AI build-out beneficiaries: cooling/power, front-end equipment, OSAT, EDA',
+    },
+    'space': {
+        'file': 'input/thematic_space.txt',
+        'rationale': 'Satellite / launch / space infrastructure names',
+    },
+    'quantum': {
+        'file': 'input/thematic_quantum.txt',
+        'rationale': 'Pure-play quantum computing names',
+    },
+    'nuclear': {
+        'file': 'input/thematic_nuclear.txt',
+        'rationale': 'Nuclear energy / SMR / uranium — AI data-center power demand play',
     },
 }
 
