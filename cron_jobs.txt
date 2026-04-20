@@ -231,6 +231,21 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
+# FIBONACCI BOUNCE SCANNER (end-of-day)
+# ============================================
+# Daily-chart Fib retracement scan. Finds stocks pulled back from a recent
+# swing high to 38.2 / 50 / 61.8% with SMA confluence + RSI reset (35-50).
+# Writes scanner_output/lists/bounce_candidates.csv ranked by bounce_score.
+# Useful during corrections to spot where pullbacks might end.
+
+# Every weekday at 4:30 PM ET - Scan S&P 500 for fib bounce setups
+30 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN fib_retracement.py input/ALL.txt --min-score 60 --notify >> scanner_output/logs/cron_fib_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/lists >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+# Every weekday at 4:35 PM ET - Fib check on currently-held positions (looser threshold)
+35 16 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN fib_retracement.py --held-only --min-score 40 --notify >> scanner_output/logs/cron_fib_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+
+# ============================================
 # SIGNAL VALIDATION & LEARNING
 # ============================================
 
