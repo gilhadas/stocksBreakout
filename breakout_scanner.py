@@ -297,6 +297,36 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         except Exception as _fh_e:
             logger.warning(f"Finnhub buzz enrichment failed: {_fh_e}")
 
+    # ── 5. Congressional trades (STOCK Act disclosures) ──────────────────────
+    # Confirmation signal only — 45-day disclosure lag means not leading.
+    # Free source: CapitolTrades BFF. Override with QUIVER_API_KEY env var.
+    # Skipped unless --require-catalyst (unofficial BFF is rate-sensitive).
+    if _catalyst_required and _quality_sigs:
+        try:
+            from congress_trades import batch_congress_summary as _ct_batch
+            _ct_syms = [s.get('Symbol') or s.get('symbol', '') for s in _quality_sigs]
+            _ct_syms = [s for s in _ct_syms if s]
+            if _ct_syms:
+                logger.info(f"Congress trades: fetching 90d summary for {len(_ct_syms)} signal(s)…")
+                _ct_results = _ct_batch(_ct_syms, days=90, throttle_sec=0.5)
+                for sig in results:
+                    sym = (sig.get('Symbol') or sig.get('symbol', '')).upper()
+                    c = _ct_results.get(sym)
+                    if c:
+                        sig['Congress_Buys_90d'] = c['buys']
+                        sig['Congress_Sells_90d'] = c['sells']
+                        sig['Congress_Net_90d'] = c['net']
+                        sig['Congress_Top_Politician'] = c['top_politician']
+                        if c['net'] >= 2:
+                            logger.info(
+                                f"  🏛 {sym} Congress net +{c['net']} "
+                                f"({c['buys']}B/{c['sells']}S, top: {c['top_politician'][:24]})"
+                            )
+        except ImportError:
+            logger.debug("congress_trades not available")
+        except Exception as _ct_e:
+            logger.warning(f"Congress trades enrichment failed: {_ct_e}")
+
     # ── Earnings date enrichment ──────────────────────────────────────────────
     # Adds Earnings_Date, Earnings_Timing (BMO/AMC), Earnings_Warning,
     # Earnings_This_Week (True/False), and Reporting_Watchlist (True/False) to each signal.
@@ -382,10 +412,11 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     # ── Catalyst gate ─────────────────────────────────────────────────────────
     # When --require-catalyst is set, drop signals that lack a supporting news
     # catalyst. A signal passes if ANY of the following hold:
-    #   • FinBERT_Net >= 0.10  (net bullish tilt — FinBERT on Alpaca headlines)
-    #   • AV_Score    >= 0.15  (Alpha Vantage somewhat_bullish threshold)
-    #   • AV_Articles >= 2     (AV fresh attention, regardless of tone)
-    #   • Buzz_Ratio  >= 1.5   (Finnhub: articles in last week vs baseline)
+    #   • FinBERT_Net      >= 0.10  (net bullish tilt — FinBERT on Alpaca headlines)
+    #   • AV_Score         >= 0.15  (Alpha Vantage somewhat_bullish threshold)
+    #   • AV_Articles      >= 2     (AV fresh attention, regardless of tone)
+    #   • Buzz_Ratio       >= 1.5   (Finnhub: articles in last week vs baseline)
+    #   • Congress_Net_90d >= 2     (net Congressional buys in last 90d)
     # Primary use-case: thematic watchlist scans where we only want to act on
     # names with an active catalyst, not quiet technical setups.
     if _catalyst_required and results:
@@ -393,6 +424,7 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         _CAT_MIN_AV_SCORE = 0.15
         _CAT_MIN_AV_ARTICLES = 2
         _CAT_MIN_BUZZ = 1.5
+        _CAT_MIN_CONGRESS_NET = 2
         _before = len(results)
         _kept = []
         for _s in results:
@@ -400,22 +432,26 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             _av_score = _s.get('AV_Score', 0.0) or 0.0
             _av_articles = _s.get('AV_Articles', 0) or 0
             _buzz = _s.get('Buzz_Ratio', 0.0) or 0.0
+            _cong_net = _s.get('Congress_Net_90d', 0) or 0
             if (_fb_net >= _CAT_MIN_FB_NET
                     or _av_score >= _CAT_MIN_AV_SCORE
                     or _av_articles >= _CAT_MIN_AV_ARTICLES
-                    or _buzz >= _CAT_MIN_BUZZ):
+                    or _buzz >= _CAT_MIN_BUZZ
+                    or _cong_net >= _CAT_MIN_CONGRESS_NET):
                 _kept.append(_s)
             else:
                 logger.info(
                     f"Catalyst gate: dropping {_s.get('Symbol', '?')} "
                     f"(FinBERT_Net={_fb_net:+.2f}, AV_Score={_av_score:+.2f}, "
-                    f"AV_Articles={_av_articles}, Buzz={_buzz:.2f}) — no supporting news"
+                    f"AV_Articles={_av_articles}, Buzz={_buzz:.2f}, "
+                    f"Congress_Net={_cong_net:+d}) — no supporting catalyst"
                 )
         results = _kept
         logger.info(
             f"Catalyst gate: {len(results)}/{_before} signals passed "
             f"(FinBERT_Net>={_CAT_MIN_FB_NET}, AV_Score>={_CAT_MIN_AV_SCORE}, "
-            f"AV_Articles>={_CAT_MIN_AV_ARTICLES}, or Buzz_Ratio>={_CAT_MIN_BUZZ})"
+            f"AV_Articles>={_CAT_MIN_AV_ARTICLES}, Buzz_Ratio>={_CAT_MIN_BUZZ}, "
+            f"or Congress_Net_90d>={_CAT_MIN_CONGRESS_NET})"
         )
 
     # Check market regime — warn if choppy or red
