@@ -46,6 +46,22 @@ When adding features to `indicators.py` or `scanner.py`, adhere to these default
 - **Config Access:** `from config import MODES, PORTFOLIO`.
 - **Regime Multipliers:** `val = cfg['x'] * REGIME_CONFIG[regime]['x_mult']`.
 
+## 5a. Mobile API Server (uvicorn)
+The mobile app hits the local FastAPI server at `api/server.py` via the Cloudflare tunnel (`gilhadas-stocks.com`). The service is launchd-managed (`~/Library/LaunchAgents/com.stocksbreakout.api.plist`, `KeepAlive=true`) and is **not** started with `--reload`, so any edit to `api/server.py`, `auto_portfolio.py`, or anything they import requires a manual restart — otherwise new endpoints return 404 and new functions raise AttributeError on the running process.
+
+Restart procedure (launchd auto-respawns within ~5s):
+```bash
+# 1. Kill the running uvicorn — launchd restarts it automatically
+kill $(lsof -ti:8000)
+
+# 2. Verify the new process is up — expect 401 (not 404) on an auth-gated endpoint
+sleep 3
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8000/portfolio/execute-swap \
+  -H "Content-Type: application/json" -d '{"close_symbol":"X","open_symbol":"Y"}'
+```
+
+Diagnose "mobile action does nothing" by comparing server start time to file mtime: `ps -o lstart= -p $(lsof -ti:8000)` vs `stat -f %Sm api/server.py auto_portfolio.py` — if the files are newer than the process, the server is stale. Logs: `scanner_output/api_server.log` and `scanner_output/api_server.err`.
+
 ## 6. Interaction Protocols
 - **Logic Critique:** If a proposed strategy change weakens the "edge" or increases risk, point it out immediately.
 - **Backtest Mentality:** When writing new scanner features, suggest how to validate them against historical data in `scanner_output/backtests/`.

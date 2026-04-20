@@ -2001,15 +2001,28 @@ Both services start automatically on Mac login. Nothing to do — just open `htt
 
 ### After Code Changes
 
-When you update the mobile app, rebuild and restart:
+Uvicorn runs **without** `--reload` — any edit to `api/server.py`, `auto_portfolio.py`, or anything they import needs a server restart, or new endpoints 404 and new functions AttributeError on the stale process.
 
 ```bash
-cd ~/Documents/GitHub/stocksBreakout/mobile
-npx expo export --platform web
-kill $(lsof -ti:8000)   # launchd auto-restarts the server
-or in one command: 
-npx expo export --platform web && kill $(lsof -ti:8000)
+# Backend only (api/server.py, auto_portfolio.py, etc.)
+kill $(lsof -ti:8000)   # launchd auto-restarts within ~5s
 
+# Mobile web bundle (anything under mobile/)
+cd ~/Documents/GitHub/stocksBreakout/mobile
+npx expo export --platform web && kill $(lsof -ti:8000)
+```
+
+Sanity check the new process is running the latest code — expect `401` (not `404`) on an auth-gated endpoint:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8000/portfolio/execute-swap \
+  -H "Content-Type: application/json" -d '{"close_symbol":"X","open_symbol":"Y"}'
+```
+
+Diagnose staleness by comparing process start time to file mtime:
+```bash
+ps -o lstart= -p $(lsof -ti:8000)
+stat -f %Sm api/server.py auto_portfolio.py
 ```
 
 ### Management Commands
