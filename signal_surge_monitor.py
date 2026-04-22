@@ -78,6 +78,7 @@ SIGNAL_FILES = [
     'scanner_output/lists/premium_daytrade.txt',
     'scanner_output/lists/momentum_watch_daytrade.txt',
     'scanner_output/lists/premarket_watch.txt',
+    'scanner_output/lists/early_premarket_watch.txt',
 ]
 
 

@@ -110,6 +110,20 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
+# EARLY PREMARKET SCANNER (4:00 AM ET — ER/news catalyst detection)
+# ============================================
+# Detects stocks moving pre-dawn on earnings releases, analyst upgrades, or
+# overnight news. Merges afterhours_watch.txt (ER candidates), Alpha Vantage
+# news movers (last 10h), and the high-beta priority list.
+# Writes scanner_output/lists/early_premarket_watch.txt — picked up by:
+#   - signal_surge_monitor.py (SIGNAL_FILES) for real-time alerts from 8 AM
+#   - premarket_monitor.py at 8:00 AM for momentum seeding
+
+# Every weekday at 4:00 AM ET - Detect pre-dawn ER/news movers
+0 4 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN early_premarket_scan.py --notify >> scanner_output/logs/cron_early_premarket_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+
+
+# ============================================
 # DAY TRADING (Intraday scans)
 # ============================================
 
