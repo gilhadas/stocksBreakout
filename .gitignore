@@ -17,3 +17,4 @@ __pycache__/
 !requirements.txt
 /credentials/
 /backtests
+.claude/scheduled_tasks.lock
