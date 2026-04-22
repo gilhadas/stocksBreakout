@@ -3,6 +3,7 @@ FastAPI server — thin wrapper around auto_portfolio.py.
 Run: uvicorn api.server:app --host 0.0.0.0 --port 8000
 """
 
+import math
 import sys
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
@@ -10,6 +11,17 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+
+def _clean(obj):
+    """Recursively replace nan/inf floats with None so JSON serialization never fails."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean(v) for v in obj]
+    return obj
 
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -59,12 +71,12 @@ def get_portfolio(_token: str = Depends(_require_auth)):
 
     data = ap.load()
     summary = ap.get_summary(data)
-    return {
+    return _clean({
         "positions": data.get("positions", []),
         "closed": data.get("closed", []),
         "summary": summary,
         "last_updated": data.get("last_updated", ""),
-    }
+    })
 
 
 @app.post("/portfolio/refresh")
@@ -74,14 +86,14 @@ def refresh_portfolio(_token: str = Depends(_require_auth)):
     result = ap.refresh_prices()
     data = result["data"]
     summary = ap.get_summary(data)
-    return {
+    return _clean({
         "positions": data.get("positions", []),
         "closed": data.get("closed", []),
         "summary": summary,
         "last_updated": data.get("last_updated", ""),
         "auto_closed": result.get("closed", []),
         "updated_count": result.get("updated", 0),
-    }
+    })
 
 
 @app.get("/portfolio/skipped")
@@ -161,7 +173,7 @@ def get_skipped(_token: str = Depends(_require_auth)):
 
     # Sort newest-first
     enriched_sorted = sorted(enriched, key=lambda x: x.get("date_added", ""), reverse=True)
-    return {
+    return _clean({
         "skipped": enriched_sorted,
         "count": len(enriched_sorted),
         "capital": capital,
@@ -170,7 +182,7 @@ def get_skipped(_token: str = Depends(_require_auth)):
         "total_gain_pct": round(total_gain_pct, 2),
         "total_gain_normalized": round(total_gain_normalized, 2),
         "last_updated": data.get("last_updated", ""),
-    }
+    })
 
 
 # ── Manual Portfolio ────────────────────────────────────────────────────────
