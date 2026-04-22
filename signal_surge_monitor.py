@@ -1,23 +1,28 @@
 """
 signal_surge_monitor.py — Real-time surge/drop alert bot
 
-Watches all active signal lists for sudden price moves.
+Data source priority:
+  1. IBKR (TWS/IB Gateway) — true real-time tick data, polled every 30 s
+  2. Alpaca WebSocket     — ~1 s IEX bars, market hours only
+  3. Alpaca REST          — premarket polling every 60 s (always used 08:00-09:30)
 
-  • 08:00–09:29 ET  Premarket: Alpaca REST polling every 60 s
-  • 09:30–16:15 ET  Market hours: Alpaca WebSocket 1-min bars (real-time)
+Session phases:
+  • 08:00–09:29 ET  Premarket: Alpaca REST poll every 60 s
+  • 09:30–16:15 ET  Market hours: IBKR tickers (primary) or Alpaca WebSocket (fallback)
   • Self-terminates at 16:15 ET.
 
-Alert triggers (all configurable at top of file):
+Alert triggers (configurable at top of file):
   - ±SURGE_FROM_OPEN_PCT % from the session open price
-  - ±SURGE_VELOCITY_PCT % over the last VELOCITY_BARS × 1-min bars (velocity)
-  - Volume spike: bar volume > VOL_SPIKE_MULT × 20-day avg
+  - ±SURGE_VELOCITY_PCT % over the last VELOCITY_BARS polls (velocity)
+  - Volume pace: today's cumulative volume > VOL_SPIKE_MULT × expected pace (IBKR)
+    OR bar volume > VOL_SPIKE_MULT × 20-day avg bar volume (Alpaca)
 
 Dedup: one alert per (symbol, trigger-type) per session.
 
 Usage:
   python signal_surge_monitor.py           # log only
   python signal_surge_monitor.py --notify  # Telegram + Discord alerts
-  python signal_surge_monitor.py --test    # dry-run with fake symbols
+  python signal_surge_monitor.py --test    # dry-run
 
 Cron: started once at 08:00 ET by cron_agent; self-terminates at 16:15.
 """
@@ -26,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import os
 import sys
 from collections import defaultdict
@@ -50,17 +56,21 @@ logging.basicConfig(
 
 NY = ZoneInfo('America/New_York')
 
-# ── Thresholds (tune here) ────────────────────────────────────────────────────
+# ── Thresholds ────────────────────────────────────────────────────────────────
 SURGE_FROM_OPEN_PCT = 3.0    # ±% from session open → alert
-SURGE_VELOCITY_PCT  = 2.0    # ±% over VELOCITY_BARS bars → alert
-VELOCITY_BARS       = 5      # number of 1-min bars for velocity window
-VOL_SPIKE_MULT      = 3.0    # bar volume > N × 20-day avg → flag in alert
+SURGE_VELOCITY_PCT  = 2.0    # ±% over VELOCITY_BARS polls → alert
+VELOCITY_BARS       = 5      # poll history depth for velocity window
+VOL_SPIKE_MULT      = 3.0    # cumulative vol > N × expected pace → flag
+IB_POLL_S           = 30     # seconds between IBKR ticker reads
+IB_CLIENT_ID        = 50     # separate client ID — avoids conflict with scanner (ID 1)
 
 # ── Session window ────────────────────────────────────────────────────────────
 PREMARKET_START = (8, 0)
 MARKET_OPEN     = (9, 30)
 MARKET_CLOSE    = (16, 15)
-POLL_INTERVAL_S = 60
+ALPACA_POLL_S   = 60         # premarket REST poll interval
+
+TRADING_MINUTES = 390.0      # 09:30-16:00 = 6.5 h = 390 min
 
 # ── Signal list files to watch ────────────────────────────────────────────────
 SIGNAL_FILES = [
@@ -86,9 +96,16 @@ def _in_window(start_hm: tuple[int, int], end_hm: tuple[int, int]) -> bool:
 
 def is_premarket()    -> bool: return _in_window(PREMARKET_START, MARKET_OPEN)
 def is_market_hours() -> bool: return _in_window(MARKET_OPEN, MARKET_CLOSE)
-def past_close()      -> bool: return now_et().replace(
-    hour=MARKET_CLOSE[0], minute=MARKET_CLOSE[1], second=0, microsecond=0
-) <= now_et()
+def past_close()      -> bool:
+    t = now_et()
+    return t >= t.replace(hour=MARKET_CLOSE[0], minute=MARKET_CLOSE[1], second=0, microsecond=0)
+
+
+def _elapsed_trading_minutes() -> float:
+    """Minutes elapsed since 09:30 ET today (clamped 1..390)."""
+    t = now_et()
+    open_time = t.replace(hour=9, minute=30, second=0, microsecond=0)
+    return max(1.0, min(TRADING_MINUTES, (t - open_time).total_seconds() / 60))
 
 
 def load_symbols() -> set[str]:
@@ -130,7 +147,7 @@ def fetch_20d_avg_volume(symbols: list[str]) -> dict[str, float]:
             bars = client.get_stock_bars(req).df
             if bars.empty:
                 continue
-            bars = bars.reset_index()
+            bars    = bars.reset_index()
             sym_col = 'symbol' if 'symbol' in bars.columns else None
             for sym in batch:
                 sub = bars[bars[sym_col] == sym] if sym_col else bars
@@ -147,15 +164,15 @@ def fetch_20d_avg_volume(symbols: list[str]) -> dict[str, float]:
 
 class SurgeMonitor:
     def __init__(self, notify: bool = False, test: bool = False):
-        self.notify   = notify
-        self.test     = test
+        self.notify    = notify
+        self.test      = test
         self._notifier = None
 
-        self.symbols:     set[str]          = set()
-        self.avg_vol:     dict[str, float]  = {}
-        self.open_prices: dict[str, float]  = {}
-        self.bar_history: dict[str, list]   = defaultdict(list)
-        self._alerted:    set[tuple]        = set()  # (trigger_key, symbol)
+        self.symbols:     set[str]         = set()
+        self.avg_vol:     dict[str, float] = {}
+        self.open_prices: dict[str, float] = {}
+        self.bar_history: dict[str, list]  = defaultdict(list)
+        self._alerted:    set[tuple]       = set()  # (trigger_key, symbol)
 
     # ── Notification ─────────────────────────────────────────────────────────
 
@@ -180,26 +197,27 @@ class SurgeMonitor:
         except Exception as exc:
             logger.warning(f'Discord failed: {exc}')
 
-    # ── Per-bar evaluation ────────────────────────────────────────────────────
+    # ── Price alert logic (shared by all sources) ────────────────────────────
 
     def on_bar(self, symbol: str, close: float, volume: float, bar_time: datetime | None):
+        """
+        Evaluate one price sample. volume = bar/period volume for Alpaca;
+        pass 0 and call on_ib_cumvol() separately when using IBKR.
+        """
         if symbol not in self.symbols:
             return
 
-        # Set open price on first bar of the session
         if symbol not in self.open_prices:
             self.open_prices[symbol] = close
 
         open_px = self.open_prices[symbol]
-
-        # Maintain rolling close history
-        hist = self.bar_history[symbol]
+        hist    = self.bar_history[symbol]
         hist.append(close)
         if len(hist) > VELOCITY_BARS + 1:
             hist.pop(0)
 
-        ts   = bar_time.strftime('%H:%M') if bar_time else now_et().strftime('%H:%M')
-        triggered: list[tuple[str, str]] = []  # (dedup_key, description)
+        ts = bar_time.strftime('%H:%M') if bar_time else now_et().strftime('%H:%M')
+        triggered: list[tuple[str, str]] = []
 
         # 1. From-open surge / drop
         if open_px > 0:
@@ -211,41 +229,69 @@ class SurgeMonitor:
                 triggered.append(('DOWN_OPEN',
                     f'📉 DROP {pct:.1f}% from open  ${open_px:.2f} → ${close:.2f}'))
 
-        # 2. Velocity (last N bars)
+        # 2. Velocity (last N polls)
         if len(hist) >= VELOCITY_BARS:
             ref = hist[-VELOCITY_BARS]
             vel = (close - ref) / ref * 100 if ref > 0 else 0.0
             if vel >= SURGE_VELOCITY_PCT:
                 triggered.append(('UP_VEL',
-                    f'⚡ VELOCITY +{vel:.1f}% in {VELOCITY_BARS} min  ${ref:.2f} → ${close:.2f}'))
+                    f'⚡ VELOCITY +{vel:.1f}% in {VELOCITY_BARS} polls  ${ref:.2f} → ${close:.2f}'))
             elif vel <= -SURGE_VELOCITY_PCT:
                 triggered.append(('DOWN_VEL',
-                    f'⚡ VELOCITY {vel:.1f}% in {VELOCITY_BARS} min  ${ref:.2f} → ${close:.2f}'))
+                    f'⚡ VELOCITY {vel:.1f}% in {VELOCITY_BARS} polls  ${ref:.2f} → ${close:.2f}'))
 
-        # 3. Volume spike (included as annotation in the alert, not standalone)
+        # 3. Alpaca bar-level volume spike annotation
         vol_note = ''
         avg = self.avg_vol.get(symbol, 0)
-        if avg > 0 and volume >= avg * VOL_SPIKE_MULT:
-            ratio    = volume / avg
-            vol_note = f'\n📊 Vol spike {ratio:.1f}× avg ({volume:,.0f} vs {avg:,.0f} avg)'
+        if volume > 0 and avg > 0:
+            # avg is daily; Alpaca passes 1-min bar volume — compare at per-minute scale
+            avg_per_min = avg / TRADING_MINUTES
+            if volume >= avg_per_min * VOL_SPIKE_MULT:
+                ratio    = volume / avg_per_min
+                vol_note = f'\n📊 Vol {ratio:.1f}× avg/min ({volume:,.0f} vs {avg_per_min:,.0f})'
 
-        # Fire de-duped alerts
         for key, desc in triggered:
             if (key, symbol) in self._alerted:
                 continue
             self._alerted.add((key, symbol))
-            full = f'{desc}{vol_note}'
             logger.info(f'ALERT  {symbol} @ ${close:.2f} [{ts}]  {desc}')
-            self._send(symbol, close, full, ts)
+            self._send(symbol, close, f'{desc}{vol_note}', ts)
+
+    def on_ib_cumvol(self, symbol: str, cum_volume: float, bar_time: datetime | None):
+        """
+        IBKR-specific volume pace check using cumulative day volume.
+        Fires a standalone VOL_PACE alert if today's volume is running at
+        VOL_SPIKE_MULT × the expected pace for the current time of day.
+        """
+        if ('VOL_PACE', symbol) in self._alerted:
+            return
+        avg = self.avg_vol.get(symbol, 0)
+        if avg <= 0 or cum_volume <= 0:
+            return
+
+        elapsed   = _elapsed_trading_minutes()
+        expected  = avg * (elapsed / TRADING_MINUTES)  # how much volume is normal by now
+        if expected <= 0:
+            return
+
+        pace_mult = cum_volume / expected
+        if pace_mult >= VOL_SPIKE_MULT:
+            self._alerted.add(('VOL_PACE', symbol))
+            ts    = bar_time.strftime('%H:%M') if bar_time else now_et().strftime('%H:%M')
+            price = self.open_prices.get(symbol, 0)
+            msg   = (f'📊 VOL PACE {pace_mult:.1f}× expected  '
+                     f'({cum_volume:,.0f} today vs {expected:,.0f} expected at {ts})')
+            logger.info(f'ALERT  {symbol}  {msg}')
+            self._send(symbol, price, msg, ts)
 
     # ── Symbol management ─────────────────────────────────────────────────────
 
     def reload_symbols(self) -> set[str]:
-        new = load_symbols()
+        new   = load_symbols()
         added = new - self.symbols
         if added:
             logger.info(f'Symbol list updated: {len(new)} total '
-                        f'({len(added)} added: {sorted(added)[:8]}{"…" if len(added)>8 else ""})')
+                        f'({len(added)} added: {sorted(added)[:8]}{"…" if len(added) > 8 else ""})')
         self.symbols = new
         return new
 
@@ -256,7 +302,84 @@ class SurgeMonitor:
         logger.info('Session reset — open prices and alert history cleared')
 
 
-# ── Premarket REST polling ────────────────────────────────────────────────────
+# ── IBKR source (primary, market hours) ──────────────────────────────────────
+
+async def _try_connect_ib():
+    """Try paper then live port. Returns connected IB instance or None."""
+    try:
+        from ib_insync import IB
+        from config import IB_HOST, IB_PAPER_PORT, IB_LIVE_PORT
+    except ImportError:
+        return None
+
+    for port, label in [(IB_PAPER_PORT, 'PAPER'), (IB_LIVE_PORT, 'LIVE')]:
+        ib = IB()
+        try:
+            await asyncio.wait_for(
+                ib.connectAsync(IB_HOST, port, clientId=IB_CLIENT_ID), timeout=5
+            )
+            ib.reqMarketDataType(3)  # delayed OK — we just need prices, not strict real-time
+            logger.info(f'IBKR connected ({label} port {port})')
+            return ib
+        except Exception as exc:
+            logger.debug(f'IBKR {label} port {port} unavailable: {exc}')
+    return None
+
+
+async def _run_ib_stream(monitor: SurgeMonitor, ib):
+    """
+    Subscribe to reqMktData for all symbols; poll every IB_POLL_S seconds.
+    IB tickers give true real-time last price + cumulative day volume.
+    Reload symbol list every 10 minutes to pick up new signals.
+    """
+    from ib_insync import Stock
+
+    tickers: dict[str, object] = {}
+
+    async def _subscribe(symbols: set[str]):
+        for sym in symbols - set(tickers):
+            try:
+                contract = Stock(sym, 'SMART', 'USD')
+                await ib.qualifyContractsAsync(contract)
+                tickers[sym] = ib.reqMktData(contract, '', False, False)
+            except Exception as exc:
+                logger.debug(f'IB subscribe failed {sym}: {exc}')
+
+    await _subscribe(monitor.symbols)
+    logger.info(f'IBKR: subscribed to {len(tickers)} tickers (polling every {IB_POLL_S}s)')
+
+    reload_counter = 0
+    while not past_close():
+        await asyncio.sleep(IB_POLL_S)
+        reload_counter += 1
+
+        # Reload symbol list every 10 min and subscribe to new symbols
+        if reload_counter % (600 // IB_POLL_S) == 0:
+            monitor.reload_symbols()
+            await _subscribe(monitor.symbols)
+
+        now = now_et()
+        for sym, ticker in list(tickers.items()):
+            price = float(getattr(ticker, 'last',  None) or
+                          getattr(ticker, 'close', None) or 0)
+            if price <= 0:
+                continue
+
+            cum_vol = float(getattr(ticker, 'volume', 0) or 0)
+            monitor.on_bar(sym, price, 0, now)          # price checks (no bar vol)
+            monitor.on_ib_cumvol(sym, cum_vol, now)     # volume pace check
+
+    # Clean up subscriptions
+    for ticker in tickers.values():
+        try:
+            ib.cancelMktData(ticker.contract)
+        except Exception:
+            pass
+    ib.disconnect()
+    logger.info('IBKR stream ended — disconnected')
+
+
+# ── Alpaca premarket REST polling ─────────────────────────────────────────────
 
 async def _premarket_poll(monitor: SurgeMonitor):
     try:
@@ -268,54 +391,50 @@ async def _premarket_poll(monitor: SurgeMonitor):
 
     key, secret = os.environ.get('ALPACA_API_KEY', ''), os.environ.get('ALPACA_SECRET_KEY', '')
     client = StockHistoricalDataClient(key, secret)
-    logger.info('Premarket REST polling started')
+    logger.info('Premarket REST polling started (Alpaca)')
 
     while is_premarket():
         monitor.reload_symbols()
-        symbols = list(monitor.symbols)
-        if symbols:
-            for i in range(0, len(symbols), 50):
-                batch = symbols[i:i + 50]
-                try:
-                    req    = StockLatestBarRequest(symbol_or_symbols=batch)
-                    latest = client.get_stock_latest_bar(req)
-                    for sym, bar in latest.items():
-                        bar_time = bar.timestamp.astimezone(NY) if bar.timestamp else None
-                        monitor.on_bar(sym, float(bar.close), float(bar.volume), bar_time)
-                except Exception as exc:
-                    logger.debug(f'Poll batch error: {exc}')
-        await asyncio.sleep(POLL_INTERVAL_S)
+        for i in range(0, len(monitor.symbols), 50):
+            batch = list(monitor.symbols)[i:i + 50]
+            try:
+                req    = StockLatestBarRequest(symbol_or_symbols=batch)
+                latest = client.get_stock_latest_bar(req)
+                for sym, bar in latest.items():
+                    bar_time = bar.timestamp.astimezone(NY) if bar.timestamp else None
+                    monitor.on_bar(sym, float(bar.close), float(bar.volume), bar_time)
+            except Exception as exc:
+                logger.debug(f'Premarket poll error: {exc}')
+        await asyncio.sleep(ALPACA_POLL_S)
 
     logger.info('Premarket polling done')
 
 
-# ── Market-hours WebSocket streaming ─────────────────────────────────────────
+# ── Alpaca WebSocket fallback (market hours) ──────────────────────────────────
 
-def _run_websocket(monitor: SurgeMonitor):
+def _run_alpaca_websocket(monitor: SurgeMonitor):
     try:
         from alpaca.data.live import StockDataStream
         from alpaca.data.enums import DataFeed
     except ImportError:
-        logger.error('alpaca-py missing — cannot start WebSocket')
+        logger.error('alpaca-py missing — cannot start WebSocket fallback')
         return
 
     key, secret = os.environ.get('ALPACA_API_KEY', ''), os.environ.get('ALPACA_SECRET_KEY', '')
-    symbols = list(monitor.symbols)
+    symbols     = list(monitor.symbols)
     if not symbols:
-        logger.warning('No symbols to stream — signal lists are empty')
+        logger.warning('No symbols to stream')
         return
 
-    # macOS Python.org builds don't use system SSL certs — use certifi bundle.
     import ssl, certifi
     ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
-    logger.info(f'WebSocket streaming {len(symbols)} symbols (IEX feed)')
+    logger.info(f'Alpaca WebSocket fallback: streaming {len(symbols)} symbols (IEX)')
     stream = StockDataStream(key, secret, feed=DataFeed.IEX,
                              websocket_params={'ssl': ssl_ctx})
 
     async def handle_bar(bar):
         if past_close():
-            logger.info('Past 16:15 ET — stopping WebSocket')
             stream.stop()
             return
         bar_time = bar.timestamp.astimezone(NY) if hasattr(bar.timestamp, 'astimezone') else None
@@ -327,20 +446,21 @@ def _run_websocket(monitor: SurgeMonitor):
         stream.run()
     except ValueError as exc:
         if 'connection limit' in str(exc).lower():
-            logger.error('Alpaca WebSocket connection limit reached — is another instance running? '
-                         'Run: pkill -f signal_surge_monitor.py  then restart.')
+            logger.error('Alpaca connection limit — kill other instances: '
+                         'pkill -f signal_surge_monitor.py')
         else:
-            logger.error(f'WebSocket error: {exc}')
+            logger.error(f'Alpaca WebSocket error: {exc}')
     except Exception as exc:
-        logger.error(f'WebSocket error: {exc}')
+        logger.error(f'Alpaca WebSocket error: {exc}')
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description='Real-time surge/drop alert bot')
-    parser.add_argument('--notify', action='store_true', help='Send Telegram + Discord alerts')
-    parser.add_argument('--test',   action='store_true', help='Dry run — log only')
+    parser.add_argument('--notify',   action='store_true', help='Send Telegram + Discord alerts')
+    parser.add_argument('--test',     action='store_true', help='Dry run — log only')
+    parser.add_argument('--no-ibkr',  action='store_true', help='Skip IBKR, use Alpaca only')
     args = parser.parse_args()
 
     if past_close():
@@ -354,20 +474,32 @@ def main():
         logger.warning('No symbols found in signal lists — exiting')
         sys.exit(0)
 
-    # Pre-fetch 20-day avg volumes (used for spike detection, non-fatal if fails)
     monitor.avg_vol = fetch_20d_avg_volume(list(monitor.symbols))
 
     loop = asyncio.get_event_loop()
 
-    # Phase 1: premarket REST polling (blocking until 09:30)
+    # Phase 1: premarket REST polling (Alpaca — always)
     if is_premarket():
         loop.run_until_complete(_premarket_poll(monitor))
 
-    # Phase 2: market-hours WebSocket (blocking until 16:15, self-stops)
-    if not past_close():
-        monitor.reset_session()
-        monitor.reload_symbols()  # refresh list in case premarket added symbols
-        _run_websocket(monitor)
+    if past_close():
+        logger.info('signal_surge_monitor finished')
+        return
+
+    monitor.reset_session()
+    monitor.reload_symbols()
+
+    # Phase 2: market hours — try IBKR first, fall back to Alpaca WebSocket
+    ib = None
+    if not args.no_ibkr:
+        ib = loop.run_until_complete(_try_connect_ib())
+
+    if ib is not None:
+        logger.info('Data source: IBKR (real-time tickers, 30s poll)')
+        loop.run_until_complete(_run_ib_stream(monitor, ib))
+    else:
+        logger.info('Data source: Alpaca WebSocket (IEX ~1s bars) — IBKR unavailable')
+        _run_alpaca_websocket(monitor)
 
     logger.info('signal_surge_monitor finished')
 
