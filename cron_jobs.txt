@@ -128,6 +128,19 @@ HC_BASE=https://hc-ping.com
 
 
 # ============================================
+# SIGNAL SURGE/DROP MONITOR (long-running daemon)
+# ============================================
+# signal_surge_monitor.py watches all signal lists (premium_swing, premium_daytrade,
+# momentum_watch, premarket_watch) for sudden ±3% moves from open, ±2% velocity
+# in 5 min, and 3× volume spikes via Alpaca real-time WebSocket (market hours)
+# and REST polling (premarket). Self-terminates at 16:15 ET.
+# Kill stale instance before starting so restart after code changes is safe.
+
+# Every weekday at 8:00 AM ET - Start surge monitor (premarket + market hours)
+0 8 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && pkill -f "signal_surge_monitor.py" 2>/dev/null || true && nohup caffeinate -i $PYTHON_BIN signal_surge_monitor.py --notify >> scanner_output/logs/cron_surge_monitor_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 &
+
+
+# ============================================
 # MOMENTUM-WATCH MONITOR (Every 10 minutes)
 # ============================================
 # monitor_watch.py writes state files only — no signal/portfolio output, no S3 upload needed
