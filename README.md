@@ -18,7 +18,8 @@ backtesting, and automated cron + Discord notifications.
 6. [CLI Reference](#cli-reference)
 7. [Output Columns](#output-columns)
 8. [Cron Schedule](#cron-schedule)
-9. [Pre-Market Monitor](#pre-market-monitor-premarket_monitorpy)
+9. [Early Premarket Scanner](#early-premarket-scanner-early_premarket_scanpy)
+10. [Pre-Market Monitor](#pre-market-monitor-premarket_monitorpy)
 10. [FinBERT Quality Promotion](#finbert-quality-promotion)
 11. [FinBERT Backtest](#finbert-backtest-finbert_backtestpy)
 12. [Earnings Date Warning](#earnings-date-warning)
@@ -50,6 +51,7 @@ exit_evaluator.py      # Position exit signal generation
 pattern_recognition.py # 28 patterns: 16 chart + 11 candle + VCP (V12)
 notifier.py            # Discord / Email / Telegram notifications
 portfolio.py           # Position tracking, P&L, snapshots
+early_premarket_scan.py # 4 AM ER/news catalyst scanner → early_premarket_watch.txt
 premarket_monitor.py   # Pre-market gap scanner + FinBERT + X trending (8:00, 8:45 AM)
 finbert_sentiment.py   # ProsusAI/finbert model wrapper (batch sentiment, per-symbol)
 finbert_backtest.py    # FinBERT quality-promotion backtest vs baseline (Finnhub historical news)
@@ -408,6 +410,7 @@ All times are US Eastern (TZ=America/New_York set in cron_jobs.txt).
 
 | Time (ET) | Days | Job |
 |-----------|------|-----|
+| 4:00 AM | Mon–Fri | Early premarket scan: ER/news catalyst detection → `early_premarket_watch.txt` + Discord |
 | 8:00 AM | Mon–Fri | Pre-market monitor: gap scan + FinBERT + X trending → `premarket_watch.txt` + Discord |
 | 8:45 AM | Mon–Fri | Pre-market monitor: second scan (updated pre-market prices) |
 | Mon 9:00 AM | Mon | Longterm Phase 1: full scan → premium export |
@@ -438,6 +441,49 @@ python upload_to_s3.py --since-epoch $START --dirs scanner_output/signals scanne
 ```
 
 Requires `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `.env` or environment.
+
+---
+
+## Early Premarket Scanner (`early_premarket_scan.py`)
+
+4:00 AM ET job that detects stocks already moving on earnings releases, analyst upgrades, or
+overnight news — before the main 8:00 AM premarket check.
+
+### What it does
+
+1. Loads `scanner_output/lists/afterhours_watch.txt` — ER candidates from prior evening's `afterhours_monitor.py`
+2. Discovers overnight news movers via Alpha Vantage (last 10 h window)
+3. Merges with high-beta `PRIORITY_SYMBOLS` from `premarket_monitor.py` (~280 symbols total, capped at 300)
+4. Parallel-fetches premarket 1-min bars (`yfinance prepost=True`) — flags gaps ≥ 3%
+5. For each gapper, confirms catalyst: ER flag + Alpaca article count + Finnhub buzz ratio
+6. Ranks by `abs(gap_pct) × (1 + catalyst_boost)` — filters noise-only gaps
+7. Writes `scanner_output/lists/early_premarket_watch.txt` (one symbol per line)
+8. Sends Discord + Telegram alert with gap%, catalyst tags, and price
+
+### Downstream consumers
+
+| Consumer | When | How |
+|----------|------|-----|
+| `signal_surge_monitor.py` | From 8:00 AM | `SIGNAL_FILES` now includes `early_premarket_watch.txt` — surge alerts fire on these symbols |
+| `premarket_monitor.py` | 8:00 AM | Can merge file into momentum seed (manual or cron chain) |
+
+### Usage
+
+```bash
+python early_premarket_scan.py                   # standard run (log only)
+python early_premarket_scan.py --notify          # Telegram + Discord alerts
+python early_premarket_scan.py --threshold 2.0   # lower sensitivity
+python early_premarket_scan.py --dry-run         # print only, no file writes
+```
+
+### Catalyst scoring
+
+```
+catalyst_boost = (1.0 if has_er else 0) + min(articles/8, 0.75) + min(max(buzz-1,0)/2, 0.5)
+rank_score     = abs(gap_pct) × (1 + catalyst_boost × 0.5)
+```
+
+A symbol is kept if it has an ER tag, ≥1 Alpaca article, Finnhub buzz ≥ 1.3×, or gap ≥ 6% (2× threshold).
 
 ---
 
