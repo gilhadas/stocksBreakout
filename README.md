@@ -4,7 +4,7 @@ Professional-grade algorithmic breakout scanner with Minervini Stage 2 scoring, 
 backtesting, and automated cron + Discord notifications.
 
 > **Current version: V12** (28 patterns + S/R trendlines + Optuna weight optimizer)
-> Last updated: Mar 2026
+> Last updated: Apr 2026 — active config: V9-C + BOUNCE_BEAR_GATE=15
 
 ---
 
@@ -24,7 +24,7 @@ backtesting, and automated cron + Discord notifications.
 12. [Earnings Date Warning](#earnings-date-warning)
 13. [Momentum-Watch Monitor](#momentum-watch-monitor-monitor_watchpy)
 14. [scanner_output/lists/ — Live Working Files](#scanner_outputlists--live-working-files)
-15. [Backtest Results](#backtest-results) — [V9-H Regime Gate](#v9-h-regime-gate-mar-2026--current-live-config)
+15. [Backtest Results](#backtest-results) — [V9-H Regime Gate](#v9-h-regime-gate-mar-2026--current-live-config) — [BBG15 (current)](#bounce-bear-gate--bbg15-apr-2026--current-live-config)
 16. [Streamlit Dashboard](#streamlit-dashboard)
 17. [Notifications](#notifications)
 18. [IB Connection](#ib-connection)
@@ -1075,6 +1075,38 @@ python regime_deep_investigation.py --years 2022,2023,2024 --trials 150
 The primary alpha driver is still the **Minervini PREMIUM filter**; the regime gate adds
 bear-market capital preservation without sacrificing bull-market returns.
 
+### Bounce Bear Gate — BBG15 (Apr 2026 — current live config)
+
+V9-H was reverted (2026-04-17) in favour of **V9-C + BOUNCE_BEAR_GATE=15** after a 5-year, 200-symbol backtest showed the BEARISH block cost ~6% in 2025 with no net gain.
+
+**What it does:** Skips BOUNCE detection in RED_MARKET when SPY has been below its 200-day SMA for ≥15 consecutive trading days. Distinguishes sustained bear markets from brief corrections (April 2025 / April 2026 tariff crashes were 9–14 days → allowed).
+
+| Year | Market | SPY | V9-C Baseline | **BBG15 V9-C** | Δ |
+|------|--------|-----|---------------|----------------|---|
+| 2022 | Bear | -18.65% | -17.32% | **-12.82%** | +4.5% |
+| 2023 | Bull | +26.71% | +56.76% | **+56.08%** | -0.7% |
+| 2024 | Bull | +26.05% | +24.05% | **+24.05%** | 0% |
+| 2025 | Mixed | +18.89% | +52.53% | **+52.02%** | -0.5% |
+| 2026 | Mixed | +3.34% | +8.75% | **+8.75%** | 0% |
+
+**5-year compound:** baseline +167% → BBG15 **+179%** (+12%).
+
+BBG10 was tested and rejected: kills 2023 by -30.7% vs baseline (over-blocks bull bounces).
+
+**Config:**
+- `BOUNCE_BEAR_GATE = 15` in `config.py`
+- `market_data.get_spy_consec_below_sma200()` — cached consecutive-day counter
+- `orchestrator._scan_symbol()` skips `detect_bounce()` when `RED_MARKET + consec ≥ 15`
+
+```bash
+# Re-run 5-year backtest
+python backtest_regime_compare.py \
+  --watchlist input/backtest_200.txt \
+  --years 2022,2023,2024,2025,2026 \
+  --trades-log \
+  2>&1 | tee scanner_output/backtests/bbg_comparison.txt
+```
+
 ### V9-C / V9-H: the recommended live configs
 
 **V9-C = Minervini≥7 + PREMIUM quality + TP→Trail stop**
@@ -2028,21 +2060,33 @@ stat -f %Sm api/server.py auto_portfolio.py
 ### Management Commands
 
 ```bash
-# Check status of both services
+# Check status of all services
 launchctl list | grep stocksbreakout
+ps aux | grep -E "(cron_agent|uvicorn|caffeinate|breakout_scanner|cloudflared)" | grep -v grep
 
-# View API server logs
+# View logs
 tail -f ~/Documents/GitHub/stocksBreakout/scanner_output/api_server.log
-
-# View tunnel logs
+tail -f ~/Documents/GitHub/stocksBreakout/scanner_output/api_server.err
+tail -f ~/Documents/GitHub/stocksBreakout/scanner_output/cron_agent.log
 tail -f ~/Documents/GitHub/stocksBreakout/scanner_output/tunnel.log
 
-# Restart API server
-kill $(lsof -ti:8000)   # launchd restarts it automatically
+# Restart API server (launchd auto-respawns ~5s)
+kill $(lsof -ti:8000)
+
+# Restart cron_agent (NOT managed by launchd — must restart manually)
+# Required after any edit to cron_jobs.txt (no hot-reload)
+kill $(ps aux | grep "cron_agent" | grep -v grep | awk '{print $2}')
+nohup caffeinate -i venv/bin/python3 cron_agent.py --daemon \
+  > scanner_output/cron_agent.log 2>&1 &
+sleep 2 && tail -5 scanner_output/cron_agent.log   # expect "N jobs loaded"
 
 # Restart tunnel
 launchctl unload ~/Library/LaunchAgents/com.stocksbreakout.tunnel.plist
 launchctl load ~/Library/LaunchAgents/com.stocksbreakout.tunnel.plist
+
+# Diagnose stale API server (files newer than process → restart needed)
+ps -o lstart= -p $(lsof -ti:8000)
+stat -f %Sm api/server.py auto_portfolio.py
 ```
 
 ### API Endpoints
