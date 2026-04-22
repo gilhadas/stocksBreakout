@@ -81,6 +81,13 @@ SIGNAL_FILES = [
     'scanner_output/lists/early_premarket_watch.txt',
 ]
 
+# Files whose symbols are scanner-confirmed breakouts (PREMIUM/GOLD quality).
+# Symbols in these files get a [CONFIRMED] tag; all others get [WATCH].
+CONFIRMED_FILES = [
+    'scanner_output/lists/premium_swing.txt',
+    'scanner_output/lists/premium_daytrade.txt',
+]
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -107,6 +114,30 @@ def _elapsed_trading_minutes() -> float:
     t = now_et()
     open_time = t.replace(hour=9, minute=30, second=0, microsecond=0)
     return max(1.0, min(TRADING_MINUTES, (t - open_time).total_seconds() / 60))
+
+
+def load_confirmed_symbols() -> set[str]:
+    """Return symbols present in PREMIUM/GOLD scanner output files."""
+    confirmed: set[str] = set()
+    for path in CONFIRMED_FILES:
+        p = Path(path)
+        if p.exists():
+            for line in p.read_text().splitlines():
+                sym = line.strip().upper()
+                if sym and not sym.startswith('#'):
+                    confirmed.add(sym)
+    return confirmed
+
+
+def load_held_symbols() -> set[str]:
+    """Return symbols currently held in auto_portfolio (open positions)."""
+    try:
+        import auto_portfolio as ap
+        data = ap.load()
+        return {p['symbol'].upper() for p in data.get('positions', [])}
+    except Exception as exc:
+        logger.debug(f'auto_portfolio not loadable: {exc}')
+        return set()
 
 
 def load_symbols() -> set[str]:
@@ -169,11 +200,13 @@ class SurgeMonitor:
         self.test      = test
         self._notifier = None
 
-        self.symbols:     set[str]         = set()
-        self.avg_vol:     dict[str, float] = {}
-        self.open_prices: dict[str, float] = {}
-        self.bar_history: dict[str, list]  = defaultdict(list)
-        self._alerted:    set[tuple]       = set()  # (trigger_key, symbol)
+        self.symbols:           set[str]         = set()
+        self.confirmed_symbols: set[str]         = set()  # PREMIUM/GOLD scanner signals → SURGE tag
+        self.held_symbols:      set[str]         = set()  # auto_portfolio open positions → DROP tag
+        self.avg_vol:           dict[str, float] = {}
+        self.open_prices:       dict[str, float] = {}
+        self.bar_history:       dict[str, list]  = defaultdict(list)
+        self._alerted:          set[tuple]       = set()  # (trigger_key, symbol)
 
     # ── Notification ─────────────────────────────────────────────────────────
 
@@ -183,11 +216,11 @@ class SurgeMonitor:
             self._notifier = Notifier()
         return self._notifier
 
-    def _send(self, symbol: str, price: float, reason: str, ts: str):
+    def _send(self, symbol: str, price: float, reason: str, ts: str, tag: str):
         if self.test or not self.notify:
             return
         notifier = self._get_notifier()
-        msg = f'⚡ {symbol} ${price:.2f} [{ts} ET]\n{reason}'
+        msg = f'⚡ {symbol} ${price:.2f} [{ts} ET]  {tag}\n{reason}'
         try:
             notifier.send_telegram(msg)
         except Exception as exc:
@@ -251,12 +284,27 @@ class SurgeMonitor:
                 ratio    = volume / avg_per_min
                 vol_note = f'\n📊 Vol {ratio:.1f}× avg/min ({volume:,.0f} vs {avg_per_min:,.0f})'
 
+        # Dedup: if SURGE from-open fires this cycle, skip VELOCITY (same move).
+        # Exclude keys already alerted — they won't send, so shouldn't suppress VELOCITY.
+        triggered_keys = {k for k, _ in triggered if (k, symbol) not in self._alerted}
+        is_confirmed = symbol in self.confirmed_symbols  # PREMIUM scanner signal → surge tag
+        is_held      = symbol in self.held_symbols       # open portfolio position → drop tag
         for key, desc in triggered:
             if (key, symbol) in self._alerted:
                 continue
+            if key == 'UP_VEL'   and 'UP_OPEN'   in triggered_keys:
+                continue
+            if key == 'DOWN_VEL' and 'DOWN_OPEN' in triggered_keys:
+                continue
             self._alerted.add((key, symbol))
-            logger.info(f'ALERT  {symbol} @ ${close:.2f} [{ts}]  {desc}')
-            self._send(symbol, close, f'{desc}{vol_note}', ts)
+            is_down = key in ('DOWN_OPEN', 'DOWN_VEL')
+            if is_down:
+                tag = '⚠️ HELD position' if is_held else '👁 WATCH'
+            else:
+                tag = '✅ CONFIRMED breakout' if is_confirmed else '👁 WATCH'
+            log_icon = '⚠️' if (is_down and is_held) else ('✅' if (not is_down and is_confirmed) else '👁')
+            logger.info(f'ALERT {log_icon} {symbol} @ ${close:.2f} [{ts}]  {desc}')
+            self._send(symbol, close, f'{desc}{vol_note}', ts, tag)
 
     def on_ib_cumvol(self, symbol: str, cum_volume: float, bar_time: datetime | None):
         """
@@ -278,22 +326,29 @@ class SurgeMonitor:
         pace_mult = cum_volume / expected
         if pace_mult >= VOL_SPIKE_MULT:
             self._alerted.add(('VOL_PACE', symbol))
-            ts    = bar_time.strftime('%H:%M') if bar_time else now_et().strftime('%H:%M')
-            price = self.open_prices.get(symbol, 0)
+            ts        = bar_time.strftime('%H:%M') if bar_time else now_et().strftime('%H:%M')
+            price     = self.open_prices.get(symbol, 0)
+            confirmed = symbol in self.confirmed_symbols
             msg   = (f'📊 VOL PACE {pace_mult:.1f}× expected  '
                      f'({cum_volume:,.0f} today vs {expected:,.0f} expected at {ts})')
-            logger.info(f'ALERT  {symbol}  {msg}')
-            self._send(symbol, price, msg, ts)
+            log_icon = '✅' if confirmed else '👁'
+            tag = '✅ CONFIRMED breakout' if confirmed else '👁 WATCH'
+            logger.info(f'ALERT {log_icon} {symbol}  {msg}')
+            self._send(symbol, price, msg, ts, tag)
 
     # ── Symbol management ─────────────────────────────────────────────────────
 
     def reload_symbols(self) -> set[str]:
-        new   = load_symbols()
-        added = new - self.symbols
+        new       = load_symbols()
+        confirmed = load_confirmed_symbols()
+        held      = load_held_symbols()
+        added     = new - self.symbols
         if added:
             logger.info(f'Symbol list updated: {len(new)} total '
                         f'({len(added)} added: {sorted(added)[:8]}{"…" if len(added) > 8 else ""})')
-        self.symbols = new
+        self.symbols           = new
+        self.confirmed_symbols = confirmed
+        self.held_symbols      = held
         return new
 
     def reset_session(self):
