@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import math
 import os
@@ -55,6 +56,10 @@ logging.basicConfig(
 )
 
 NY = ZoneInfo('America/New_York')
+
+# Daily state file — persists alerted set and session open prices across restarts.
+# Keyed by date so it auto-resets each new trading day.
+_STATE_FILE = Path('scanner_output/state/surge_monitor_state.json')
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 SURGE_FROM_OPEN_PCT = 3.0    # ±% from session open → alert
@@ -152,6 +157,76 @@ def load_symbols() -> set[str]:
     return symbols
 
 
+def _today_str() -> str:
+    return datetime.now(NY).strftime('%Y-%m-%d')
+
+
+def load_state() -> tuple[set[tuple], dict[str, float]]:
+    """Load today's alerted set and open prices from disk. Returns empty defaults if missing/stale."""
+    try:
+        if not _STATE_FILE.exists():
+            return set(), {}
+        raw = json.loads(_STATE_FILE.read_text())
+        if raw.get('date') != _today_str():
+            return set(), {}  # stale — new trading day
+        alerted    = {tuple(item) for item in raw.get('alerted', [])}
+        open_prices = {k: float(v) for k, v in raw.get('open_prices', {}).items()}
+        logger.info(f'State restored: {len(alerted)} alerts, {len(open_prices)} open prices')
+        return alerted, open_prices
+    except Exception as exc:
+        logger.debug(f'State load failed: {exc}')
+        return set(), {}
+
+
+def save_state(alerted: set[tuple], open_prices: dict[str, float]) -> None:
+    try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _STATE_FILE.write_text(json.dumps({
+            'date':        _today_str(),
+            'alerted':     [list(item) for item in alerted],
+            'open_prices': open_prices,
+        }))
+    except Exception as exc:
+        logger.debug(f'State save failed: {exc}')
+
+
+def fetch_session_opens(symbols: set[str]) -> dict[str, float]:
+    """Fetch today's 9:30 AM session open from yfinance for all symbols.
+    Used on startup/restart to avoid using mid-session price as the 'open'.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return {}
+
+    opens: dict[str, float] = {}
+    sym_list = list(symbols)
+    today = datetime.now(NY).date()
+    try:
+        # Batch download is faster than individual tickers
+        df = yf.download(sym_list, period='1d', interval='1m',
+                         prepost=False, progress=False, auto_adjust=True)
+        if df.empty:
+            return {}
+        # yfinance returns MultiIndex columns when >1 symbol
+        if len(sym_list) == 1:
+            opens[sym_list[0]] = float(df['Open'].iloc[0])
+        else:
+            for sym in sym_list:
+                try:
+                    col = ('Open', sym)
+                    if col in df.columns:
+                        first = df[col].dropna()
+                        if not first.empty:
+                            opens[sym] = float(first.iloc[0])
+                except Exception:
+                    pass
+        logger.info(f'Session opens loaded for {len(opens)}/{len(sym_list)} symbols via yfinance')
+    except Exception as exc:
+        logger.debug(f'fetch_session_opens failed: {exc}')
+    return opens
+
+
 def fetch_20d_avg_volume(symbols: list[str]) -> dict[str, float]:
     """Batch-fetch 20-day avg daily volume via Alpaca REST (run once at startup)."""
     try:
@@ -204,9 +279,10 @@ class SurgeMonitor:
         self.confirmed_symbols: set[str]         = set()  # PREMIUM/GOLD scanner signals → SURGE tag
         self.held_symbols:      set[str]         = set()  # auto_portfolio open positions → DROP tag
         self.avg_vol:           dict[str, float] = {}
-        self.open_prices:       dict[str, float] = {}
         self.bar_history:       dict[str, list]  = defaultdict(list)
-        self._alerted:          set[tuple]       = set()  # (trigger_key, symbol)
+
+        # Restored from disk so restarts don't re-fire today's alerts or lose open prices
+        self._alerted, self.open_prices = load_state()
 
     # ── Notification ─────────────────────────────────────────────────────────
 
@@ -243,6 +319,7 @@ class SurgeMonitor:
 
         if symbol not in self.open_prices:
             self.open_prices[symbol] = close
+            save_state(self._alerted, self.open_prices)
 
         open_px = self.open_prices[symbol]
         hist    = self.bar_history[symbol]
@@ -301,6 +378,7 @@ class SurgeMonitor:
             if key in ('DOWN_OPEN', 'DOWN_VEL') and down_fired:
                 continue
             self._alerted.add((key, symbol))
+            save_state(self._alerted, self.open_prices)
             is_down = key in ('DOWN_OPEN', 'DOWN_VEL')
             if is_down:
                 tag = '⚠️ HELD position' if is_held else '👁 WATCH'
@@ -350,6 +428,12 @@ class SurgeMonitor:
         if added:
             logger.info(f'Symbol list updated: {len(new)} total '
                         f'({len(added)} added: {sorted(added)[:8]}{"…" if len(added) > 8 else ""})')
+            # Fetch real session open for newly added symbols (avoids mid-session price as "open")
+            missing = {s for s in added if s not in self.open_prices}
+            if missing and is_market_hours():
+                fetched = fetch_session_opens(missing)
+                self.open_prices.update(fetched)
+                save_state(self._alerted, self.open_prices)
         self.symbols           = new
         self.confirmed_symbols = confirmed
         self.held_symbols      = held
@@ -359,6 +443,7 @@ class SurgeMonitor:
         self.open_prices.clear()
         self.bar_history.clear()
         self._alerted.clear()
+        save_state(self._alerted, self.open_prices)  # write empty state for new session
         logger.info('Session reset — open prices and alert history cleared')
 
 
