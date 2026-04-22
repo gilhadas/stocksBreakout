@@ -17,7 +17,7 @@ import pandas as pd
 
 from config import (MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR,
                     V9H_REGIME_GATE, SECTOR_EXCEPTION, VIX_CONFIG,
-                    SURGE_DAY_CONFIG)
+                    SURGE_DAY_CONFIG, BOUNCE_BEAR_GATE)
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
@@ -113,6 +113,12 @@ class ScannerOrchestrator:
             bear_macro = False
             if V9H_REGIME_GATE.get('enabled'):
                 bear_macro = await self.market_data.get_spy_bear_macro()
+
+            # Bounce bear gate: count consecutive days SPY < SMA200 (used independently
+            # of V9-H gate — always active when BOUNCE_BEAR_GATE > 0)
+            spy_consec_below = 0
+            if BOUNCE_BEAR_GATE > 0:
+                spy_consec_below = await self.market_data.get_spy_consec_below_sma200()
 
             # Session counter for momentum_surge exceptions (reset per scan_watchlist call)
             self._ms_exception_count = 0
@@ -215,6 +221,7 @@ class ScannerOrchestrator:
                     bear_macro=bear_macro,
                     cooldown_active=cooldown_active,
                     is_surge=(regime == 'SURGE'),
+                    spy_consec_below=spy_consec_below,
                 )
 
                 await asyncio.sleep(SCAN_DELAY)
@@ -322,6 +329,7 @@ class ScannerOrchestrator:
                           sector_hot_map: Optional[Dict] = None,
                           sector_scores_map: Optional[Dict] = None,
                           bear_macro: bool = False,
+                          spy_consec_below: int = 0,
                           cooldown_active: bool = False,
                           is_surge: bool = False) -> Optional[Dict]:
         """Scan a single symbol with retry logic and optional Level 2 analysis"""
@@ -492,9 +500,21 @@ class ScannerOrchestrator:
                             return signal
 
                 # If no breakout signal, try alternative detectors (cascade)
-                if signal is None and detect_bounces:
+                # Bounce bear gate: skip BOUNCE in RED_MARKET when SPY has been
+                # below its 200-day SMA for >= BOUNCE_BEAR_GATE consecutive days.
+                bounce_gated = (
+                    BOUNCE_BEAR_GATE > 0
+                    and regime == 'RED_MARKET'
+                    and spy_consec_below >= BOUNCE_BEAR_GATE
+                )
+                if signal is None and detect_bounces and not bounce_gated:
                     signal = self.detector.detect_bounce(
                         df, symbol, mode, timeframe
+                    )
+                elif signal is None and bounce_gated and detect_bounces:
+                    logger.debug(
+                        f"   BOUNCE_BEAR_GATE: {symbol} BOUNCE skipped "
+                        f"(RED_MARKET, SPY {spy_consec_below}d < SMA200 ≥ {BOUNCE_BEAR_GATE}d)"
                     )
 
                 if signal is None:

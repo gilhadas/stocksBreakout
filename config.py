@@ -153,6 +153,12 @@ MOMENTUM_OVERRIDE = {
     'max_rsi': 75,            # RSI < 75 (not overbought)
 }
 
+# --- Bounce Bear Gate ---
+# Block BOUNCE+RED_MARKET entries when SPY has been below its 200-day SMA for
+# >= N consecutive trading days. 15 days distinguishes sustained bear markets
+# (2022: 57% of days ≥15d) from brief corrections (2023/2025/2026: <15d).
+BOUNCE_BEAR_GATE = 15
+
 # --- Max Hold Period (bars) ---
 MAX_HOLD_BARS = {
     'swing': 30,

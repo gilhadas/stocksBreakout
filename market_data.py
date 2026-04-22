@@ -324,6 +324,44 @@ class MarketDataHandler:
         self.spy_cache['bear_macro'] = result
         return result
 
+    async def get_spy_consec_below_sma200(self) -> int:
+        """
+        Returns how many consecutive trading days SPY close has been below its
+        200-day SMA (0 if currently above). Cached per session alongside bear_macro.
+        Used by BOUNCE_BEAR_GATE to distinguish sustained bears from brief dips.
+        """
+        if 'consec_below_sma200' in self.spy_cache:
+            return self.spy_cache['consec_below_sma200']
+
+        df = None
+        if self.ib_available:
+            try:
+                spy = Stock('SPY', 'ARCA', 'USD')
+                bars = await self.ib.reqHistoricalDataAsync(
+                    spy, '', '300 D', '1 day', 'TRADES', True, 1
+                )
+                if bars:
+                    df = util.df(bars)
+            except Exception:
+                pass
+
+        if df is None and self.yf_fallback:
+            df = self.yf_adapter.get_historical_data('SPY', '1 day')
+
+        if df is None or len(df) < 200:
+            self.spy_cache['consec_below_sma200'] = 0
+            return 0
+
+        sma200 = df['close'].rolling(200).mean()
+        count = 0
+        for cl, sm in zip(reversed(df['close'].tolist()), reversed(sma200.tolist())):
+            if pd.isna(sm) or cl >= sm:
+                break
+            count += 1
+
+        self.spy_cache['consec_below_sma200'] = count
+        return count
+
     async def get_vix_level(self) -> float:
         """
         Fetch the current VIX closing level. Cached per session.

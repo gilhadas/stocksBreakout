@@ -394,14 +394,20 @@ def simulate(signals, start_date, end_date, end_prices, historical,
              capital=100_000, tp_as_trail=True, label='', regime_sizing=False,
              slippage_pct=0.0, commission=0.0,
              max_positions=0, dd_breaker_pct=0.0,
-             bear_macro_mult=1.0):
+             bear_macro_mult=1.0, output_dir=None,
+             stall_exit=False, stall_sma_period=20,
+             bounce_bear_gate=0):
     """
     Simple, self-contained simulation that avoids SimulationMode bugs.
     - Enters at signal price on signal date
     - Checks daily H/L for stop or TP hit each bar
     - tp_as_trail=True: when TP hit, activates 2×ATR trailing stop (V9-C mode)
     - tp_as_trail=False: exits hard at TP price
-    - Exits after MAX_HOLD bars at close price regardless
+    - stall_exit=False: exits after MAX_HOLD (30d) bars regardless
+    - stall_exit=True:  exits when close < SMA(stall_sma_period) for 2 consecutive bars;
+                        MaxHold becomes a 60-day safety cap only (stall_sma_period: 20 or 50)
+    - bounce_bear_gate: if > 0, skip BOUNCE+RED_MARKET entries when SPY has been below
+                        its SMA200 for >= N consecutive trading days (sustained bear filter)
     - Position size: min(10% capital by value, 2% capital by risk)
     - regime_sizing=True: scales position size down in weak regimes
     - max_positions: cap on concurrent open positions (0=unlimited)
@@ -412,7 +418,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         print(f"  [{label}] No signals → skip")
         return None
 
-    MAX_HOLD = 30   # trading days
+    MAX_HOLD = 60 if stall_exit else 30   # trading days; stall_exit uses 60d as safety cap
     ATR_TRAIL_MULT = 2.0
     MAX_POS_PCT   = 0.10
     MAX_RISK_PCT  = 0.02
@@ -446,6 +452,15 @@ def simulate(signals, start_date, end_date, end_prices, historical,
     for s in sig_list:
         d = pd.Timestamp(s['date']).normalize()
         sig_by_date.setdefault(d, []).append(s)
+
+    # Pre-compute SPY consecutive days below SMA200 (for bounce_bear_gate)
+    spy_consec_below: dict[pd.Timestamp, int] = {}
+    if bounce_bear_gate > 0 and spy is not None:
+        sma200 = spy['close'].rolling(200).mean()
+        count = 0
+        for dt, cl, sm in zip(spy.index, spy['close'], sma200):
+            count = count + 1 if (not pd.isna(sm) and cl < sm) else 0
+            spy_consec_below[pd.Timestamp(dt).normalize()] = count
 
     for today in trading_days:
         today_norm = today.normalize()
@@ -486,6 +501,13 @@ def simulate(signals, start_date, end_date, end_prices, historical,
             # Position cap check
             if len(open_pos) >= effective_max_pos:
                 break  # no more room
+            # Bounce-bear gate: skip BOUNCE in RED_MARKET during sustained bear
+            if (bounce_bear_gate > 0
+                    and sig.get('type') == 'BOUNCE'
+                    and sig.get('regime') == 'RED_MARKET'
+                    and spy_consec_below.get(today_norm, 0) >= bounce_bear_gate):
+                continue
+
             price = float(sig.get('price', 0)) * (1 + slippage_pct)  # slippage on entry
             stop  = float(sig.get('stop_loss', price * 0.95))
             tp    = float(sig.get('take_profit', price * 1.10))
@@ -517,7 +539,9 @@ def simulate(signals, start_date, end_date, end_prices, historical,
             open_pos[sym] = {
                 'entry_price': price, 'stop': stop, 'take_profit': tp,
                 'qty': qty, 'cost': cost, 'entry_date': today_norm,
-                '_tp_hit': False, '_trail_stop': None,
+                '_tp_hit': False, '_trail_stop': None, '_below_sma20': False,
+                'quality': sig.get('quality', ''), 'regime': sig.get('regime', ''),
+                'signal_type': sig.get('type', ''),
             }
 
         # --- Check exits ---
@@ -590,7 +614,18 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                     exit_price  = pos['take_profit']
                     exit_reason = 'TakeProfit'
 
-            # Max hold
+            # Momentum stall: close < SMA(stall_sma_period) for 2 consecutive bars (min 3d held)
+            if stall_exit and exit_price is None and days_held >= 3:
+                recent = df[df.index.normalize() <= today_norm].tail(stall_sma_period + 1)
+                if len(recent) >= stall_sma_period:
+                    sma_val = float(recent['close'].iloc[-stall_sma_period:].mean())
+                    below_now = cl < sma_val
+                    if below_now and pos.get('_below_sma20', False):
+                        exit_price  = cl
+                        exit_reason = 'MomentumStall'
+                    pos['_below_sma20'] = below_now
+
+            # Max hold (30d default; 60d safety cap when stall_exit=True)
             if exit_price is None and days_held >= MAX_HOLD:
                 exit_price  = cl
                 exit_reason = 'MaxHold'
@@ -601,12 +636,21 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                 pnl  = (exit_net - pos['entry_price']) * qty
                 cost = pos['cost']
                 trades.append({
-                    'pnl': pnl,
-                    'pnl_pct': pnl / cost * 100,
-                    'win': pnl > 0,
-                    'entry': pos['entry_price'],
-                    'exit': exit_net,
-                    'reason': exit_reason,
+                    'symbol':      sym,
+                    'entry_date':  pos['entry_date'].strftime('%Y-%m-%d'),
+                    'exit_date':   today_norm.strftime('%Y-%m-%d'),
+                    'qty':         qty,
+                    'entry':       round(pos['entry_price'], 4),
+                    'exit':        round(exit_net, 4),
+                    'stop':        round(pos['stop'], 4),
+                    'take_profit': round(pos['take_profit'], 4),
+                    'pnl':         round(pnl, 2),
+                    'pnl_pct':     round(pnl / cost * 100, 4),
+                    'win':         pnl > 0,
+                    'reason':      exit_reason,
+                    'quality':     pos.get('quality', ''),
+                    'regime':      pos.get('regime', ''),
+                    'signal_type': pos.get('signal_type', ''),
                 })
                 cap += exit_net * qty
                 del open_pos[sym]
@@ -628,12 +672,21 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         qty = pos['qty']
         pnl = (ep_net - pos['entry_price']) * qty
         trades.append({
-            'pnl': pnl,
-            'pnl_pct': pnl / pos['cost'] * 100,
-            'win': pnl > 0,
-            'entry': pos['entry_price'],
-            'exit': ep_net,
-            'reason': 'SimEnd',
+            'symbol':      sym,
+            'entry_date':  pos['entry_date'].strftime('%Y-%m-%d'),
+            'exit_date':   end_date,
+            'qty':         qty,
+            'entry':       round(pos['entry_price'], 4),
+            'exit':        round(ep_net, 4),
+            'stop':        round(pos['stop'], 4),
+            'take_profit': round(pos['take_profit'], 4),
+            'pnl':         round(pnl, 2),
+            'pnl_pct':     round(pnl / pos['cost'] * 100, 4),
+            'win':         pnl > 0,
+            'reason':      'SimEnd',
+            'quality':     pos.get('quality', ''),
+            'regime':      pos.get('regime', ''),
+            'signal_type': pos.get('signal_type', ''),
         })
         cap += ep_net * qty
 
@@ -653,6 +706,13 @@ def simulate(signals, start_date, end_date, end_prices, historical,
     max_dd_arr = (eq / np.maximum.accumulate(eq)) - 1
     max_drawdown = float(max_dd_arr.min() * 100)
 
+    if output_dir and trades:
+        safe_label = label.replace(' ', '_').replace('/', '_').replace('+', 'plus')
+        year_str = str(start_date)[:4]
+        out_path = Path(output_dir) / f'trades_{year_str}_{safe_label}.csv'
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(trades).to_csv(out_path, index=False)
+
     return {
         'total_trades':  n_trades,
         'win_rate':      win_rate,
@@ -662,6 +722,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         'total_pnl':     cap - capital,
         'avg_win':       np.mean([t['pnl_pct'] for t in trades if t['win']]) if n_wins else 0,
         'avg_loss':      np.mean([t['pnl_pct'] for t in trades if not t['win']]) if (n_trades-n_wins) else 0,
+        'trades':        trades,
     }
 
 
@@ -706,7 +767,8 @@ def section_header():
 
 # ─── Run one year period ───────────────────────────────────────────────────────
 def run_year(year, symbols, watchlist_path, limit, capital,
-             slippage_pct=0.0, commission=0.0):
+             slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
+             bounce_bear_gate=0):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -755,7 +817,9 @@ def run_year(year, symbols, watchlist_path, limit, capital,
               f"{spy_info['return']:>+9.2f}% {'N/A':>7} {spy_info['sharpe']:>7.2f} "
               f"{spy_info['drawdown']:>+7.2f}%  {'(benchmark)':>8}")
 
-    sim_kw = dict(slippage_pct=slippage_pct, commission=commission)
+    output_dir = 'scanner_output/backtests' if trades_log else None
+    sim_kw = dict(slippage_pct=slippage_pct, commission=commission, output_dir=output_dir,
+                  bounce_bear_gate=bounce_bear_gate)
 
     # OLD V9-C (best previous)
     rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
@@ -1020,16 +1084,107 @@ def run_year(year, symbols, watchlist_path, limit, capital,
                          if s.get('regime') == regime and s.get('bear_macro'))
                 print(f"      {regime}: {n} total ({bm} during bear_macro)")
 
+    # ── Stall-Exit Comparison ─────────────────────────────────────────────
+    # Re-runs key strategies with stall_exit=True (SMA20 crossunder instead
+    # of 30-day MaxHold) so results are directly comparable to the rows above.
+    if compare_stall:
+        print(f"\n{'─'*80}")
+        print(f"[STALL-EXIT COMPARISON — SMA20 crossunder replaces 30d MaxHold]")
+        print(f"  Exit when close < SMA20 for 2 consecutive bars (min 3d held)")
+        print(f"  Safety cap: 60 days  |  Stop/TP/Trail logic unchanged")
+        print(f"{'─'*80}")
+        section_header()
+
+        for sma_p, tag in [(20, 'SMA20'), (50, 'SMA50')]:
+            stall_kw = {**sim_kw, 'stall_exit': True, 'stall_sma_period': sma_p}
+            print(f"\n  ── {tag} crossunder (2 consecutive bars) ──")
+
+            rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'SE{sma_p} V9-C', **stall_kw)
+            print_report(rpt, f'SE{sma_p}  V9-C  PREMIUM+ TP→Trail', len(v9c_signals), spy_info)
+
+            rpt = simulate(new_premium, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'SE{sma_p} NEW PREMIUM+', **stall_kw)
+            print_report(rpt, f'SE{sma_p}  NEW PREMIUM+ TP→Trail', len(new_premium), spy_info)
+
+            rpt = simulate(new_all, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'SE{sma_p} NEW HIGH+', **stall_kw)
+            print_report(rpt, f'SE{sma_p}  NEW HIGH+ TP→Trail', len(new_all), spy_info)
+
+            rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'SE{sma_p} V9-D1', **stall_kw)
+            print_report(rpt, f'SE{sma_p}  V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
+
+            rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'SE{sma_p} V9-C RegimeSized',
+                           regime_sizing=True, **stall_kw)
+            print_report(rpt, f'SE{sma_p}  V9-C  + RegimeSizing', len(v9c_signals), spy_info)
+
+        # Regime breakdown under SMA20 stall-exit only
+        stall20_kw = {**sim_kw, 'stall_exit': True, 'stall_sma_period': 20}
+        if new_premium:
+            sig_df = pd.DataFrame(new_premium)
+            print(f"\n  Stall-exit SMA20 NEW PREMIUM+ by regime:")
+            for r in ['RED_MARKET', 'BEARISH', 'CHOPPY', 'NORMAL', 'EXPANSION']:
+                rsigs = sig_df[sig_df['regime'] == r]
+                if rsigs.empty:
+                    continue
+                r_signals = [s for s in new_premium if s.get('regime') == r]
+                rpt_r = simulate(r_signals, start, end, end_prices, historical, capital,
+                                 tp_as_trail=True, **stall20_kw)
+                print_report(rpt_r, f'  ↳ {r}', len(r_signals), spy_info)
+
+    # ── Bounce-Bear-Gate Comparison ───────────────────────────────────────
+    # Runs key strategies with bounce_bear_gate=15 alongside the standard runs.
+    # Gate: skip BOUNCE+RED_MARKET entries when SPY has been below SMA200
+    # for >= 15 consecutive trading days (sustained bear, not a brief dip).
+    if bounce_bear_gate == 0:
+        print(f"\n{'─'*80}")
+        print(f"[BOUNCE-BEAR-GATE COMPARISON — gate=15 consecutive days SPY<SMA200]")
+        print(f"  Skips BOUNCE+RED_MARKET entries during sustained bear (>=15d below SMA200)")
+        print(f"{'─'*80}")
+        section_header()
+        bbg_kw   = {**sim_kw, 'bounce_bear_gate': 15}
+        bbg10_kw = {**sim_kw, 'bounce_bear_gate': 10}
+
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='BBG15 V9-C', **bbg_kw)
+        print_report(rpt, 'BBG15  V9-C  PREMIUM+ TP→Trail', len(v9c_signals), spy_info)
+
+        rpt = simulate(new_premium, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='BBG15 NEW PREMIUM+', **bbg_kw)
+        print_report(rpt, 'BBG15  NEW PREMIUM+ TP→Trail', len(new_premium), spy_info)
+
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='BBG15 V9-D1', **bbg_kw)
+        print_report(rpt, 'BBG15  V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
+
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='BBG15 V9-C RegimeSized',
+                       regime_sizing=True, **bbg_kw)
+        print_report(rpt, 'BBG15  V9-C  + RegimeSizing', len(v9c_signals), spy_info)
+
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='BBG10 V9-C', **bbg10_kw)
+        print_report(rpt, 'BBG10  V9-C  PREMIUM+ (gate=10d)', len(v9c_signals), spy_info)
+
+        rpt = simulate(new_premium, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='BBG10 NEW PREMIUM+', **bbg10_kw)
+        print_report(rpt, 'BBG10  NEW PREMIUM+ (gate=10d)', len(new_premium), spy_info)
+
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 def parse_args():
     p = argparse.ArgumentParser(description='Regime-Aware Backtest: Old vs New')
     p.add_argument('--watchlist',   default=None,  help='Watchlist path')
-    p.add_argument('--years',       default='2022,2023,2024', help='Years to test (comma-sep)')
+    p.add_argument('--years',       default='2022,2023,2024,2025,2026', help='Years to test (comma-sep)')
     p.add_argument('--limit',       type=int,   default=0,     help='Symbol limit (0=all)')
     p.add_argument('--capital',     type=int,   default=100_000)
     p.add_argument('--slippage',    type=float, default=0.0,   help='Slippage fraction per side (e.g. 0.001 = 0.1 pct)')
     p.add_argument('--commission',  type=float, default=0.0,   help='Flat commission $ per trade side')
+    p.add_argument('--trades-log',  action='store_true',       help='Write per-trade CSV logs to scanner_output/backtests/')
+    p.add_argument('--stall-exit',       action='store_true', help='Add stall-exit comparison section (SMA20 crossunder replaces MaxHold)')
+    p.add_argument('--bounce-bear-gate', type=int, default=0, help='Block BOUNCE+RED_MARKET when SPY below SMA200 >= N consecutive days (0=off, suggested 15)')
     return p.parse_args()
 
 
@@ -1052,7 +1207,9 @@ def main():
 
     for year in years:
         run_year(year, symbols, args.watchlist, args.limit, args.capital,
-                 slippage_pct=args.slippage, commission=args.commission)
+                 slippage_pct=args.slippage, commission=args.commission,
+                 trades_log=args.trades_log, compare_stall=args.stall_exit,
+                 bounce_bear_gate=args.bounce_bear_gate)
 
     print(f"\n{'='*80}")
     print("BACKTEST COMPLETE")
