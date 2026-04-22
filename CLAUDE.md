@@ -73,18 +73,26 @@ Summarize our progress, key decisions, and next steps into the CLAUDE.md file.
 
 ## 7. Current Live Config & Backtest Decision Log
 
-### Active Config: V9-C (reverted 2026-04-17)
-**File:** `config.py` — `V9H_REGIME_GATE['enabled'] = False`
+### Active Config: V9-C + BOUNCE_BEAR_GATE=15 (added 2026-04-22)
+**Files:** `config.py` — `V9H_REGIME_GATE['enabled'] = False`, `BOUNCE_BEAR_GATE = 15`
 
-### Backtest: `backtest_regime_compare.py` — 200 symbols, 4 years (re-run 2026-04-17)
-Includes RSI Wilder's EMA fix + regime fix (completed daily bars). Results improved vs old baseline.
+### Backtest: `backtest_regime_compare.py` — 200 symbols, 5 years (run 2026-04-22)
+Includes RSI Wilder's EMA fix + regime fix + bounce_bear_gate=15.
 
-| Year | Market | SPY | **V9-C PREMIUM+** | V9-D1 (−BEARISH) | V9-C vs SPY |
-|------|--------|-----|-------------------|------------------|-------------|
-| 2022 | Bear   | -18.1% | **-14.27%** | ≈same | +3.83% |
-| 2023 | Bull   | +26.3% | **+53.26%** | ≈same | +26.96% |
-| 2024 | Bull   | +23.3% | **+28.88%** | ≈same | +5.58% |
-| 2025 | Mixed  | -5.0%  | **+53.81%** | +47.54% | +58.81% |
+| Year | Market | SPY | **V9-C PREMIUM+** | **BBG15 V9-C** | BBG15 vs Baseline |
+|------|--------|-----|-------------------|----------------|-------------------|
+| 2022 | Bear   | -18.65% | -17.32% | **-12.82%** | +4.50% |
+| 2023 | Bull   | +26.71% | +56.76% | **+56.08%** | -0.68% |
+| 2024 | Bull   | +26.05% | +24.05% | **+24.05%** | 0%     |
+| 2025 | Mixed  | +18.89% | +52.53% | **+52.02%** | -0.51% |
+| 2026 | Mixed  | +3.34%  | +8.75%  | **+8.75%**  | 0%     |
 
-**Why V9-D1 was reverted:** BEARISH filter (5% of trading days) cost ~6% in 2025. 4-year compound: V9-C ~+151% vs V9-D1 ~+140%. The original +1.9% edge no longer held after RSI/regime fixes.
-**Active rule:** BOUNCE requires GOLD quality only. All regimes trade normally. No BEARISH block.
+**5-year compound:** Baseline +167% → BBG15 **+179%** (+12%).
+
+**Why BBG15:** Blocks BOUNCE+RED_MARKET only when SPY has been below SMA200 for ≥15 consecutive days. Distinguishes 2022 sustained bear (57% of days ≥15d) from brief corrections (2023 dips: max ~6d, April 2025 tariff: 9–14d, April 2026 tariff: <15d). BBG10 rejected — kills 2023 -30.7% vs baseline.
+
+**Active rules:**
+- `BOUNCE_BEAR_GATE = 15` in config.py (always active, independent of V9-H)
+- `market_data.get_spy_consec_below_sma200()` — cached per session
+- `orchestrator._scan_symbol()` skips `detect_bounce()` when `RED_MARKET + consec ≥ 15`
+- BOUNCE requires GOLD quality only. No BEARISH block. V9-H gate disabled.
