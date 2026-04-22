@@ -284,17 +284,21 @@ class SurgeMonitor:
                 ratio    = volume / avg_per_min
                 vol_note = f'\n📊 Vol {ratio:.1f}× avg/min ({volume:,.0f} vs {avg_per_min:,.0f})'
 
-        # Dedup: if SURGE from-open fires this cycle, skip VELOCITY (same move).
-        # Exclude keys already alerted — they won't send, so shouldn't suppress VELOCITY.
-        triggered_keys = {k for k, _ in triggered if (k, symbol) not in self._alerted}
-        is_confirmed = symbol in self.confirmed_symbols  # PREMIUM scanner signal → surge tag
-        is_held      = symbol in self.held_symbols       # open portfolio position → drop tag
+        # Dedup: one alert per direction per session.
+        # Once any UP alert fires, suppress all further UP alerts (OPEN+VEL = same move).
+        # Once any DOWN alert fires, suppress all further DOWN alerts.
+        # Direction reversals (UP after DOWN or vice versa) are still allowed.
+        # Re-check after each fire so same-cycle triggers also dedup correctly.
+        is_confirmed = symbol in self.confirmed_symbols
+        is_held      = symbol in self.held_symbols
         for key, desc in triggered:
             if (key, symbol) in self._alerted:
                 continue
-            if key == 'UP_VEL'   and 'UP_OPEN'   in triggered_keys:
+            up_fired   = ('UP_OPEN',   symbol) in self._alerted or ('UP_VEL',   symbol) in self._alerted
+            down_fired = ('DOWN_OPEN', symbol) in self._alerted or ('DOWN_VEL', symbol) in self._alerted
+            if key in ('UP_OPEN',   'UP_VEL')   and up_fired:
                 continue
-            if key == 'DOWN_VEL' and 'DOWN_OPEN' in triggered_keys:
+            if key in ('DOWN_OPEN', 'DOWN_VEL') and down_fired:
                 continue
             self._alerted.add((key, symbol))
             is_down = key in ('DOWN_OPEN', 'DOWN_VEL')
