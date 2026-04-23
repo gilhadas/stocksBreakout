@@ -22,6 +22,20 @@ _NY_TZ          = ZoneInfo('America/New_York')
 _SIGNALS_DIR    = 'scanner_output/signals'
 _PORTFOLIO_PATH = 'scanner_output/portfolio/auto_portfolio.json'
 
+
+def _portfolio_path_for(user_id: str | None = None) -> str:
+    """Return the portfolio file path for the given user.
+
+    Background agents call load()/save() with no user_id and always get the
+    flat legacy path so they are unaffected by the multi-user change.
+    The API layer passes the logged-in user's UUID.
+    """
+    import os as _os
+    default_id = _os.environ.get('DEFAULT_USER_ID', '')
+    if not user_id or user_id == default_id:
+        return _PORTFOLIO_PATH
+    return f'scanner_output/portfolio/{user_id}/auto_portfolio.json'
+
 INITIAL_CAPITAL    = 100_000
 POSITION_SIZE_PCT  = 0.05      # 5% of capital per trade
 MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
@@ -43,31 +57,32 @@ def _empty() -> dict:
     }
 
 
-def load() -> dict:
+def load(user_id: str | None = None) -> dict:
     from utils import load_json
-    data = load_json(_PORTFOLIO_PATH)
+    data = load_json(_portfolio_path_for(user_id))
     if data is not None:
         data.setdefault('skipped_cash', [])   # backfill for older saved files
         return data
     return _empty()
 
 
-def _save(data: dict):
+def _save(data: dict, user_id: str | None = None):
     from utils import save_json, _is_cloud, _to_local_abs
+    path = _portfolio_path_for(user_id)
     data['last_updated'] = datetime.now(_NY_TZ).isoformat()
     if _is_cloud():
         # On cloud (Streamlit Cloud / S3), skip fcntl — S3 is the source of truth
         # and the local filesystem may be read-only or the directory may not exist.
-        save_json(data, _PORTFOLIO_PATH)
+        save_json(data, path)
     else:
         import fcntl, os
-        abs_path = _to_local_abs(_PORTFOLIO_PATH)
+        abs_path = _to_local_abs(path)
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
         lock_path = abs_path + '.lock'
         with open(lock_path, 'w') as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
-                save_json(data, _PORTFOLIO_PATH)
+                save_json(data, path)
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
@@ -103,7 +118,8 @@ def _mode_from_filename(fname: str) -> str:
 # ── Scan and add new V9-H signals ────────────────────────────────────────────
 
 def scan_and_add(min_date: str | None = None,
-                 position_pct: float | None = None) -> dict:
+                 position_pct: float | None = None,
+                 user_id: str | None = None) -> dict:
     """
     Scan signal CSV files and add new V9-H signals.
 
@@ -127,7 +143,7 @@ def scan_and_add(min_date: str | None = None,
     from utils import list_files, load_data
 
     pos_pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
-    data      = load()
+    data      = load(user_id=user_id)
     processed = set(data.get('processed_files', []))
     open_syms = open_symbols(data)
 
@@ -338,7 +354,7 @@ def scan_and_add(min_date: str | None = None,
     # Sort skipped list: best priority first so the UI surfaces top missed trades
     data['skipped_cash'].sort(key=lambda e: e.get('priority_score', 0), reverse=True)
 
-    _save(data)
+    _save(data, user_id=user_id)
 
     # ── Notify on newly added positions ──────────────────────────────────────
     if added_syms:
@@ -864,7 +880,7 @@ def _build_result(added, dup, cash, no_v9c, files, data):
 
 # ── Refresh prices & auto-close stops ────────────────────────────────────────
 
-def refresh_prices() -> dict:
+def refresh_prices(user_id: str | None = None) -> dict:
     """
     Fetch current prices for all open positions.
     Auto-close any position where current_price <= stop.
@@ -872,9 +888,9 @@ def refresh_prices() -> dict:
     """
     import yfinance as yf
 
-    data = load()
+    data = load(user_id=user_id)
     if not data['positions']:
-        _save(data)
+        _save(data, user_id=user_id)
         return {'closed': [], 'updated': 0, 'data': data}
 
     symbols = [p['symbol'] for p in data['positions']]
@@ -923,7 +939,7 @@ def refresh_prices() -> dict:
     if closed_now:
         for t in data['closed'][-len(closed_now):]:
             data['capital'] += t['pnl']
-    _save(data)
+    _save(data, user_id=user_id)
     return {'closed': closed_now, 'updated': len(prices), 'data': data}
 
 
@@ -946,7 +962,8 @@ def _compute_atr_series(hist: 'pd.DataFrame', period: int = 14) -> 'pd.Series':
 
 def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
                              atr_mult: float = 0.0,
-                             atr_period: int = 14) -> dict:
+                             atr_period: int = 14,
+                             user_id: str | None = None) -> dict:
     """
     Walk through every trading day from each position's date_added to today.
 
@@ -966,9 +983,9 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
     import yfinance as yf
     import pandas as pd
 
-    data = load()
+    data = load(user_id=user_id)
     if not data['positions']:
-        _save(data)
+        _save(data, user_id=user_id)
         return {'closed': [], 'checked': 0, 'data': data}
 
     use_atr    = atr_mult > 0
@@ -1082,14 +1099,14 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
     # Realized P&L flows back into capital
     for t in data['closed'][-len(closed_now):] if closed_now else []:
         data['capital'] += t['pnl']
-    _save(data)
+    _save(data, user_id=user_id)
     return {'closed': closed_now, 'checked': len(data['positions']) + len(closed_now),
             'data': data}
 
 
 # ── Missed-trade discovery ───────────────────────────────────────────────────
 
-def rebuild_skipped_cash() -> dict:
+def rebuild_skipped_cash(user_id: str | None = None) -> dict:
     """
     Re-scan every signal file (including already-processed ones) to find
     V9-C signals that were NEVER taken (not open, not closed).
@@ -1105,7 +1122,7 @@ def rebuild_skipped_cash() -> dict:
     import pandas as pd
     from utils import list_files, load_data
 
-    data      = load()
+    data      = load(user_id=user_id)
     taken_syms = ({p['symbol'] for p in data['positions']} |
                   {t['symbol'] for t in data['closed']})
 
@@ -1143,7 +1160,7 @@ def rebuild_skipped_cash() -> dict:
     seen_syms = {e['symbol'].upper() for e in live_entries}
 
     if not all_fnames:
-        _save(data)
+        _save(data, user_id=user_id)
         return {'found': len(data['skipped_cash']), 'data': data}
 
     for fname in all_fnames:
@@ -1221,7 +1238,7 @@ def rebuild_skipped_cash() -> dict:
             seen_syms.add(sym)
 
     data['skipped_cash'].sort(key=lambda e: e.get('priority_score', 0), reverse=True)
-    _save(data)
+    _save(data, user_id=user_id)
     return {'found': len(data['skipped_cash']), 'data': data}
 
 
@@ -1236,6 +1253,7 @@ def add_position_direct(
     quality: str = '',
     vol_ratio: float = 0.0,
     position_pct: float | None = None,
+    user_id: str | None = None,
 ) -> dict:
     """
     Directly add a position without scanning CSV files.
@@ -1248,7 +1266,8 @@ def add_position_direct(
     from utils import save_json, load_json, _is_cloud, _to_local_abs
     import fcntl, os
 
-    abs_path = _to_local_abs(_PORTFOLIO_PATH)
+    path = _portfolio_path_for(user_id)
+    abs_path = _to_local_abs(path)
     lock_path = abs_path + '.lock'
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
@@ -1256,7 +1275,7 @@ def add_position_direct(
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             # Re-load inside lock to get latest state
-            data = load()
+            data = load(user_id=user_id)
 
             if symbol.upper() in open_symbols(data):
                 return {'added': False, 'reason': 'duplicate'}
@@ -1292,7 +1311,7 @@ def add_position_direct(
             }
             data['positions'].append(position)
             data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-            save_json(data, _PORTFOLIO_PATH)
+            save_json(data, path)
             return {'added': True, 'reason': 'ok'}
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
@@ -1300,12 +1319,12 @@ def add_position_direct(
 
 # ── Mode promotion (exit_evaluator PROMOTE_MODE) ─────────────────────────────
 
-def promote_position_mode(symbol: str, new_mode: str) -> dict:
+def promote_position_mode(symbol: str, new_mode: str, user_id: str | None = None) -> dict:
     """Change a position's mode (e.g. daytrade → swing) and re-stamp date_added
     so MAX_HOLD_BARS starts counting from the promotion date, not original entry.
     Returns {'promoted': bool, 'reason': str, 'old_mode': str}.
     """
-    data = load()
+    data = load(user_id=user_id)
     sym = symbol.upper()
     for p in data['positions']:
         if p['symbol'].upper() == sym:
@@ -1314,16 +1333,16 @@ def promote_position_mode(symbol: str, new_mode: str) -> dict:
                 return {'promoted': False, 'reason': 'same_mode', 'old_mode': old}
             p['mode'] = new_mode
             p['date_added'] = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
-            _save(data)
+            _save(data, user_id=user_id)
             return {'promoted': True, 'reason': 'ok', 'old_mode': old}
     return {'promoted': False, 'reason': 'not_found', 'old_mode': ''}
 
 
 # ── Manual close (UI) ─────────────────────────────────────────────────────────
 
-def close_position(symbol: str, exit_price: float, reason: str = 'manual') -> dict:
+def close_position(symbol: str, exit_price: float, reason: str = 'manual', user_id: str | None = None) -> dict:
     """Close a specific position at given price."""
-    data = load()
+    data = load(user_id=user_id)
     now_str    = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
     still_open = []
     closed_rec = None
@@ -1347,13 +1366,13 @@ def close_position(symbol: str, exit_price: float, reason: str = 'manual') -> di
     data['positions'] = still_open
     if closed_rec:
         data['capital'] += closed_rec['pnl']  # realized P&L flows back into capital
-    _save(data)
+    _save(data, user_id=user_id)
     return closed_rec or {}
 
 
 # ── Rebalance ────────────────────────────────────────────────────────────────
 
-def rebalance(dry_run: bool = True) -> dict:
+def rebalance(dry_run: bool = True, user_id: str | None = None) -> dict:
     """
     Enforce portfolio balance rules on EXISTING positions.
 
@@ -1374,7 +1393,7 @@ def rebalance(dry_run: bool = True) -> dict:
 
     from config import CASH_MANAGEMENT
 
-    data = load()
+    data = load(user_id=user_id)
     positions = data['positions']
     capital = data['capital']
 
@@ -1572,7 +1591,7 @@ def rebalance(dry_run: bool = True) -> dict:
                         f"({a['reason']})")
 
     # Execute trims (reduce shares, free cash)
-    data = load()  # reload after closes
+    data = load(user_id=user_id)  # reload after closes
     for a in actions_trim:
         for p in data['positions']:
             if p['symbol'] == a['symbol']:
@@ -1588,7 +1607,7 @@ def rebalance(dry_run: bool = True) -> dict:
                     f"(freed ${freed:,.0f}, {a['reason']})"
                 )
                 break
-    _save(data)
+    _save(data, user_id=user_id)
 
     print(f"\n  ✓ Rebalance complete. Closed {len(actions_close)}, trimmed {len(actions_trim)}.")
     return {'closed': actions_close, 'trimmed': actions_trim}
@@ -1614,14 +1633,15 @@ def _refresh_current_prices(data: dict):
 
 # ── Reset ─────────────────────────────────────────────────────────────────────
 
-def reset() -> dict:
+def reset(user_id: str | None = None) -> dict:
     data = _empty()
-    _save(data)
+    _save(data, user_id=user_id)
     return data
 
 
 def recalculate(position_pct: float = POSITION_SIZE_PCT,
-                min_date: str | None = None) -> dict:
+                min_date: str | None = None,
+                user_id: str | None = None) -> dict:
     """
     Reset the portfolio and rescan all signal files from scratch.
 
@@ -1631,8 +1651,8 @@ def recalculate(position_pct: float = POSITION_SIZE_PCT,
                   on or after this date.
     Returns the scan_and_add result dict.
     """
-    reset()
-    return scan_and_add(min_date=min_date, position_pct=position_pct)
+    reset(user_id=user_id)
+    return scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id)
 
 
 # ── Summary helpers ───────────────────────────────────────────────────────────
@@ -1711,6 +1731,7 @@ def suggest_swaps(
     fresh_days: int = _SWAP_MIN_FRESH_DAYS,
     min_score_delta: float = _SWAP_MIN_SCORE_DELTA,
     notify: bool = True,
+    user_id: str | None = None,
 ) -> list[dict]:
     """Compare open positions against top skipped signals and suggest swaps.
 
@@ -1723,7 +1744,7 @@ def suggest_swaps(
     Returns list of swap dicts, sorted by improvement desc.
     Sends a notification if notify=True and any swaps found.
     """
-    data      = load()
+    data      = load(user_id=user_id)
     positions = data.get('positions', [])
     skipped   = data.get('skipped_cash', [])
 
@@ -1883,7 +1904,7 @@ def _fetch_live_price(symbol: str) -> Optional[float]:
     return None
 
 
-def execute_swap(close_symbol: str, open_symbol: str) -> dict:
+def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None) -> dict:
     """Close a weak position and open a fresh one from the skipped_cash list.
 
     Uses live (yfinance) prices for BOTH the close exit and the new entry.
@@ -1896,7 +1917,7 @@ def execute_swap(close_symbol: str, open_symbol: str) -> dict:
     close_sym = close_symbol.upper()
     open_sym  = open_symbol.upper()
 
-    data = load()
+    data = load(user_id=user_id)
 
     open_pos = next(
         (p for p in data.get('positions', []) if p['symbol'].upper() == close_sym),
@@ -1925,7 +1946,7 @@ def execute_swap(close_symbol: str, open_symbol: str) -> dict:
     pre_position = dict(open_pos)
     pre_skipped  = dict(skip_rec)
 
-    closed = close_position(close_sym, exit_price, reason='swap')
+    closed = close_position(close_sym, exit_price, reason='swap', user_id=user_id)
     if not closed:
         return {'ok': False, 'reason': f'close failed for {close_sym}'}
 
@@ -1943,6 +1964,7 @@ def execute_swap(close_symbol: str, open_symbol: str) -> dict:
         mode=mode,
         quality=quality,
         vol_ratio=vol,
+        user_id=user_id,
     )
     if not result.get('added'):
         return {
@@ -1952,7 +1974,7 @@ def execute_swap(close_symbol: str, open_symbol: str) -> dict:
         }
 
     # Remove the consumed skipped signal and stash undo snapshot
-    data2 = load()
+    data2 = load(user_id=user_id)
     data2['skipped_cash'] = [
         s for s in data2.get('skipped_cash', [])
         if s.get('symbol', '').upper() != open_sym
@@ -1965,7 +1987,7 @@ def execute_swap(close_symbol: str, open_symbol: str) -> dict:
         'pre_skipped':   pre_skipped,
         'closed_record': closed,
     }
-    _save(data2)
+    _save(data2, user_id=user_id)
 
     return {
         'ok': True,
@@ -1982,7 +2004,7 @@ def execute_swap(close_symbol: str, open_symbol: str) -> dict:
     }
 
 
-def undo_last_swap() -> dict:
+def undo_last_swap(user_id: str | None = None) -> dict:
     """Reverse the most recent `execute_swap()`.
 
     Restores the original position (with its original entry/shares/date),
@@ -1991,7 +2013,7 @@ def undo_last_swap() -> dict:
 
     Returns {'ok': bool, 'reason': str}.
     """
-    data = load()
+    data = load(user_id=user_id)
     snap = data.get('last_swap')
     if not snap:
         return {'ok': False, 'reason': 'no recent swap to undo'}
@@ -2046,7 +2068,7 @@ def undo_last_swap() -> dict:
         )
 
     data['last_swap'] = None
-    _save(data)
+    _save(data, user_id=user_id)
     return {
         'ok': True,
         'reason': 'ok',

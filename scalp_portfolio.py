@@ -19,6 +19,14 @@ from zoneinfo import ZoneInfo
 _NY_TZ = ZoneInfo('America/New_York')
 _PORTFOLIO_PATH = 'scanner_output/portfolio/scalp_portfolio.json'
 
+
+def _portfolio_path_for(user_id: str | None = None) -> str:
+    import os as _os
+    default_id = _os.environ.get('DEFAULT_USER_ID', '')
+    if not user_id or user_id == default_id:
+        return _PORTFOLIO_PATH
+    return f'scanner_output/portfolio/{user_id}/scalp_portfolio.json'
+
 INITIAL_CAPITAL = 10_000
 POSITION_SIZE_PCT = 0.10  # 10% of capital per trade
 
@@ -36,18 +44,18 @@ def _empty() -> dict:
     }
 
 
-def load() -> dict:
+def load(user_id: str | None = None) -> dict:
     from utils import load_json
-    data = load_json(_PORTFOLIO_PATH)
+    data = load_json(_portfolio_path_for(user_id))
     if data is not None:
         return data
     return _empty()
 
 
-def _save(data: dict):
+def _save(data: dict, user_id: str | None = None):
     from utils import save_json
     data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-    save_json(data, _PORTFOLIO_PATH)
+    save_json(data, _portfolio_path_for(user_id))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -86,13 +94,14 @@ def get_summary(data: dict) -> dict:
 
 def add_position(symbol: str, entry_price: float, stop: float, target: float,
                  quality: str = '', vol_ratio: float = 0.0,
-                 position_pct: float = None) -> dict:
+                 position_pct: float = None,
+                 user_id: str | None = None) -> dict:
     """
     Add a scalping position. Called when feedback agent fires BREAKOUT.
     Returns {'added': bool, 'reason': str, 'data': data}.
     """
     pos_pct = position_pct or POSITION_SIZE_PCT
-    data = load()
+    data = load(user_id=user_id)
     syms = open_symbols(data)
 
     if symbol in syms:
@@ -120,7 +129,7 @@ def add_position(symbol: str, entry_price: float, stop: float, target: float,
         'current_price': entry_price,
         'vol_ratio':    round(vol_ratio, 1),
     })
-    _save(data)
+    _save(data, user_id=user_id)
     logger.info(f"Scalp portfolio: BUY {symbol} {shares} @ ${entry_price:.2f} "
                 f"(stop=${stop:.2f}, target=${target:.2f})")
     return {'added': True, 'reason': 'ok', 'data': data}
@@ -129,12 +138,13 @@ def add_position(symbol: str, entry_price: float, stop: float, target: float,
 # ── Sell (on EXIT alert or manual) ───────────────────────────────────────────
 
 def close_position(symbol: str, exit_price: float,
-                   reason: str = 'manual') -> dict:
+                   reason: str = 'manual',
+                   user_id: str | None = None) -> dict:
     """
     Close a scalping position. Called when feedback agent fires EXIT.
     Returns {'closed': bool, 'pnl': float, 'data': data}.
     """
-    data = load()
+    data = load(user_id=user_id)
     pos = None
     remaining = []
 
@@ -161,7 +171,7 @@ def close_position(symbol: str, exit_price: float,
     })
     data['positions'] = remaining
     data['capital'] += pnl  # realized P&L flows back into capital
-    _save(data)
+    _save(data, user_id=user_id)
     logger.info(f"Scalp portfolio: SELL {symbol} @ ${exit_price:.2f} "
                 f"pnl=${pnl:+.2f} ({pnl_pct:+.1f}%) reason={reason}")
     return {'closed': True, 'pnl': pnl, 'data': data}
@@ -169,11 +179,11 @@ def close_position(symbol: str, exit_price: float,
 
 # ── Close all (EOD) ─────────────────────────────────────────────────────────
 
-def close_all_eod() -> dict:
+def close_all_eod(user_id: str | None = None) -> dict:
     """Close all open scalping positions at current price (end of day)."""
     import yfinance as yf
 
-    data = load()
+    data = load(user_id=user_id)
     if not data['positions']:
         return {'closed': [], 'data': data}
 
@@ -210,17 +220,17 @@ def close_all_eod() -> dict:
 
     data['positions'] = []
     data['capital'] += total_pnl  # realized P&L flows back into capital
-    _save(data)
+    _save(data, user_id=user_id)
     return {'closed': closed_syms, 'data': data}
 
 
 # ── Refresh prices ───────────────────────────────────────────────────────────
 
-def refresh_prices() -> dict:
+def refresh_prices(user_id: str | None = None) -> dict:
     """Fetch current prices for open positions. No auto-close (agent handles exits)."""
     import yfinance as yf
 
-    data = load()
+    data = load(user_id=user_id)
     if not data['positions']:
         return {'updated': 0, 'data': data}
 
@@ -237,11 +247,11 @@ def refresh_prices() -> dict:
         except Exception:
             pass
 
-    _save(data)
+    _save(data, user_id=user_id)
     return {'updated': len(symbols), 'data': data}
 
 
 # ── Reset ────────────────────────────────────────────────────────────────────
 
-def reset():
-    _save(_empty())
+def reset(user_id: str | None = None):
+    _save(_empty(), user_id=user_id)
