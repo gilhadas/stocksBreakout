@@ -135,14 +135,21 @@ def load_confirmed_symbols() -> set[str]:
 
 
 def load_held_symbols() -> set[str]:
-    """Return symbols currently held in auto_portfolio (open positions)."""
+    """Return symbols currently held in auto_portfolio or manual portfolio (open positions)."""
+    held: set[str] = set()
     try:
         import auto_portfolio as ap
         data = ap.load()
-        return {p['symbol'].upper() for p in data.get('positions', [])}
+        held |= {p['symbol'].upper() for p in data.get('positions', [])}
     except Exception as exc:
         logger.debug(f'auto_portfolio not loadable: {exc}')
-        return set()
+    try:
+        from portfolio import Portfolio
+        for pos in Portfolio().get_positions_as_exit_format():
+            held.add(pos.get('symbol', '').upper())
+    except Exception as exc:
+        logger.debug(f'manual portfolio not loadable: {exc}')
+    return held
 
 
 def load_symbols() -> set[str]:
@@ -380,11 +387,15 @@ class SurgeMonitor:
             self._alerted.add((key, symbol))
             save_state(self._alerted, self.open_prices)
             is_down = key in ('DOWN_OPEN', 'DOWN_VEL')
-            if is_down:
-                tag = '⚠️ HELD position' if is_held else '👁 WATCH'
-            else:
-                tag = '✅ CONFIRMED breakout' if is_confirmed else '👁 WATCH'
-            log_icon = '⚠️' if (is_down and is_held) else ('✅' if (not is_down and is_confirmed) else '👁')
+            # Drop: only notify if holding the position; Surge: only notify if scanner-confirmed
+            if is_down and not is_held:
+                logger.info(f'SKIP 👁 {symbol} @ ${close:.2f} [{ts}]  {desc}  (not held — suppressed)')
+                continue
+            if not is_down and not is_confirmed:
+                logger.info(f'SKIP 👁 {symbol} @ ${close:.2f} [{ts}]  {desc}  (not scanner-confirmed — suppressed)')
+                continue
+            tag = '⚠️ HELD position' if is_down else '✅ CONFIRMED breakout'
+            log_icon = '⚠️' if is_down else '✅'
             logger.info(f'ALERT {log_icon} {symbol} @ ${close:.2f} [{ts}]  {desc}')
             self._send(symbol, close, f'{desc}{vol_note}', ts, tag)
 
@@ -413,10 +424,11 @@ class SurgeMonitor:
             confirmed = symbol in self.confirmed_symbols
             msg   = (f'📊 VOL PACE {pace_mult:.1f}× expected  '
                      f'({cum_volume:,.0f} today vs {expected:,.0f} expected at {ts})')
-            log_icon = '✅' if confirmed else '👁'
-            tag = '✅ CONFIRMED breakout' if confirmed else '👁 WATCH'
-            logger.info(f'ALERT {log_icon} {symbol}  {msg}')
-            self._send(symbol, price, msg, ts, tag)
+            if not confirmed:
+                logger.info(f'SKIP 👁 {symbol}  {msg}  (not scanner-confirmed — suppressed)')
+                return
+            logger.info(f'ALERT ✅ {symbol}  {msg}')
+            self._send(symbol, price, msg, ts, '✅ CONFIRMED breakout')
 
     # ── Symbol management ─────────────────────────────────────────────────────
 
