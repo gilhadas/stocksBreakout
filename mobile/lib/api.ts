@@ -131,3 +131,21 @@ export function registerPushToken(token: string) {
     body: JSON.stringify({ token }),
   });
 }
+
+export function analyzeSymbol(symbol: string, mode: string, timeframe: string) {
+  return authFetch('/analyze', {
+    method: 'POST',
+    body: JSON.stringify({ symbol, mode, timeframe }),
+  });
+}
+
+export function analyzeChat(report: any, history: any[], question: string) {
+  return authFetch('/analyze/chat', {
+    method: 'POST',
+    body: JSON.stringify({ report, history, question }),
+  });
+}
+
+export function analyzeLlmStatus(): Promise<{ enabled: boolean }> {
+  return authFetch('/analyze/llm-status');
+}

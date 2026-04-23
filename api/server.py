@@ -535,6 +535,52 @@ def register_push_token(req: PushTokenRequest, _token: str = Depends(_require_au
     return {"ok": True, "new": is_new}
 
 
+# ── Single-Symbol Analysis ──────────────────────────────────────────────────
+
+class AnalyzeRequest(BaseModel):
+    symbol: str
+    mode: str = "swing"
+    timeframe: str = "1 day"
+
+
+@app.post("/analyze")
+async def analyze_endpoint(req: AnalyzeRequest, _token: str = Depends(_require_auth)):
+    from api.analyze import analyze_symbol
+
+    try:
+        report = await analyze_symbol(req.symbol, req.mode, req.timeframe)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _clean(report)
+
+
+class AnalyzeChatRequest(BaseModel):
+    report: dict
+    history: list = []
+    question: str
+
+
+@app.post("/analyze/chat")
+async def analyze_chat_endpoint(req: AnalyzeChatRequest, _token: str = Depends(_require_auth)):
+    import os
+    if not os.getenv('ANTHROPIC_API_KEY'):
+        raise HTTPException(status_code=501, detail="LLM not configured (ANTHROPIC_API_KEY missing)")
+
+    from api.llm_chat import chat as llm_chat
+
+    try:
+        answer = await llm_chat(req.report, req.history, req.question)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"answer": answer}
+
+
+@app.get("/analyze/llm-status")
+def analyze_llm_status(_token: str = Depends(_require_auth)):
+    import os
+    return {"enabled": bool(os.getenv('ANTHROPIC_API_KEY'))}
+
+
 # ── Static Web App (must be last — mounts after all API routes) ─────────────
 _dist = Path(__file__).resolve().parent.parent / 'mobile' / 'dist'
 if _dist.exists():
