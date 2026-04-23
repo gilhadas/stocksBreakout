@@ -7,6 +7,8 @@ import sys
 import os
 from pathlib import Path
 import logging
+import json
+import urllib.parse
 
 
 # Ensure project root is on Python path
@@ -38,24 +40,78 @@ st.set_page_config(
 
 # --- Authentication ---
 def check_auth():
-    """Simple password gate for team access."""
-    try:
-        app_password = st.secrets["APP_PASSWORD"]
-    except Exception:
-        # No secrets configured — allow access (local dev)
-        return True
+    """Email/password + Google OAuth login. Stores JWT token in session."""
+    import requests
 
     if st.session_state.get('authenticated'):
         return True
 
-    st.markdown("## Breakout Scanner Login")
-    password = st.text_input("Password", type="password", key="login_pw")
-    if st.button("Login"):
-        if password == app_password:
+    # Check for token in URL query params (from Google OAuth redirect)
+    query_params = st.query_params
+    if 'token' in query_params:
+        try:
+            token = query_params['token']
+            if isinstance(token, list):
+                token = token[0]
+            st.session_state.token = token
             st.session_state.authenticated = True
+            st.query_params.clear()
             st.rerun()
-        else:
-            st.error("Wrong password")
+        except Exception as e:
+            st.error(f"Token error: {e}")
+
+    st.markdown("## Breakout Scanner")
+
+    api_base = os.getenv('API_BASE_URL', 'http://127.0.0.1:8000')
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Login with Email")
+        email = st.text_input("Email", key="login_email", value="")
+        password = st.text_input("Password", type="password", key="login_pw")
+        if st.button("Login", key="email_login_btn"):
+            try:
+                resp = requests.post(f"{api_base}/auth/login",
+                    json={"email": email, "password": password})
+                if resp.status_code == 200:
+                    token = resp.json().get('token')
+                    st.session_state.token = token
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials")
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+
+    with col2:
+        st.subheader("Legacy Password")
+        legacy_pw = st.text_input("App Password", type="password", key="login_legacy_pw")
+        if st.button("Login", key="legacy_login_btn"):
+            try:
+                resp = requests.post(f"{api_base}/auth/login",
+                    json={"password": legacy_pw})
+                if resp.status_code == 200:
+                    token = resp.json().get('token')
+                    st.session_state.token = token
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Invalid password")
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+
+    st.divider()
+    google_client_id = os.getenv('GOOGLE_CLIENT_ID', '')
+    if google_client_id:
+        st.markdown("### Or login with Google")
+        if st.button("🔑 Login with Google", use_container_width=True):
+            redirect_uri = f"{api_base.replace('127.0.0.1:8000', 'gilhadas-stocks.com')}/auth/google/callback"
+            oauth_url = f"{api_base}/auth/google"
+            st.markdown(f"[Click here to login with Google]({oauth_url})")
+    else:
+        st.info("Google OAuth not configured yet")
+
     return False
 
 

@@ -67,6 +67,24 @@ export async function login(password: string, apiUrl?: string) {
   return data.token;
 }
 
+export async function loginWithEmail(email: string, password: string) {
+  const base = await getBaseUrl();
+  const res = await fetch(`${base}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) throw new Error('Invalid credentials');
+  const data = await res.json();
+  await saveToken(data.token);
+  return data.token;
+}
+
+export async function getGoogleAuthUrl(): Promise<string> {
+  const base = await getBaseUrl();
+  return `${base}/auth/google`;
+}
+
 export function fetchPortfolio() {
   return authFetch('/portfolio');
 }
