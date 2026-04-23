@@ -85,6 +85,17 @@ export async function getGoogleAuthUrl(): Promise<string> {
   return `${base}/auth/google`;
 }
 
+export function resetPortfolio() {
+  return authFetch('/portfolio/reset', { method: 'POST' });
+}
+
+export function recalculatePortfolio(minDate?: string, positionPct?: number) {
+  return authFetch('/portfolio/recalculate', {
+    method: 'POST',
+    body: JSON.stringify({ min_date: minDate ?? null, position_pct: positionPct ?? null }),
+  });
+}
+
 export function fetchPortfolio() {
   return authFetch('/portfolio');
 }

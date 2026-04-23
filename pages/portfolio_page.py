@@ -524,6 +524,12 @@ def _render_manual_portfolio():
 def _render_auto_portfolio():
     """Auto Virtual Portfolio section — tracks all V9-C signals automatically."""
     import auto_portfolio as ap
+    from api.auth import decode_token as _decode_token
+
+    # Resolve user_id from JWT stored in session (None falls back to DEFAULT_USER_ID path)
+    _token = st.session_state.get('token', '')
+    _payload = _decode_token(_token) if _token else {}
+    _user_id = _payload.get('sub') if _payload else None
 
     st.subheader("Auto Virtual Portfolio (V9-H Signals)")
     st.caption(
@@ -532,7 +538,7 @@ def _render_auto_portfolio():
         "Stops auto-close positions. No duplicates — each ticker enters once while open."
     )
 
-    data = ap.load()
+    data = ap.load(user_id=_user_id)
 
     # Auto-refresh prices on page load (at most once per 5 minutes)
     _REFRESH_KEY = '_ap_last_refresh'
@@ -540,7 +546,7 @@ def _render_auto_portfolio():
     _now = _time.time()
     if data['positions'] and (_now - st.session_state.get(_REFRESH_KEY, 0)) > 300:
         try:
-            result = ap.refresh_prices()
+            result = ap.refresh_prices(user_id=_user_id)
             data = result['data']
             st.session_state[_REFRESH_KEY] = _now
         except Exception:
@@ -604,7 +610,7 @@ def _render_auto_portfolio():
         if st.button("📥 Scan Signals", key="ap_scan",
                      help="Add new V9-C signals not yet in portfolio (from date if filter set)"):
             with st.spinner("Scanning signal files..."):
-                result = ap.scan_and_add(min_date=scan_min_date, position_pct=pos_pct)
+                result = ap.scan_and_add(min_date=scan_min_date, position_pct=pos_pct, user_id=_user_id)
             data    = result['data']
             summary = ap.get_summary(data)
             if result['added']:
@@ -624,7 +630,7 @@ def _render_auto_portfolio():
         if st.button("♻️ Recalculate", key="ap_recalc",
                      help="Reset portfolio and rescan ALL signals with selected position size & date filter"):
             with st.spinner(f"Recalculating with {pos_pct_label}..."):
-                result = ap.recalculate(position_pct=pos_pct, min_date=scan_min_date)
+                result = ap.recalculate(position_pct=pos_pct, min_date=scan_min_date, user_id=_user_id)
             data    = result['data']
             summary = ap.get_summary(data)
             st.toast(
@@ -640,7 +646,7 @@ def _render_auto_portfolio():
         if st.button("🔄 Refresh & Check Stops", key="ap_refresh",
                      help="Fetch current prices; auto-close if initial stop hit"):
             with st.spinner("Fetching prices..."):
-                result = ap.refresh_prices()
+                result = ap.refresh_prices(user_id=_user_id)
             data    = result['data']
             summary = ap.get_summary(data)
             if result['closed']:
@@ -653,7 +659,7 @@ def _render_auto_portfolio():
         if st.button("📈 Simulate Trailing Stops", key="ap_trail",
                      help=f"Walk every day since entry; close on trailing stop hit ({int(ap.TRAIL_PCT*100)}% from high)"):
             with st.spinner("Simulating trailing stops..."):
-                result = ap.simulate_trailing_stops()
+                result = ap.simulate_trailing_stops(user_id=_user_id)
             data    = result['data']
             summary = ap.get_summary(data)
             if result['closed']:
@@ -666,7 +672,7 @@ def _render_auto_portfolio():
         if st.button("🔍 Find Missed Trades", key="ap_missed",
                      help="Re-scan all signal files for V9-C signals never taken (missed opportunities)"):
             with st.spinner("Scanning all signal files for missed trades..."):
-                result = ap.rebuild_skipped_cash()
+                result = ap.rebuild_skipped_cash(user_id=_user_id)
             data    = result['data']
             summary = ap.get_summary(data)
             st.toast(f"Found {result['found']} missed trade(s).")
@@ -676,7 +682,7 @@ def _render_auto_portfolio():
         if st.button("⚡ Swap Advisor", key="ap_swap",
                      help="Find skipped signals that could replace weaker open positions"):
             with st.spinner("Analysing swap opportunities..."):
-                swaps = ap.suggest_swaps(notify=True)
+                swaps = ap.suggest_swaps(notify=True, user_id=_user_id)
             st.session_state['ap_swap_results'] = swaps
             if swaps:
                 st.toast(f"Found {len(swaps)} swap suggestion(s).")
@@ -703,7 +709,7 @@ def _render_auto_portfolio():
                     f"R:R {_sw.get('open_rr', 0):.2f}{_upside_pct}"
                 )
                 if _c3.button("Execute", key=f"ap_exec_swap_{_i}_{_sw['close_symbol']}_{_sw['open_symbol']}"):
-                    _res = ap.execute_swap(_sw['close_symbol'], _sw['open_symbol'])
+                    _res = ap.execute_swap(_sw['close_symbol'], _sw['open_symbol'], user_id=_user_id)
                     if _res.get('ok'):
                         st.session_state['ap_swap_last_undo'] = True
                         st.session_state['ap_swap_results'] = [
@@ -721,7 +727,7 @@ def _render_auto_portfolio():
 
             if st.session_state.get('ap_swap_last_undo'):
                 if st.button("↩️ Undo last swap", key="ap_swap_undo"):
-                    _u = ap.undo_last_swap()
+                    _u = ap.undo_last_swap(user_id=_user_id)
                     if _u.get('ok'):
                         st.session_state['ap_swap_last_undo'] = False
                         st.toast(
@@ -734,7 +740,7 @@ def _render_auto_portfolio():
     with col_reset:
         if st.button("🗑️ Reset", key="ap_reset",
                      help="Clear all auto-portfolio positions and history"):
-            ap.reset()
+            ap.reset(user_id=_user_id)
             st.toast("Auto portfolio reset.")
             st.rerun()
 

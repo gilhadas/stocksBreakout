@@ -517,6 +517,35 @@ def undo_swap_endpoint(current_user: User = Depends(get_current_user)):
     return result
 
 
+@app.post("/portfolio/reset")
+def portfolio_reset_endpoint(current_user: User = Depends(get_current_user)):
+    import auto_portfolio as ap
+
+    data = ap.reset(user_id=current_user.id)
+    return {"ok": True, "capital": data.get("capital", 0)}
+
+
+class RecalculateRequest(BaseModel):
+    min_date: str | None = None
+    position_pct: float | None = None
+
+
+@app.post("/portfolio/recalculate")
+def portfolio_recalculate_endpoint(
+    req: RecalculateRequest,
+    current_user: User = Depends(get_current_user),
+):
+    import auto_portfolio as ap
+    from config import PORTFOLIO
+
+    pct = req.position_pct if req.position_pct else PORTFOLIO.get("position_pct", 0.10)
+    result = ap.recalculate(position_pct=pct, min_date=req.min_date, user_id=current_user.id)
+    summary = ap.get_summary(result["data"])
+    summary["files_scanned"] = result.get("files_scanned", 0)
+    summary["added"] = result.get("added", 0)
+    return summary
+
+
 # ── Push Notifications ───────────────────────────────────────────────────────
 
 class PushTokenRequest(BaseModel):

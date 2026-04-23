@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable, Alert, Platform } from 'react-native';
+import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable, Alert, Platform, TextInput } from 'react-native';
 import { cacheDirectory, writeAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
@@ -57,7 +57,7 @@ async function exportSkippedCSV(rows: any[]) {
   }
 }
 import { useFocusEffect, router } from 'expo-router';
-import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, executeSwap, undoSwap, getToken, clearToken } from '../../lib/api';
+import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, executeSwap, undoSwap, getToken, clearToken, resetPortfolio, recalculatePortfolio } from '../../lib/api';
 import SummaryBar from '../../components/SummaryBar';
 import PositionCard from '../../components/PositionCard';
 
@@ -196,6 +196,9 @@ export default function PortfolioScreen() {
   const [swapToast, setSwapToast] = useState<{ msg: string; canUndo: boolean; kind: 'ok' | 'err' } | null>(null);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
+  const [showManage, setShowManage] = useState(false);
+  const [manageDate, setManageDate] = useState('');
+  const [manageBusy, setManageBusy] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -296,6 +299,52 @@ export default function PortfolioScreen() {
     }
   };
 
+  const handleRecalculate = () => {
+    Alert.alert(
+      'Recalculate Portfolio',
+      `Reset and rescan signals${manageDate ? ` from ${manageDate}` : ' (all time)'}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Recalculate', style: 'destructive', onPress: async () => {
+            setManageBusy(true);
+            try {
+              await recalculatePortfolio(manageDate || undefined);
+              await loadData();
+              setShowManage(false);
+            } catch (e: any) {
+              Alert.alert('Failed', e?.message ?? 'Recalculate failed');
+            }
+            setManageBusy(false);
+          },
+        },
+      ]
+    );
+  };
+
+  const handleReset = () => {
+    Alert.alert(
+      'Reset Portfolio',
+      'Wipe all positions and history? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset', style: 'destructive', onPress: async () => {
+            setManageBusy(true);
+            try {
+              await resetPortfolio();
+              await loadData();
+              setShowManage(false);
+            } catch (e: any) {
+              Alert.alert('Failed', e?.message ?? 'Reset failed');
+            }
+            setManageBusy(false);
+          },
+        },
+      ]
+    );
+  };
+
   const wins = closed.filter(t => (t.pnl || 0) > 0).length;
   const realized = closed.reduce((s, t) => s + (t.pnl || 0), 0);
   const avgHold = closed.length > 0
@@ -333,7 +382,46 @@ export default function PortfolioScreen() {
             History ({closed.length})
           </Text>
         </Pressable>
+        <Pressable
+          style={[styles.tabBtn, showManage && styles.tabBtnActive]}
+          onPress={() => setShowManage((v) => !v)}
+        >
+          <Text style={[styles.tabBtnText, showManage && styles.tabBtnTextActive]}>⚙</Text>
+        </Pressable>
       </View>
+
+      {/* Manage Portfolio panel */}
+      {showManage && (
+        <View style={styles.managePanel}>
+          <Text style={styles.managePanelTitle}>Manage Portfolio</Text>
+          <Text style={styles.managePanelLabel}>From date (optional, YYYY-MM-DD)</Text>
+          <TextInput
+            style={styles.manageDateInput}
+            placeholder="e.g. 2026-01-01"
+            placeholderTextColor="#555"
+            value={manageDate}
+            onChangeText={setManageDate}
+            autoCapitalize="none"
+            keyboardType="numbers-and-punctuation"
+          />
+          <Pressable
+            style={[styles.manageBtn, manageBusy && styles.manageBtnDisabled]}
+            onPress={handleRecalculate}
+            disabled={manageBusy}
+          >
+            <Text style={styles.manageBtnText}>
+              {manageBusy ? 'Working…' : '♻️ Recalculate from date'}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.manageBtn, styles.manageBtnDanger, manageBusy && styles.manageBtnDisabled]}
+            onPress={handleReset}
+            disabled={manageBusy}
+          >
+            <Text style={styles.manageBtnText}>🗑️ Reset Portfolio</Text>
+          </Pressable>
+        </View>
+      )}
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
@@ -532,4 +620,22 @@ const styles = StyleSheet.create({
   skippedCol: { flex: 1, alignItems: 'center' },
   skippedColLabel: { color: '#555', fontSize: 10, marginBottom: 2 },
   skippedColValue: { color: '#ccc', fontSize: 12, fontWeight: '600' },
+
+  managePanel: {
+    backgroundColor: '#16213e', borderRadius: 10, marginHorizontal: 12, marginBottom: 8,
+    padding: 16, borderWidth: 1, borderColor: '#374151',
+  },
+  managePanelTitle: { color: '#fff', fontSize: 15, fontWeight: '700', marginBottom: 12 },
+  managePanelLabel: { color: '#888', fontSize: 12, marginBottom: 6 },
+  manageDateInput: {
+    backgroundColor: '#0f0f23', color: '#fff', borderRadius: 8,
+    padding: 12, fontSize: 14, marginBottom: 12, borderWidth: 1, borderColor: '#374151',
+  },
+  manageBtn: {
+    backgroundColor: '#4c1d95', borderRadius: 8, padding: 12, alignItems: 'center',
+    marginBottom: 8, borderWidth: 1, borderColor: '#7c3aed',
+  },
+  manageBtnDanger: { backgroundColor: '#7f1d1d', borderColor: '#ef4444' },
+  manageBtnDisabled: { opacity: 0.5 },
+  manageBtnText: { color: '#fff', fontSize: 14, fontWeight: '600' },
 });
