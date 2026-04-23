@@ -574,7 +574,7 @@ NOTIFICATIONS = {
     
     # Discord notifications via webhook
     'discord': {
-        'enabled': True,  # Set to True to enable
+        'enabled': False,  # Set to True to enable
         'webhooks': {
             'signals': 'https://discordapp.com/api/webhooks/1464758074941112353/dzvWJZwybS21NQ432EVRzZXBdYuymCcLu85vjYnDheDbyqECN_psBneA7neqUNQfTndX',
             'exits': 'https://discord.com/api/webhooks/1464758104267817220/sXhuVFWv7JcRjzpAvmsJyDxEH7U4b0qJnxPtHyOU0cTH1eK6RudbopxpglJZkMCcYek_',
