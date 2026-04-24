@@ -199,6 +199,7 @@ export default function PortfolioScreen() {
   const [showManage, setShowManage] = useState(false);
   const [manageDate, setManageDate] = useState('');
   const [manageBusy, setManageBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'recalculate' | 'reset' | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -299,20 +300,6 @@ export default function PortfolioScreen() {
     }
   };
 
-  // Cross-platform confirm — RN Web's Alert.alert ignores button callbacks
-  const confirm = (title: string, msg: string): Promise<boolean> => {
-    if (Platform.OS === 'web') {
-      // eslint-disable-next-line no-alert
-      return Promise.resolve(window.confirm(`${title}\n\n${msg}`));
-    }
-    return new Promise((resolve) => {
-      Alert.alert(title, msg, [
-        { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-        { text: 'OK', style: 'destructive', onPress: () => resolve(true) },
-      ]);
-    });
-  };
-
   const showError = (msg: string) => {
     if (Platform.OS === 'web') window.alert(msg);
     else Alert.alert('Failed', msg);
@@ -321,41 +308,29 @@ export default function PortfolioScreen() {
   // Validate YYYY-MM-DD; empty string is allowed (means "all time")
   const isValidDate = (s: string) => s === '' || /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-  const handleRecalculate = async () => {
+  const handleRecalculate = () => {
     const date = manageDate.trim();
-    if (!isValidDate(date)) {
-      showError('Date must be YYYY-MM-DD or empty');
-      return;
-    }
-    const ok = await confirm(
-      'Recalculate Portfolio',
-      `Reset and rescan signals${date ? ` from ${date}` : ' (all time)'}?`
-    );
-    if (!ok) return;
-    setManageBusy(true);
-    try {
-      await recalculatePortfolio(date || undefined);
-      await loadData();
-      setShowManage(false);
-    } catch (e: any) {
-      showError(e?.message ?? 'Recalculate failed');
-    }
-    setManageBusy(false);
+    if (!isValidDate(date)) { showError('Date must be YYYY-MM-DD or empty'); return; }
+    setPendingAction('recalculate');
   };
 
-  const handleReset = async () => {
-    const ok = await confirm(
-      'Reset Portfolio',
-      'Wipe all positions and history? This cannot be undone.'
-    );
-    if (!ok) return;
+  const handleReset = () => setPendingAction('reset');
+
+  const runConfirmedAction = async () => {
+    if (!pendingAction) return;
+    const action = pendingAction;
+    setPendingAction(null);
     setManageBusy(true);
     try {
-      await resetPortfolio();
+      if (action === 'recalculate') {
+        await recalculatePortfolio(manageDate.trim() || undefined);
+      } else {
+        await resetPortfolio();
+      }
       await loadData();
       setShowManage(false);
     } catch (e: any) {
-      showError(e?.message ?? 'Reset failed');
+      showError(e?.message ?? `${action === 'recalculate' ? 'Recalculate' : 'Reset'} failed`);
     }
     setManageBusy(false);
   };
@@ -413,32 +388,54 @@ export default function PortfolioScreen() {
       {showManage && (
         <View style={styles.managePanel}>
           <Text style={styles.managePanelTitle}>Manage Portfolio</Text>
-          <Text style={styles.managePanelLabel}>From date (optional, YYYY-MM-DD)</Text>
-          <TextInput
-            style={styles.manageDateInput}
-            placeholder="e.g. 2026-01-01"
-            placeholderTextColor="#555"
-            value={manageDate}
-            onChangeText={setManageDate}
-            autoCapitalize="none"
-            keyboardType="numbers-and-punctuation"
-          />
-          <Pressable
-            style={[styles.manageBtn, manageBusy && styles.manageBtnDisabled]}
-            onPress={handleRecalculate}
-            disabled={manageBusy}
-          >
-            <Text style={styles.manageBtnText}>
-              {manageBusy ? 'Working…' : '♻️ Recalculate from date'}
-            </Text>
-          </Pressable>
-          <Pressable
-            style={[styles.manageBtn, styles.manageBtnDanger, manageBusy && styles.manageBtnDisabled]}
-            onPress={handleReset}
-            disabled={manageBusy}
-          >
-            <Text style={styles.manageBtnText}>🗑️ Reset Portfolio</Text>
-          </Pressable>
+
+          {pendingAction ? (
+            /* Inline confirmation — works on all platforms */
+            <View style={styles.confirmRow}>
+              <Text style={styles.confirmText}>
+                {pendingAction === 'reset'
+                  ? 'Wipe all positions? Cannot be undone.'
+                  : `Rescan signals${manageDate.trim() ? ` from ${manageDate.trim()}` : ' (all time)'}?`}
+              </Text>
+              <View style={styles.confirmBtns}>
+                <Pressable style={styles.confirmCancel} onPress={() => setPendingAction(null)}>
+                  <Text style={styles.confirmCancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable style={styles.confirmOk} onPress={runConfirmedAction}>
+                  <Text style={styles.confirmOkText}>Confirm</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            <>
+              <Text style={styles.managePanelLabel}>From date (optional, YYYY-MM-DD)</Text>
+              <TextInput
+                style={styles.manageDateInput}
+                placeholder="e.g. 2026-01-01"
+                placeholderTextColor="#555"
+                value={manageDate}
+                onChangeText={setManageDate}
+                autoCapitalize="none"
+                keyboardType="numbers-and-punctuation"
+              />
+              <Pressable
+                style={[styles.manageBtn, manageBusy && styles.manageBtnDisabled]}
+                onPress={handleRecalculate}
+                disabled={manageBusy}
+              >
+                <Text style={styles.manageBtnText}>
+                  {manageBusy ? 'Working…' : '♻️ Recalculate from date'}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.manageBtn, styles.manageBtnDanger, manageBusy && styles.manageBtnDisabled]}
+                onPress={handleReset}
+                disabled={manageBusy}
+              >
+                <Text style={styles.manageBtnText}>🗑️ Reset Portfolio</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       )}
 
@@ -664,4 +661,11 @@ const styles = StyleSheet.create({
   manageBtnDanger: { backgroundColor: '#7f1d1d', borderColor: '#ef4444' },
   manageBtnDisabled: { opacity: 0.5 },
   manageBtnText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  confirmRow: { gap: 10 },
+  confirmText: { color: '#e2e8f0', fontSize: 14, textAlign: 'center' },
+  confirmBtns: { flexDirection: 'row', gap: 10 },
+  confirmCancel: { flex: 1, paddingVertical: 10, borderRadius: 8, backgroundColor: '#374151', alignItems: 'center' },
+  confirmCancelText: { color: '#e2e8f0', fontSize: 14, fontWeight: '600' },
+  confirmOk: { flex: 1, paddingVertical: 10, borderRadius: 8, backgroundColor: '#dc2626', alignItems: 'center' },
+  confirmOkText: { color: '#fff', fontSize: 14, fontWeight: '600' },
 });
