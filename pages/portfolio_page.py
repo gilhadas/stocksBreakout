@@ -509,14 +509,14 @@ def _render_manual_portfolio():
         hist_rows = []
         for t in reversed(trades):
             hist_rows.append({
-                'Symbol': t['symbol'],
-                'Entry': f"${t['entry_price']:.2f}",
-                'Exit': f"${t['exit_price']:.2f}",
-                'P&L': f"${t['pnl']:+,.0f}",
+                'Symbol': t.get('symbol', ''),
+                'Entry': f"${t.get('entry_price', 0):.2f}",
+                'Exit': f"${t.get('exit_price', 0):.2f}",
+                'P&L': f"${t.get('pnl', 0):+,.0f}",
                 'P&L%': f"{t.get('pnl_pct', 0):+.1f}%",
-                'Hold': f"{t['hold_days']}d",
-                'Quality': t['quality'],
-                'Date': t['exit_date'],
+                'Hold': f"{t.get('hold_days', 0)}d",
+                'Quality': t.get('quality', ''),
+                'Date': t.get('exit_date', ''),
             })
         st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
 
