@@ -524,12 +524,21 @@ def _render_manual_portfolio():
 def _render_auto_portfolio():
     """Auto Virtual Portfolio section — tracks all V9-C signals automatically."""
     import auto_portfolio as ap
-    from api.auth import decode_token as _decode_token
 
-    # Resolve user_id from JWT stored in session (None falls back to DEFAULT_USER_ID path)
+    # Decode user_id from JWT without importing api.auth (avoids heavy deps in Streamlit context)
+    def _decode_sub(token: str):
+        try:
+            import base64, json as _json
+            parts = token.split('.')
+            if len(parts) != 3:
+                return None
+            pad = parts[1] + '=' * (-len(parts[1]) % 4)
+            return _json.loads(base64.urlsafe_b64decode(pad)).get('sub')
+        except Exception:
+            return None
+
     _token = st.session_state.get('token', '')
-    _payload = _decode_token(_token) if _token else {}
-    _user_id = _payload.get('sub') if _payload else None
+    _user_id = _decode_sub(_token) if _token else None
 
     st.subheader("Auto Virtual Portfolio (V9-H Signals)")
     st.caption(
