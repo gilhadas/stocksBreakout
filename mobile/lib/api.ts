@@ -89,11 +89,20 @@ export function resetPortfolio() {
   return authFetch('/portfolio/reset', { method: 'POST' });
 }
 
-export function recalculatePortfolio(minDate?: string, positionPct?: number) {
-  return authFetch('/portfolio/recalculate', {
+export async function recalculatePortfolio(minDate?: string, positionPct?: number): Promise<Record<string, unknown>> {
+  const { job_id } = await authFetch('/portfolio/recalculate', {
     method: 'POST',
     body: JSON.stringify({ min_date: minDate ?? null, position_pct: positionPct ?? null }),
-  });
+  }) as { job_id: string };
+
+  // Poll until done (max 5 minutes, 3s interval)
+  for (let i = 0; i < 100; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const status = await authFetch(`/portfolio/recalculate/status/${job_id}`) as Record<string, unknown>;
+    if (status.status === 'done') return status.result as Record<string, unknown>;
+    if (status.status === 'error') throw new Error((status.error as string) || 'Recalculate failed');
+  }
+  throw new Error('Recalculate timed out');
 }
 
 export function fetchPortfolio() {

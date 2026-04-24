@@ -538,20 +538,43 @@ class RecalculateRequest(BaseModel):
     position_pct: float | None = None
 
 
+# In-memory job store for background recalculate jobs.
+# { job_id: {"status": "running"|"done"|"error", "result": {...}, "error": str} }
+_RECALC_JOBS: dict[str, dict] = {}
+
+
 @app.post("/portfolio/recalculate")
 def portfolio_recalculate_endpoint(
     req: RecalculateRequest,
     current_user: User = Depends(get_current_user),
 ):
-    import auto_portfolio as ap
-    from config import PORTFOLIO
+    import threading, uuid
+    job_id = uuid.uuid4().hex[:12]
+    _RECALC_JOBS[job_id] = {"status": "running"}
 
-    pct = req.position_pct if req.position_pct else PORTFOLIO.get("position_pct", 0.10)
-    result = ap.recalculate(position_pct=pct, min_date=req.min_date, user_id=current_user.id)
-    summary = ap.get_summary(result["data"])
-    summary["files_scanned"] = result.get("files_scanned", 0)
-    summary["added"] = result.get("added", 0)
-    return _clean(summary)
+    def _run():
+        import auto_portfolio as ap
+        from config import PORTFOLIO
+        try:
+            pct = req.position_pct if req.position_pct else PORTFOLIO.get("position_pct", 0.10)
+            result = ap.recalculate(position_pct=pct, min_date=req.min_date, user_id=current_user.id)
+            summary = ap.get_summary(result["data"])
+            summary["files_scanned"] = result.get("files_scanned", 0)
+            summary["added"] = result.get("added", 0)
+            _RECALC_JOBS[job_id] = {"status": "done", "result": _clean(summary)}
+        except Exception as exc:
+            _RECALC_JOBS[job_id] = {"status": "error", "error": str(exc)}
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/portfolio/recalculate/status/{job_id}")
+def portfolio_recalculate_status(job_id: str, current_user: User = Depends(get_current_user)):
+    job = _RECALC_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 # ── Push Notifications ───────────────────────────────────────────────────────

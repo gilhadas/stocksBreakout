@@ -13,7 +13,9 @@ Rules
 - Re-entry: a symbol that was closed CAN be re-added from a newer signal file
 - File tracking: each signal file is processed only once (via 'processed_files' set)
 """
+import json
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -42,6 +44,39 @@ MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
 MAX_ADDS_PER_SCAN  = 3         # Max new positions per scan (prevents capital dump)
 MAX_PORTFOLIO_ATR_RISK = 0.12  # Max total portfolio risk as ATR% (12% = aggressive)
+
+# ── Price cache (two-level) ───────────────────────────────────────────────────
+# Entry price is immutable historical data → disk-backed, survives server restarts.
+# Current price changes daily → in-memory only, 1-hour TTL.
+
+_ENTRY_CACHE_PATH = 'scanner_output/portfolio/entry_price_cache.json'
+# { "SYMBOL|YYYY-MM-DD": entry_price_float }
+_ENTRY_PRICE_CACHE: dict[str, float] = {}
+# { "SYMBOL": (current_price_float, timestamp) }
+_CURRENT_PRICE_CACHE: dict[str, tuple[float, float]] = {}
+_CURRENT_PRICE_TTL = 3600  # seconds (1 hour)
+
+
+def _load_entry_price_cache() -> None:
+    global _ENTRY_PRICE_CACHE
+    try:
+        with open(_ENTRY_CACHE_PATH) as f:
+            _ENTRY_PRICE_CACHE = json.load(f)
+    except Exception:
+        _ENTRY_PRICE_CACHE = {}
+
+
+def _save_entry_price_cache() -> None:
+    try:
+        import os
+        os.makedirs(os.path.dirname(_ENTRY_CACHE_PATH), exist_ok=True)
+        with open(_ENTRY_CACHE_PATH, 'w') as f:
+            json.dump(_ENTRY_PRICE_CACHE, f)
+    except Exception:
+        pass
+
+
+_load_entry_price_cache()
 
 
 # ── Persistence ──────────────────────────────────────────────────────────────
@@ -119,7 +154,8 @@ def _mode_from_filename(fname: str) -> str:
 
 def scan_and_add(min_date: str | None = None,
                  position_pct: float | None = None,
-                 user_id: str | None = None) -> dict:
+                 user_id: str | None = None,
+                 notify: bool = True) -> dict:
     """
     Scan signal CSV files and add new V9-H signals.
 
@@ -361,7 +397,7 @@ def scan_and_add(min_date: str | None = None,
     _save(data, user_id=user_id)
 
     # ── Notify on newly added positions ──────────────────────────────────────
-    if added_syms:
+    if added_syms and notify:
         try:
             from notifier import Notifier
             _notifier = Notifier()
@@ -813,32 +849,52 @@ def _fetch_entry_and_current(symbol: str, date_added: str,
     """
     Fetch entry price (close on date_added) and current price (latest close).
     Falls back to csv_price if yfinance fails.
-    Returns (entry_price, current_price).
+
+    Cache strategy:
+    - entry_price: disk-backed (immutable historical data, survives restarts)
+    - current_price: in-memory with 1-hour TTL (changes daily)
     """
     import yfinance as yf
     import pandas as pd
+
+    entry_key = f"{symbol}|{date_added}"
+    entry_cached = _ENTRY_PRICE_CACHE.get(entry_key)
+
+    now = time.time()
+    current_record = _CURRENT_PRICE_CACHE.get(symbol)
+    current_cached = current_record[0] if (current_record and now - current_record[1] < _CURRENT_PRICE_TTL) else None
+
+    # Both cached — no network call needed
+    if entry_cached is not None and current_cached is not None:
+        return entry_cached, current_cached
+
     try:
-        # Use start= only — specifying period= alongside start= is ambiguous
-        hist = yf.Ticker(symbol.replace(' ', '-')).history(
-            start=date_added, auto_adjust=True
-        )
-        if hist is None or hist.empty:
-            return csv_price, csv_price
+        if entry_cached is None:
+            # Full history fetch: need close on date_added + latest close
+            hist = yf.Ticker(symbol.replace(' ', '-')).history(
+                start=date_added, auto_adjust=True
+            )
+            if hist is None or hist.empty:
+                return csv_price, csv_price
 
-        # Strip timezone from index for safe date comparison
-        idx = hist.index
-        if hasattr(idx, 'tz') and idx.tz is not None:
-            idx = idx.tz_localize(None)
-        dates = idx.normalize()
+            idx = hist.index
+            if hasattr(idx, 'tz') and idx.tz is not None:
+                idx = idx.tz_localize(None)
+            dates = idx.normalize()
+            target_dt = pd.Timestamp(date_added)
+            on_or_after = hist.loc[dates >= target_dt]
+            entry_cached = round(float(on_or_after['Close'].iloc[0]) if not on_or_after.empty else csv_price, 4)
+            current_cached = round(float(hist['Close'].dropna().iloc[-1]), 4)
 
-        target_dt = pd.Timestamp(date_added)
-        on_or_after = hist.loc[dates >= target_dt]
-        entry = float(on_or_after['Close'].iloc[0]) if not on_or_after.empty else csv_price
+            _ENTRY_PRICE_CACHE[entry_key] = entry_cached
+            _CURRENT_PRICE_CACHE[symbol] = (current_cached, now)
+        else:
+            # Entry cached; only need a fresh current price (tiny 2-day fetch)
+            hist = yf.Ticker(symbol.replace(' ', '-')).history(period='2d', auto_adjust=True)
+            current_cached = round(float(hist['Close'].dropna().iloc[-1]), 4) if (hist is not None and not hist.empty) else entry_cached
+            _CURRENT_PRICE_CACHE[symbol] = (current_cached, now)
 
-        # Current price: last available close
-        current = float(hist['Close'].dropna().iloc[-1])
-
-        return round(entry, 4), round(current, 4)
+        return entry_cached, current_cached
     except Exception:
         return csv_price, csv_price
 
@@ -1656,7 +1712,9 @@ def recalculate(position_pct: float = POSITION_SIZE_PCT,
     Returns the scan_and_add result dict.
     """
     reset(user_id=user_id)
-    return scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id)
+    result = scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id, notify=False)
+    _save_entry_price_cache()
+    return result
 
 
 # ── Summary helpers ───────────────────────────────────────────────────────────
