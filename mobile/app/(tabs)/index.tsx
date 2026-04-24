@@ -311,10 +311,11 @@ export default function PortfolioScreen() {
   const handleRecalculate = () => {
     const date = manageDate.trim();
     if (!isValidDate(date)) { showError('Date must be YYYY-MM-DD or empty'); return; }
-    setPendingAction('recalculate');
+    // setTimeout defers the state update past the current touch event — needed on iOS Safari
+    setTimeout(() => setPendingAction('recalculate'), 0);
   };
 
-  const handleReset = () => setPendingAction('reset');
+  const handleReset = () => setTimeout(() => setPendingAction('reset'), 0);
 
   const runConfirmedAction = async () => {
     if (!pendingAction) return;
@@ -387,55 +388,56 @@ export default function PortfolioScreen() {
       {/* Manage Portfolio panel */}
       {showManage && (
         <View style={styles.managePanel}>
-          <Text style={styles.managePanelTitle}>Manage Portfolio</Text>
+          <Text style={styles.managePanelTitle}>
+            Manage Portfolio{__DEV__ && pendingAction ? ` [${pendingAction}]` : ''}
+          </Text>
 
-          {pendingAction ? (
-            /* Inline confirmation — works on all platforms */
-            <View style={styles.confirmRow}>
-              <Text style={styles.confirmText}>
-                {pendingAction === 'reset'
-                  ? 'Wipe all positions? Cannot be undone.'
-                  : `Rescan signals${manageDate.trim() ? ` from ${manageDate.trim()}` : ' (all time)'}?`}
-              </Text>
-              <View style={styles.confirmBtns}>
-                <Pressable style={styles.confirmCancel} onPress={() => setPendingAction(null)}>
-                  <Text style={styles.confirmCancelText}>Cancel</Text>
-                </Pressable>
-                <Pressable style={styles.confirmOk} onPress={runConfirmedAction}>
-                  <Text style={styles.confirmOkText}>Confirm</Text>
-                </Pressable>
-              </View>
+          {/* Confirmation row — always mounted, shown when pendingAction is set */}
+          <View style={pendingAction ? styles.confirmRow : { display: 'none' as any }}>
+            <Text style={styles.confirmText}>
+              {pendingAction === 'reset'
+                ? 'Wipe all positions? Cannot be undone.'
+                : `Rescan signals${manageDate.trim() ? ` from ${manageDate.trim()}` : ' (all time)'}?`}
+            </Text>
+            <View style={styles.confirmBtns}>
+              <Pressable style={styles.confirmCancel} onPress={() => setPendingAction(null)}>
+                <Text style={styles.confirmCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={styles.confirmOk} onPress={runConfirmedAction}>
+                <Text style={styles.confirmOkText}>Confirm</Text>
+              </Pressable>
             </View>
-          ) : (
-            <>
-              <Text style={styles.managePanelLabel}>From date (optional, YYYY-MM-DD)</Text>
-              <TextInput
-                style={styles.manageDateInput}
-                placeholder="e.g. 2026-01-01"
-                placeholderTextColor="#555"
-                value={manageDate}
-                onChangeText={setManageDate}
-                autoCapitalize="none"
-                keyboardType="numbers-and-punctuation"
-              />
-              <Pressable
-                style={[styles.manageBtn, manageBusy && styles.manageBtnDisabled]}
-                onPress={handleRecalculate}
-                disabled={manageBusy}
-              >
-                <Text style={styles.manageBtnText}>
-                  {manageBusy ? 'Working…' : '♻️ Recalculate from date'}
-                </Text>
-              </Pressable>
-              <Pressable
-                style={[styles.manageBtn, styles.manageBtnDanger, manageBusy && styles.manageBtnDisabled]}
-                onPress={handleReset}
-                disabled={manageBusy}
-              >
-                <Text style={styles.manageBtnText}>🗑️ Reset Portfolio</Text>
-              </Pressable>
-            </>
-          )}
+          </View>
+
+          {/* Action buttons — always mounted, hidden while confirming or busy */}
+          <View style={pendingAction ? { display: 'none' as any } : undefined}>
+            <Text style={styles.managePanelLabel}>From date (optional, YYYY-MM-DD)</Text>
+            <TextInput
+              style={styles.manageDateInput}
+              placeholder="e.g. 2026-01-01"
+              placeholderTextColor="#555"
+              value={manageDate}
+              onChangeText={setManageDate}
+              autoCapitalize="none"
+              keyboardType="numbers-and-punctuation"
+            />
+            <Pressable
+              style={[styles.manageBtn, manageBusy && styles.manageBtnDisabled]}
+              onPress={handleRecalculate}
+              disabled={manageBusy}
+            >
+              <Text style={styles.manageBtnText}>
+                {manageBusy ? 'Working…' : '♻️ Recalculate from date'}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.manageBtn, styles.manageBtnDanger, manageBusy && styles.manageBtnDisabled]}
+              onPress={handleReset}
+              disabled={manageBusy}
+            >
+              <Text style={styles.manageBtnText}>🗑️ Reset Portfolio</Text>
+            </Pressable>
+          </View>
         </View>
       )}
 
