@@ -55,6 +55,8 @@ _ENTRY_PRICE_CACHE: dict[str, float] = {}
 # { "SYMBOL": (current_price_float, timestamp) }
 _CURRENT_PRICE_CACHE: dict[str, tuple[float, float]] = {}
 _CURRENT_PRICE_TTL = 3600  # seconds (1 hour)
+# { "SYMBOL|YYYY-MM-DD": cumulative_split_factor }  — session-only, no disk backing
+_SPLIT_CACHE: dict[str, float] = {}
 
 
 def _load_entry_price_cache() -> None:
@@ -298,10 +300,21 @@ def scan_and_add(min_date: str | None = None,
             # Daily deployment cap — prevent all capital spent in one scan.
             # Signals are now sorted by priority above, so we skip the lowest-ranked ones.
             if adds_this_scan >= MAX_ADDS_PER_SCAN:
-                skipped_cap.append(sym)
                 entry_price, current_price = _fetch_entry_and_current(sym, date_str, price)
+                if price and entry_price:
+                    _sf = _detect_split_factor(sym, date_str)
+                    if _sf != 1.0:
+                        stop   = round(stop   / _sf, 4)
+                        target = round(target / _sf, 4)
+                        price  = round(price  / _sf, 4)
                 if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.30):
                     stop = round(entry_price * 0.95, 4)
+                # Skip price-scale-mismatched signals even from the cap path
+                if (target <= entry_price or
+                        (price and entry_price and
+                         abs(entry_price - price) / max(price, entry_price) > 0.50)):
+                    continue
+                skipped_cap.append(sym)
                 data['skipped_cash'].append(_build_skipped_entry(
                     row, sym, date_str, mode, quality, minervini,
                     entry_price, current_price, stop, target, skip_reason='cap',
@@ -313,10 +326,52 @@ def scan_and_add(min_date: str | None = None,
                 sym, date_str, price
             )
 
+            # Split adjustment: if a stock split occurred since the signal date,
+            # yfinance auto_adjust=True will have already divided the historical close
+            # by the split factor.  We rescale csv stop/target to match the new price
+            # scale so the signal remains valid.
+            # Example: 2:1 split after signal at $100 → entry_price = $50 (adjusted);
+            # stop $95 → $47.50, target $120 → $60.
+            if price and entry_price:
+                split_factor = _detect_split_factor(sym, date_str)
+                if split_factor != 1.0:
+                    import logging
+                    logging.getLogger(__name__).info(
+                        f"SPLIT {sym}: {split_factor}x since {date_str} — "
+                        f"rescaling stop {stop}→{round(stop/split_factor,4)}, "
+                        f"target {target}→{round(target/split_factor,4)}"
+                    )
+                    stop   = round(stop   / split_factor, 4)
+                    target = round(target / split_factor, 4)
+                    price  = round(price  / split_factor, 4)
+
             # Guard: stop must be below entry and not based on wrong price scale
             # (catches stale/split-adjusted data returning wrong close in scanner)
             if stop >= entry_price or (entry_price > 0 and (entry_price - stop) / entry_price > 0.30):
                 stop = round(entry_price * 0.95, 4)
+
+            # Guard: skip if target is below entry — signal is from wrong timeframe or
+            # price scale (e.g. BOUNCE detected on a historical weekly bar at $66 when
+            # the real daily price is $149; TP of $75 ends up below entry).
+            if target <= entry_price:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"SKIP {sym}: target {target} <= entry {entry_price} "
+                    f"(csv_price={price}) — price scale mismatch after split adjust"
+                )
+                skipped_risk.append(sym)
+                continue
+
+            # Guard: csv_price vs real entry divergence >50% after split adjustment
+            # → signal is from a completely different price era (stale historical bar).
+            if price and entry_price and abs(entry_price - price) / max(price, entry_price) > 0.50:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"SKIP {sym}: csv_price={price} vs entry_price={entry_price} "
+                    f"divergence >50% after split adjust — signal skipped"
+                )
+                skipped_risk.append(sym)
+                continue
 
             # ── Portfolio balance guards (includes ATR checks) ────────────
             balance_result = _check_portfolio_balance(data, sym, mode, pos_pct)
@@ -842,6 +897,38 @@ def _safe_float(val) -> float:
         return float(val)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _detect_split_factor(symbol: str, since_date: str) -> float:
+    """
+    Return the cumulative forward-split ratio for symbol since since_date.
+    1.0 = no split; 2.0 = 2:1 split (share count doubled, price halved).
+
+    yfinance auto_adjust=True backward-adjusts historical closes by the split
+    factor, so a pre-split csv_price and the adjusted entry_price will differ
+    by exactly this ratio.  Dividing csv stop/target by the factor realigns
+    them with the current (post-split) price scale.
+    """
+    cache_key = f"{symbol}|{since_date}"
+    if cache_key in _SPLIT_CACHE:
+        return _SPLIT_CACHE[cache_key]
+    try:
+        import yfinance as yf
+        import pandas as pd
+        splits = yf.Ticker(symbol.replace(' ', '-')).splits
+        if splits is None or splits.empty:
+            _SPLIT_CACHE[cache_key] = 1.0
+            return 1.0
+        idx = splits.index
+        if hasattr(idx, 'tz') and idx.tz is not None:
+            idx = idx.tz_localize(None)
+        relevant = splits[idx >= pd.Timestamp(since_date)]
+        factor = float(relevant.prod()) if not relevant.empty else 1.0
+        _SPLIT_CACHE[cache_key] = factor
+        return factor
+    except Exception:
+        _SPLIT_CACHE[cache_key] = 1.0
+        return 1.0
 
 
 def _fetch_entry_and_current(symbol: str, date_added: str,
