@@ -393,7 +393,7 @@ export default function PortfolioScreen() {
           </Text>
 
           {/* Confirmation row — always mounted, shown when pendingAction is set */}
-          <View style={pendingAction ? styles.confirmRow : { display: 'none' as any }}>
+          <View style={pendingAction ? styles.confirmRow : styles.hidden}>
             <Text style={styles.confirmText}>
               {pendingAction === 'reset'
                 ? 'Wipe all positions? Cannot be undone.'
@@ -410,7 +410,7 @@ export default function PortfolioScreen() {
           </View>
 
           {/* Action buttons — always mounted, hidden while confirming or busy */}
-          <View style={pendingAction ? { display: 'none' as any } : undefined}>
+          <View style={pendingAction ? styles.hidden : undefined}>
             <Text style={styles.managePanelLabel}>From date (optional, YYYY-MM-DD)</Text>
             <TextInput
               style={styles.manageDateInput}
@@ -663,6 +663,7 @@ const styles = StyleSheet.create({
   manageBtnDanger: { backgroundColor: '#7f1d1d', borderColor: '#ef4444' },
   manageBtnDisabled: { opacity: 0.5 },
   manageBtnText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  hidden: { display: 'none' as any },
   confirmRow: { gap: 10 },
   confirmText: { color: '#e2e8f0', fontSize: 14, textAlign: 'center' },
   confirmBtns: { flexDirection: 'row', gap: 10 },
