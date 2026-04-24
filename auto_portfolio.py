@@ -154,7 +154,6 @@ def scan_and_add(min_date: str | None = None,
     skipped_cap   = []
     skipped_no_v9c = 0
     files_scanned  = 0
-    adds_this_scan = 0
 
     # Sort oldest-first so chronological order is respected.
     # list_files() returns newest-first; alphabetical sort gives oldest-first
@@ -175,6 +174,11 @@ def scan_and_add(min_date: str | None = None,
             # Normal scan: skip already-processed files
             if fname in processed:
                 continue
+
+        # Per-file cap — without this, recalculate(min_date) would only
+        # ever add MAX_ADDS_PER_SCAN positions across the entire historical
+        # replay, marking every later signal as skipped_cap.
+        adds_this_scan = 0
 
         files_scanned += 1
         file_mode = _mode_from_filename(fname)
