@@ -299,50 +299,65 @@ export default function PortfolioScreen() {
     }
   };
 
-  const handleRecalculate = () => {
-    Alert.alert(
-      'Recalculate Portfolio',
-      `Reset and rescan signals${manageDate ? ` from ${manageDate}` : ' (all time)'}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Recalculate', style: 'destructive', onPress: async () => {
-            setManageBusy(true);
-            try {
-              await recalculatePortfolio(manageDate || undefined);
-              await loadData();
-              setShowManage(false);
-            } catch (e: any) {
-              Alert.alert('Failed', e?.message ?? 'Recalculate failed');
-            }
-            setManageBusy(false);
-          },
-        },
-      ]
-    );
+  // Cross-platform confirm — RN Web's Alert.alert ignores button callbacks
+  const confirm = (title: string, msg: string): Promise<boolean> => {
+    if (Platform.OS === 'web') {
+      // eslint-disable-next-line no-alert
+      return Promise.resolve(window.confirm(`${title}\n\n${msg}`));
+    }
+    return new Promise((resolve) => {
+      Alert.alert(title, msg, [
+        { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'OK', style: 'destructive', onPress: () => resolve(true) },
+      ]);
+    });
   };
 
-  const handleReset = () => {
-    Alert.alert(
-      'Reset Portfolio',
-      'Wipe all positions and history? This cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Reset', style: 'destructive', onPress: async () => {
-            setManageBusy(true);
-            try {
-              await resetPortfolio();
-              await loadData();
-              setShowManage(false);
-            } catch (e: any) {
-              Alert.alert('Failed', e?.message ?? 'Reset failed');
-            }
-            setManageBusy(false);
-          },
-        },
-      ]
+  const showError = (msg: string) => {
+    if (Platform.OS === 'web') window.alert(msg);
+    else Alert.alert('Failed', msg);
+  };
+
+  // Validate YYYY-MM-DD; empty string is allowed (means "all time")
+  const isValidDate = (s: string) => s === '' || /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+  const handleRecalculate = async () => {
+    const date = manageDate.trim();
+    if (!isValidDate(date)) {
+      showError('Date must be YYYY-MM-DD or empty');
+      return;
+    }
+    const ok = await confirm(
+      'Recalculate Portfolio',
+      `Reset and rescan signals${date ? ` from ${date}` : ' (all time)'}?`
     );
+    if (!ok) return;
+    setManageBusy(true);
+    try {
+      await recalculatePortfolio(date || undefined);
+      await loadData();
+      setShowManage(false);
+    } catch (e: any) {
+      showError(e?.message ?? 'Recalculate failed');
+    }
+    setManageBusy(false);
+  };
+
+  const handleReset = async () => {
+    const ok = await confirm(
+      'Reset Portfolio',
+      'Wipe all positions and history? This cannot be undone.'
+    );
+    if (!ok) return;
+    setManageBusy(true);
+    try {
+      await resetPortfolio();
+      await loadData();
+      setShowManage(false);
+    } catch (e: any) {
+      showError(e?.message ?? 'Reset failed');
+    }
+    setManageBusy(false);
   };
 
   const wins = closed.filter(t => (t.pnl || 0) > 0).length;
