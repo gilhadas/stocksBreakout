@@ -513,7 +513,7 @@ def _render_manual_portfolio():
                 'Entry': f"${t['entry_price']:.2f}",
                 'Exit': f"${t['exit_price']:.2f}",
                 'P&L': f"${t['pnl']:+,.0f}",
-                'P&L%': f"{t['pnl_pct']:+.1f}%",
+                'P&L%': f"{t.get('pnl_pct', 0):+.1f}%",
                 'Hold': f"{t['hold_days']}d",
                 'Quality': t['quality'],
                 'Date': t['exit_date'],
@@ -1315,9 +1315,9 @@ def _render_scalping_portfolio():
         winners = [t for t in closed if t.get('pnl', 0) > 0]
         losers  = [t for t in closed if t.get('pnl', 0) <= 0]
         if winners:
-            avg_win = sum(t['pnl_pct'] for t in winners) / len(winners)
+            avg_win = sum(t.get('pnl_pct', 0) for t in winners) / len(winners)
         if losers:
-            avg_loss = sum(t['pnl_pct'] for t in losers) / len(losers)
+            avg_loss = sum(t.get('pnl_pct', 0) for t in losers) / len(losers)
 
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Total P&L", f"${total_pnl:+,.0f}")
