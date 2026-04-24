@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, ActivityIndicator, ScrollView } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { router } from 'expo-router';
-import { login, loginWithEmail, getToken, getGoogleAuthUrl, saveToken } from '../lib/api';
+import { loginWithEmail, getToken, getGoogleAuthUrl, saveToken } from '../lib/api';
 
 export default function LoginScreen() {
   const [password, setPassword] = useState('');
@@ -10,27 +10,14 @@ export default function LoginScreen() {
   const [token, setToken] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState('password'); // 'password' | 'email' | 'token'
+  const [tab, setTab] = useState<'email' | 'token'>('email');
 
-  // Auto-redirect if already logged in
   useEffect(() => {
     getToken().then((t) => {
       if (t) router.replace('/(tabs)');
       else setLoading(false);
     });
   }, []);
-
-  const handlePasswordLogin = async () => {
-    setError('');
-    setLoading(true);
-    try {
-      await login(password);
-      router.replace('/(tabs)');
-    } catch {
-      setError('Invalid password');
-      setLoading(false);
-    }
-  };
 
   const handleEmailLogin = async () => {
     setError('');
@@ -54,7 +41,7 @@ export default function LoginScreen() {
       await WebBrowser.openBrowserAsync(url);
       setTab('token');
       setError('After logging in with Google, paste the token below');
-    } catch (e) {
+    } catch {
       setError('Failed to open browser');
     }
   };
@@ -88,14 +75,7 @@ export default function LoginScreen() {
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      {/* Tab buttons */}
       <View style={styles.tabContainer}>
-        <Pressable
-          style={[styles.tab, tab === 'password' && styles.tabActive]}
-          onPress={() => setTab('password')}
-        >
-          <Text style={styles.tabText}>Password</Text>
-        </Pressable>
         <Pressable
           style={[styles.tab, tab === 'email' && styles.tabActive]}
           onPress={() => setTab('email')}
@@ -110,25 +90,6 @@ export default function LoginScreen() {
         </Pressable>
       </View>
 
-      {/* Password tab */}
-      {tab === 'password' && (
-        <>
-          <TextInput
-            style={styles.input}
-            placeholder="App Password"
-            placeholderTextColor="#555"
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            autoCapitalize="none"
-          />
-          <Pressable style={styles.button} onPress={handlePasswordLogin}>
-            <Text style={styles.buttonText}>Login</Text>
-          </Pressable>
-        </>
-      )}
-
-      {/* Email tab */}
       {tab === 'email' && (
         <>
           <TextInput
@@ -155,18 +116,11 @@ export default function LoginScreen() {
         </>
       )}
 
-      {/* Token tab */}
       {tab === 'token' && (
         <>
-          <Text style={styles.tokenHint}>
-            1. Tap "Google Login" to open browser
-          </Text>
-          <Text style={styles.tokenHint}>
-            2. After authenticating, copy the token from the URL
-          </Text>
-          <Text style={styles.tokenHint}>
-            3. Paste it below
-          </Text>
+          <Text style={styles.tokenHint}>1. Tap "Google Login" to open browser</Text>
+          <Text style={styles.tokenHint}>2. After authenticating, copy the token from the URL</Text>
+          <Text style={styles.tokenHint}>3. Paste it below</Text>
           <Pressable style={styles.button} onPress={handleGoogleLogin}>
             <Text style={styles.buttonText}>🔑 Open Google Login</Text>
           </Pressable>

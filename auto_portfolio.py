@@ -1729,6 +1729,10 @@ def get_summary(data: dict) -> dict:
     total_val  = cash + market_val
     total_pnl  = total_val - data['capital']
 
+    all_dates = [p.get('date_added', '') for p in data.get('positions', [])] + \
+                [t.get('date_added', '') for t in data.get('closed', [])]
+    start_date = min(d for d in all_dates if d) if any(all_dates) else None
+
     return {
         'capital':      data['capital'],
         'cash':         round(cash, 2),
@@ -1741,6 +1745,7 @@ def get_summary(data: dict) -> dict:
         'open_count':   len(data['positions']),
         'closed_count': len(data['closed']),
         'win_count':    sum(1 for t in data['closed'] if t.get('pnl', 0) > 0),
+        'start_date':   start_date,
     }
 
 

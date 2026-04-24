@@ -11,6 +11,7 @@ interface Summary {
   open_count: number;
   closed_count: number;
   win_count: number;
+  start_date?: string | null;
 }
 
 export default function SummaryBar({ summary }: { summary: Summary }) {
@@ -31,6 +32,7 @@ export default function SummaryBar({ summary }: { summary: Summary }) {
         <Stat label="Closed" value={`${summary.closed_count}`} />
         <Stat label="Win Rate" value={`${winRate}%`} />
         <Stat label="Realized" value={`$${summary.realized.toFixed(0)}`} color={summary.realized >= 0 ? '#22c55e' : '#ef4444'} />
+        {summary.start_date ? <Stat label="Since" value={summary.start_date} /> : null}
       </View>
     </View>
   );
