@@ -382,13 +382,17 @@ export default function PortfolioScreen() {
             History ({closed.length})
           </Text>
         </Pressable>
-        <Pressable
-          style={[styles.tabBtn, showManage && styles.tabBtnActive]}
-          onPress={() => setShowManage((v) => !v)}
-        >
-          <Text style={[styles.tabBtnText, showManage && styles.tabBtnTextActive]}>⚙</Text>
-        </Pressable>
       </View>
+
+      {/* Manage Portfolio toggle */}
+      <Pressable
+        style={[styles.manageToggleBtn, showManage && styles.manageToggleBtnActive]}
+        onPress={() => setShowManage((v) => !v)}
+      >
+        <Text style={styles.manageToggleBtnText}>
+          {showManage ? '✕ Close' : '⚙ Manage Portfolio'}
+        </Text>
+      </Pressable>
 
       {/* Manage Portfolio panel */}
       {showManage && (
@@ -620,6 +624,13 @@ const styles = StyleSheet.create({
   skippedCol: { flex: 1, alignItems: 'center' },
   skippedColLabel: { color: '#555', fontSize: 10, marginBottom: 2 },
   skippedColValue: { color: '#ccc', fontSize: 12, fontWeight: '600' },
+
+  manageToggleBtn: {
+    marginHorizontal: 12, marginBottom: 6, paddingVertical: 8, borderRadius: 8,
+    backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#374151', alignItems: 'center',
+  },
+  manageToggleBtnActive: { borderColor: '#6366f1', backgroundColor: '#2d2b55' },
+  manageToggleBtnText: { color: '#9ca3af', fontSize: 13, fontWeight: '600' },
 
   managePanel: {
     backgroundColor: '#16213e', borderRadius: 10, marginHorizontal: 12, marginBottom: 8,

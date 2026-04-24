@@ -25,9 +25,17 @@ from api.push_registry import register_token
 
 
 def _clean(obj):
-    """Recursively replace nan/inf floats with None so JSON serialization never fails."""
+    """Recursively coerce numpy/pandas scalars and nan/inf floats for JSON serialization."""
+    import numpy as np
     if isinstance(obj, float):
         return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, (np.floating,)):
+        v = float(obj)
+        return None if (math.isnan(v) or math.isinf(v)) else v
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
     if isinstance(obj, dict):
         return {k: _clean(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -543,7 +551,7 @@ def portfolio_recalculate_endpoint(
     summary = ap.get_summary(result["data"])
     summary["files_scanned"] = result.get("files_scanned", 0)
     summary["added"] = result.get("added", 0)
-    return summary
+    return _clean(summary)
 
 
 # ── Push Notifications ───────────────────────────────────────────────────────
