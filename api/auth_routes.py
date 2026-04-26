@@ -158,4 +158,5 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
 
     token = create_user_token(user.id, user.email)
     # Redirect to app root with token in query param; the web client stores it
-    return RedirectResponse(f"/?token={token}")
+    # For mobile app, use custom scheme so openAuthSessionAsync can intercept it
+    return RedirectResponse(f"stocksbreakout://oauth-callback?token={token}")

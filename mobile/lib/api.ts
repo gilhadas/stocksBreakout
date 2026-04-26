@@ -95,7 +95,7 @@ export async function loginWithEmail(email: string, password: string) {
 
 export async function getGoogleAuthUrl(): Promise<string> {
   const base = await getBaseUrl();
-  return `${base}/auth/google`;
+  return `${base}/auth/google?client=mobile`;
 }
 
 export function resetPortfolio() {

@@ -37,11 +37,10 @@ export default function LoginScreen() {
     try {
       setLoading(true);
       const url = await getGoogleAuthUrl();
-      // Use openAuthSessionAsync to automatically intercept OAuth redirect
-      const result = await WebBrowser.openAuthSessionAsync(url, 'https://gilhadas-stocks.com/?');
+      // openAuthSessionAsync intercepts the custom scheme redirect
+      const result = await WebBrowser.openAuthSessionAsync(url, 'stocksbreakout://oauth-callback');
 
       if (result.type === 'success' && result.url) {
-        // Extract token from redirect URL
         const urlObj = new URL(result.url);
         const token = urlObj.searchParams.get('token');
         if (token) {
@@ -50,7 +49,7 @@ export default function LoginScreen() {
           return;
         }
       }
-      setError('Google login failed or was cancelled');
+      setError('Google login cancelled or failed');
     } catch (e) {
       setError('Failed to authenticate with Google');
     } finally {
