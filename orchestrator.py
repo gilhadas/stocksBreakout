@@ -482,10 +482,14 @@ class ScannerOrchestrator:
                         # bear_macro: no cascade to BOUNCE/SMA20_CROSS, but allow
                         # continuation detection (it has its own quality checks)
                         if signal is None:
-                            # Try continuation only — skip bounce/sma20_cross in bear macro
+                            # Try continuation + trend_confirm only — skip bounce/sma20_cross in bear macro
                             signal = self.detector.detect_continuation(
                                 df, symbol, mode, timeframe, spy_perf
                             )
+                            if signal is None:
+                                signal = self.detector.detect_trend_confirm(
+                                    df, symbol, mode, timeframe, spy_perf
+                                )
                             return signal
                     elif regime == 'BEARISH':
                         # Short-term pullback: breakouts still allowed, but no BOUNCE/SMA20_CROSS
@@ -493,10 +497,14 @@ class ScannerOrchestrator:
                             # Breakout found — return directly to skip BOUNCE/SMA20_CROSS cascade
                             return signal
                         else:
-                            # No breakout — allow continuation, block BOUNCE/SMA20_CROSS
+                            # No breakout — allow continuation + trend_confirm, block BOUNCE/SMA20_CROSS
                             signal = self.detector.detect_continuation(
                                 df, symbol, mode, timeframe, spy_perf
                             )
+                            if signal is None:
+                                signal = self.detector.detect_trend_confirm(
+                                    df, symbol, mode, timeframe, spy_perf
+                                )
                             return signal
 
                 # If no breakout signal, try alternative detectors (cascade)
@@ -519,6 +527,11 @@ class ScannerOrchestrator:
 
                 if signal is None:
                     signal = self.detector.detect_continuation(
+                        df, symbol, mode, timeframe, spy_perf
+                    )
+
+                if signal is None:
+                    signal = self.detector.detect_trend_confirm(
                         df, symbol, mode, timeframe, spy_perf
                     )
 

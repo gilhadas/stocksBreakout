@@ -8,7 +8,8 @@ import pandas as pd
 import numpy as np
 
 from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, RR_GRADE_SCORES,
-                    BB_TREND_FILTER, WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS)
+                    BB_TREND_FILTER, WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS,
+                    TREND_CONFIRM)
 from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
@@ -1354,6 +1355,189 @@ class BreakoutDetector:
             f"Vol: {streak_vol_ratio:.1f}x | RSI: {rsi:.0f} | {quality}"
         )
 
+        return signal
+
+    def _trend_confirm_gates(self, df: pd.DataFrame, i: int,
+                             sma150: pd.Series, sma50: pd.Series) -> Optional[Dict[str, Any]]:
+        """
+        Score the TREND_CONFIRM gates for the bar at index i. Returns a dict
+        with bool flags G1–G7 and supporting numeric values (ext_pct, vol_ratio,
+        rsi, etc.).  Returns None if i is too early or core data is missing.
+        """
+        if i < 160:
+            return None
+        if pd.isna(sma150.iloc[i]) or pd.isna(sma50.iloc[i]):
+            return None
+        row = df.iloc[i]
+        if pd.isna(row.get('RSI')) or pd.isna(row.get('MACD')) or pd.isna(row.get('MACD_Signal')):
+            return None
+
+        cross_lb = TREND_CONFIRM['sma_cross_lookback']
+        slope_lb = TREND_CONFIRM['sma_slope_lookback']
+        m_lb     = TREND_CONFIRM['macd_cross_lookback']
+
+        # G1: above SMA150
+        g1 = bool(row['close'] > sma150.iloc[i])
+        # G2: SMA150 slope up over slope_lb bars
+        g2 = bool(i >= slope_lb and sma150.iloc[i] > sma150.iloc[i - slope_lb])
+        # G3: fresh SMA150 cross (within cross_lb) OR golden cross active
+        cl_w  = df['close'].iloc[i - cross_lb:i + 1].to_numpy()
+        sm_w  = sma150.iloc[i - cross_lb:i + 1].to_numpy()
+        fresh = bool(((cl_w[:-1] <= sm_w[:-1]) & (cl_w[1:] > sm_w[1:])).any())
+        golden = bool(sma50.iloc[i] > sma150.iloc[i])
+        g3 = fresh or golden
+        # G4: MACD bull cross within m_lb OR persistent (>signal AND rising over 3 bars)
+        m_arr = df['MACD'].iloc[i - m_lb:i + 1].to_numpy()
+        s_arr = df['MACD_Signal'].iloc[i - m_lb:i + 1].to_numpy()
+        m_crossed = bool(((m_arr[:-1] <= s_arr[:-1]) & (m_arr[1:] > s_arr[1:])).any())
+        m_persistent = bool(
+            row['MACD'] > row['MACD_Signal']
+            and i >= 3 and df['MACD'].iloc[i] > df['MACD'].iloc[i - 3]
+        )
+        g4 = m_crossed or m_persistent
+        # G5: RSI in [rsi_min, rsi_max]
+        g5 = bool(TREND_CONFIRM['rsi_min'] <= row['RSI'] <= TREND_CONFIRM['rsi_max'])
+        # G6: volume >= vol_ratio_min × 20-bar avg
+        vol_avg = df['volume'].rolling(20).mean().iloc[i]
+        vol_ratio = float(row['volume'] / vol_avg) if (vol_avg and not pd.isna(vol_avg)) else 0.0
+        g6 = vol_ratio >= TREND_CONFIRM['vol_ratio_min']
+        # G7: not blow-off (price not >ext_max above SMA50)
+        ext_pct = (row['close'] - sma50.iloc[i]) / sma50.iloc[i]
+        g7 = bool(ext_pct < TREND_CONFIRM['blow_off_max'])
+
+        return {
+            'G1': g1, 'G2': g2, 'G3': g3, 'G4': g4, 'G5': g5, 'G6': g6, 'G7': g7,
+            'fresh': fresh, 'golden': golden, 'vol_ratio': vol_ratio,
+            'ext_pct': ext_pct, 'rsi': float(row['RSI']),
+            'score': sum([g1, g2, g3, g4, g5, g6, g7]),
+        }
+
+    def detect_trend_confirm(self, df: pd.DataFrame, symbol: str, mode_name: str,
+                             timeframe: str, spy_perf: float = 0.0,
+                             **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        Detect classical trend-confirmation breakouts.
+
+        Two firing paths:
+
+        Path A (single-day breakout): all 7 gates pass on the latest bar.
+          Quality: GOLD if vol >= vol_ratio_gold AND golden cross; else PREMIUM.
+
+        Path B (mature trend / institutional accumulation): 6+ gates pass on
+          the latest bar AND ≥ persistent_min_days of the last persistent_lookback
+          bars also scored ≥ 6, AND the only allowed missing gates are G2 (slope)
+          and G6 (volume).  Captures mega-cap names that rally on average volume
+          (AMD, NVDA, MU in April 2026).
+          Quality: PREMIUM only (no GOLD — trend matured without a confirming
+          volume spike, slightly lower conviction than Path A).
+
+        Both paths require G1, G3, G4, G5, G7 strictly on the latest bar,
+        plus a minimum 20-day RS vs SPY and a minimum R:R.
+        """
+        if not TREND_CONFIRM.get('enabled'):
+            return None
+        if mode_name not in TREND_CONFIRM.get('enabled_modes', []):
+            return None
+
+        cfg = MODES.get(mode_name, MODES['swing'])
+        if len(df) < 160:
+            return None
+        if 'ATR' not in df.columns:
+            df = calculate_all_indicators(
+                df, cfg['trend_type'], cfg.get('trend_period'), timeframe
+            )
+
+        sma150 = df['Trend_Line']
+        sma50  = df['close'].rolling(50).mean()
+        last   = self._trend_confirm_gates(df, len(df) - 1, sma150, sma50)
+        if last is None:
+            return None
+
+        # Hard prerequisites for any firing: G1, G3, G4, G5, G7 must be True.
+        # G2 (slope) and G6 (volume) may relax under Path B.
+        hard_ok = last['G1'] and last['G3'] and last['G4'] and last['G5'] and last['G7']
+        if not hard_ok:
+            return None
+
+        # Path A: all 7 pass
+        path_a = last['score'] == 7
+
+        # Path B: persistent setup — N of last K bars have score >= 6 AND
+        # the gates that fail today are only among {G2, G6}.
+        path_b = False
+        if not path_a:
+            failing_today = [k for k in ('G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7') if not last[k]]
+            allowed_to_fail = set(failing_today).issubset({'G2', 'G6'})
+            if allowed_to_fail and last['score'] >= 6:
+                lb     = TREND_CONFIRM['persistent_lookback']
+                need   = TREND_CONFIRM['persistent_min_days']
+                qual   = 0
+                for off in range(1, lb + 1):
+                    prev = self._trend_confirm_gates(df, len(df) - 1 - off, sma150, sma50)
+                    if prev and prev['score'] >= 6 and prev['G1'] and prev['G3'] and prev['G7']:
+                        qual += 1
+                path_b = qual >= need
+
+        if not (path_a or path_b):
+            return None
+
+        # RS vs SPY (shared by both paths)
+        rs_lookback = min(20, len(df) - 1)
+        stock_perf = (df['close'].iloc[-1] - df['close'].iloc[-rs_lookback - 1]) / df['close'].iloc[-rs_lookback - 1]
+        if (stock_perf - spy_perf) < TREND_CONFIRM['rs_min']:
+            return None
+
+        # Stop / target / R:R
+        latest = df.iloc[-1]
+        recent_low_5 = float(df['low'].iloc[-5:].min())
+        stop = max(float(sma50.iloc[-1]), recent_low_5) * 0.98
+        risk = float(latest['close']) - stop
+        if risk <= 0:
+            return None
+        target = float(latest['close']) + TREND_CONFIRM['rr_target_mult'] * risk
+        rr = (target - float(latest['close'])) / max(risk, 1e-6)
+        if rr < TREND_CONFIRM['min_rr']:
+            return None
+
+        # Quality
+        if path_a:
+            quality = 'GOLD' if (last['vol_ratio'] >= TREND_CONFIRM['vol_ratio_gold']
+                                 and last['golden']) else 'PREMIUM'
+            path_label = 'A'
+        else:
+            quality = 'PREMIUM'                            # Path B never GOLD
+            path_label = 'B'
+
+        sma150_dist_pct = ((latest['close'] - sma150.iloc[-1]) / sma150.iloc[-1]) * 100
+
+        signal = {
+            'Symbol':    symbol,
+            'Price':     round(float(latest['close']), 2),
+            'Vol':       round(last['vol_ratio'], 2),
+            'Dist':      round(stock_perf * 100, 1),
+            'SMA_Dist%': round(sma150_dist_pct, 1),
+            'Stop':      round(stop, 2),
+            'Target':    round(target, 2),
+            'R:R':       round(rr, 2),
+            'Gap%':      round(last['ext_pct'] * 100, 1),
+            'Mode':      mode_name,
+            'Quality':   quality,
+            'Type':      'TREND_CONFIRM',
+            'RSI':       round(last['rsi'], 1),
+            'GoldenCross': last['golden'],
+            'FreshCross':  last['fresh'],
+            'TC_Path':     path_label,
+            'TC_Score':    last['score'],
+        }
+
+        logger.info(
+            f"📈 TREND_CONFIRM/{path_label} {symbol} @ ${latest['close']:.2f} | "
+            f"score {last['score']}/7 | "
+            f"SMA150 {'fresh' if last['fresh'] else 'sustained'}"
+            f"{', golden' if last['golden'] else ''} | "
+            f"RSI {last['rsi']:.0f} | Vol {last['vol_ratio']:.2f}x | "
+            f"Ext {last['ext_pct']*100:.1f}% | R:R={rr:.2f} | {quality}"
+        )
         return signal
 
     def detect_sma20_cross(self, df: pd.DataFrame, symbol: str, mode_name: str,

@@ -125,7 +125,10 @@ CASH_MANAGEMENT = {
     },
     # ── Diversity Limits ──
     'max_per_sector': 3,             # Max positions in same sector
-    'max_per_mode': 5,               # Max positions in same mode (swing/daytrade/longterm)
+    'max_per_mode': 7,               # Max positions in same mode (swing/daytrade/longterm)
+                                     # Raised from 5 (Apr 2026) — 5×3=15 was binding
+                                     # ahead of cash; 7×3=21 lets more high-conviction
+                                     # signals land while cash naturally caps total.
     'ideal_etf_pct': 0.20,          # Target 20% of positions in ETFs for stability
     'max_single_position_pct': 0.10, # Largest position should not exceed 10% of portfolio value
     # ── 70/30 Risk Balance ──
@@ -158,6 +161,35 @@ MOMENTUM_OVERRIDE = {
 # >= N consecutive trading days. 15 days distinguishes sustained bear markets
 # (2022: 57% of days ≥15d) from brief corrections (2023/2025/2026: <15d).
 BOUNCE_BEAR_GATE = 15
+
+# --- Trend Confirmation Detector ---
+# Catches "rip → continuation" momentum that the consolidation breakout detector
+# misses. Requires fresh SMA150 + MACD + volume + RSI alignment without needing
+# narrow Bollinger Band consolidation. High-conviction-only: GOLD/PREMIUM only.
+# Modes: longterm + swing only — daytrade disabled (intraday MACD is too noisy).
+TREND_CONFIRM = {
+    'enabled':              True,
+    'enabled_modes':        ['longterm', 'swing'],
+    'sma_cross_lookback':   10,    # bars within which SMA150 cross must have happened
+    'sma_slope_lookback':   20,    # bars over which SMA150 slope is measured
+    'macd_cross_lookback':  10,    # bars within which MACD bull cross must have happened
+    'rsi_min':              55,
+    'rsi_max':              72,
+    'vol_ratio_min':        1.2,   # latest bar volume / 20-bar avg (clean breakouts often 1.2-1.5x)
+    'vol_ratio_gold':       1.8,   # bonus: GOLD requires this much (true volume surge)
+    'blow_off_max':         0.20,  # (price − SMA50) / SMA50 must stay below this
+    'rs_min':               0.0,   # 20-day relative strength vs SPY (0 = not lagging)
+    'rr_target_mult':       2.5,   # target = entry + RR × (entry − stop)
+    'min_rr':               2.0,   # reject if computed R:R below this (stop too far)
+    # --- Persistent-setup path (Path B) ---
+    # Mega-cap institutional accumulation often rallies WITHOUT volume spikes
+    # (AMD, NVDA, MU in April 2026 all rallied 5-15 days with vol < 1.2x).
+    # If the trend has been mature for N consecutive days with only vol or
+    # slope missing, fire as PREMIUM (high-conviction by persistence, not by
+    # single-day spike).
+    'persistent_lookback':  5,     # check last N bars
+    'persistent_min_days':  4,     # need this many of N to qualify
+}
 
 # --- Max Hold Period (bars) ---
 MAX_HOLD_BARS = {

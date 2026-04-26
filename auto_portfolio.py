@@ -42,7 +42,7 @@ INITIAL_CAPITAL    = 100_000
 POSITION_SIZE_PCT  = 0.05      # 5% of capital per trade
 MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
-MAX_ADDS_PER_SCAN  = 3         # Max new positions per scan (prevents capital dump)
+MAX_ADDS_PER_SCAN  = 10        # Max new positions admitted per trading day (across all files for that day)
 MAX_PORTFOLIO_ATR_RISK = 0.12  # Max total portfolio risk as ATR% (12% = aggressive)
 
 # ── Price cache (two-level) ───────────────────────────────────────────────────
@@ -200,68 +200,73 @@ def scan_and_add(min_date: str | None = None,
     if not all_fnames:
         return _build_result(added_syms, skipped_dup, skipped_cash, skipped_no_v9c, 0, data)
 
+    # Group files by trading date so we can pool signals across modes (and
+    # across multiple scans of the same day) before applying the per-day cap.
+    # Without pooling, MAX_ADDS_PER_SCAN was a *per-file* cap — when many files
+    # for the same date arrived (swing + longterm + daytrade backfill), the top
+    # 3 from each file got admitted ahead of higher-conviction signals from
+    # sibling files.  Pooling lets the date's globally-best signals win.
+    files_by_date: dict[str, list[str]] = {}
     for fname in all_fnames:
         date_str = _date_from_filename(fname)
-
         if min_date:
-            # Date-filtered scan: re-process any file on or after min_date,
-            # even if it was scanned before. Skip files before min_date entirely.
             if date_str < min_date:
                 continue
         else:
-            # Normal scan: skip already-processed files
             if fname in processed:
                 continue
+        files_by_date.setdefault(date_str, []).append(fname)
 
-        # Per-file cap — without this, recalculate(min_date) would only
-        # ever add MAX_ADDS_PER_SCAN positions across the entire historical
-        # replay, marking every later signal as skipped_cap.
-        adds_this_scan = 0
-
-        files_scanned += 1
-        file_mode = _mode_from_filename(fname)
-
-        df = load_data(f"{_SIGNALS_DIR}/{fname}")
-        if df is None or df.empty:
+    for date_str in sorted(files_by_date.keys()):
+        adds_this_scan = 0                                  # per-day cap
+        date_files = files_by_date[date_str]
+        # Load + filter every file for this date, then concatenate
+        per_file_dfs = []
+        for fname in date_files:
+            files_scanned += 1
+            df_raw = load_data(f"{_SIGNALS_DIR}/{fname}")
+            if df_raw is None or df_raw.empty:
+                processed.add(fname)
+                continue
+            df_raw.columns = [c.strip() for c in df_raw.columns]
+            if 'Symbol' not in df_raw.columns and 'symbol' in df_raw.columns:
+                df_raw = df_raw.rename(columns={'symbol': 'Symbol'})
+            if 'Quality' not in df_raw.columns or 'Symbol' not in df_raw.columns:
+                processed.add(fname)
+                continue
+            # V9-H filter: GOLD or PREMIUM (Minervini bypass for non-breakout types)
+            mask = df_raw['Quality'].isin(['GOLD', 'PREMIUM'])
+            if 'MinerviniScore' in df_raw.columns and 'Type' in df_raw.columns:
+                is_breakout = ~df_raw['Type'].isin(
+                    ['BOUNCE', 'CONTINUATION', 'SMA20_CROSS', 'TREND_CONFIRM']
+                )
+                minervini_ok = (pd.to_numeric(df_raw['MinerviniScore'], errors='coerce')
+                                .fillna(0) >= MIN_MINERVINI)
+                mask = mask & (minervini_ok | ~is_breakout)
+            elif 'MinerviniScore' in df_raw.columns:
+                mask = mask & (pd.to_numeric(df_raw['MinerviniScore'], errors='coerce')
+                               .fillna(0) >= MIN_MINERVINI)
+            df_filtered = df_raw[mask].copy()
+            if df_filtered.empty:
+                skipped_no_v9c += len(df_raw)
+                processed.add(fname)
+                continue
+            df_filtered['_source_file'] = fname
+            df_filtered['_file_mode']   = _mode_from_filename(fname)
+            per_file_dfs.append(df_filtered)
             processed.add(fname)
+
+        if not per_file_dfs:
             continue
+        v9h = pd.concat(per_file_dfs, ignore_index=True)
 
-        # Normalise column names (strip whitespace, handle 'symbol' vs 'Symbol')
-        df.columns = [c.strip() for c in df.columns]
-        if 'Symbol' not in df.columns and 'symbol' in df.columns:
-            df = df.rename(columns={'symbol': 'Symbol'})
-
-        if 'Quality' not in df.columns or 'Symbol' not in df.columns:
-            processed.add(fname)
-            continue
-
-        # V9-H filter: GOLD or PREMIUM
-        # Breakout signals require MinerviniScore >= 7; BOUNCE/CONTINUATION/SMA20_CROSS
-        # don't compute MinerviniScore — rely on orchestrator's V9-H regime gate instead.
-        mask = df['Quality'].isin(['GOLD', 'PREMIUM'])
-        if 'MinerviniScore' in df.columns and 'Type' in df.columns:
-            is_breakout = ~df['Type'].isin(['BOUNCE', 'CONTINUATION', 'SMA20_CROSS'])
-            minervini_ok = (pd.to_numeric(df['MinerviniScore'], errors='coerce')
-                            .fillna(0) >= MIN_MINERVINI)
-            # Breakouts must pass MinerviniScore; non-breakouts are exempt
-            mask = mask & (minervini_ok | ~is_breakout)
-        elif 'MinerviniScore' in df.columns:
-            # No Type column — apply MinerviniScore to all (legacy behavior)
-            mask = mask & (pd.to_numeric(df['MinerviniScore'], errors='coerce')
-                           .fillna(0) >= MIN_MINERVINI)
-        v9h = df[mask]
-
-        if v9h.empty:
-            skipped_no_v9c += len(df)
-            processed.add(fname)
-            continue
-
-        # Sort within each file by priority: GOLD first, then WinProb desc, then R:R desc.
-        # This ensures the daily cap (MAX_ADDS_PER_SCAN) keeps the best signals, not
-        # just whichever happened to appear first alphabetically in the CSV.
+        # Pooled priority sort across all files for this date:
+        # Quality (GOLD first) → WinProb desc → R:R desc → Dist desc (momentum tiebreak).
+        # Without the Dist tiebreak, ties at PREMIUM+R:R=2.5 fell to alphabetical sort,
+        # so AA/ADM/AMX won 4 longterm slots over INTC even though INTC had a stronger
+        # 20-day move.  Dist is computed by every detector (% move from base/streak/20-day).
         sort_cols, sort_asc = [], []
         if 'Quality' in v9h.columns:
-            v9h = v9h.copy()
             v9h['_q_rank'] = v9h['Quality'].map({'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2}).fillna(3)
             sort_cols.append('_q_rank'); sort_asc.append(True)
         if 'WinProb' in v9h.columns:
@@ -270,12 +275,20 @@ def scan_and_add(min_date: str | None = None,
         if 'R:R' in v9h.columns:
             v9h['_rr'] = pd.to_numeric(v9h['R:R'], errors='coerce').fillna(0)
             sort_cols.append('_rr'); sort_asc.append(False)
+        if 'Dist' in v9h.columns:
+            v9h['_dist'] = pd.to_numeric(v9h['Dist'], errors='coerce').fillna(-1e9)
+            sort_cols.append('_dist'); sort_asc.append(False)
         if sort_cols:
             v9h = v9h.sort_values(sort_cols, ascending=sort_asc).drop(
-                columns=[c for c in ['_q_rank', '_wp', '_rr'] if c in v9h.columns]
+                columns=[c for c in ['_q_rank', '_wp', '_rr', '_dist'] if c in v9h.columns]
             )
 
+        # Dedup within the date — if the same symbol appears in both swing and
+        # longterm pools, prefer the higher-priority row (already sorted).
+        v9h = v9h.drop_duplicates(subset=['Symbol'], keep='first')
+
         for _, row in v9h.iterrows():
+            file_mode = row.get('_file_mode', 'swing')
             sym = str(row.get('Symbol', '')).strip().upper()
             if not sym or sym == 'NAN':
                 continue
@@ -428,6 +441,7 @@ def scan_and_add(min_date: str | None = None,
                 'cost':            cost,
                 'current_price':   current_price,
                 'sector':          _sector,
+                'type':            str(row.get('Type', '')),
             }
             data['positions'].append(pos_dict)
             open_syms.add(sym)
