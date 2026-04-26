@@ -73,8 +73,10 @@ Summarize our progress, key decisions, and next steps into the CLAUDE.md file.
 
 ## 7. Current Live Config & Backtest Decision Log
 
-### Active Config: V9-C + BOUNCE_BEAR_GATE=15 (added 2026-04-22)
-**Files:** `config.py` — `V9H_REGIME_GATE['enabled'] = False`, `BOUNCE_BEAR_GATE = 15`
+### Active Config: V9-C + BBG15 + Pooled Cap + TREND_CONFIRM Path A (2026-04-26)
+**Files:**
+- `config.py` — `V9H_REGIME_GATE['enabled'] = False`, `BOUNCE_BEAR_GATE = 15`, `TREND_CONFIRM['enabled'] = True`, `TREND_CONFIRM['enabled_paths'] = ['A']`
+- `auto_portfolio.py` — cross-day pooled cap (`MAX_ADDS_PER_SCAN = 10`, date-grouped pooling, Dist tiebreak capped at 25%)
 
 ### Backtest: `backtest_regime_compare.py` — 200 symbols, 5 years (run 2026-04-22)
 Includes RSI Wilder's EMA fix + regime fix + bounce_bear_gate=15.
@@ -96,3 +98,22 @@ Includes RSI Wilder's EMA fix + regime fix + bounce_bear_gate=15.
 - `market_data.get_spy_consec_below_sma200()` — cached per session
 - `orchestrator._scan_symbol()` skips `detect_bounce()` when `RED_MARKET + consec ≥ 15`
 - BOUNCE requires GOLD quality only. No BEARISH block. V9-H gate disabled.
+
+---
+
+### Backtest: 200 symbols, 5 years PREMIUM+ TP→Trail (run 2026-04-26)
+Three-way comparison: OLD (V9-C+BBG15) vs NEW-no-TC (pooled cap) vs NEW+TC (pooled cap + TREND_CONFIRM A+B).
+
+| Config | 5yr Compound | vs OLD |
+|--------|-------------|--------|
+| OLD — V9-C + BBG15, per-file cap | **+109%** | baseline |
+| NEW — pooled cap + Dist tiebreak, no TREND_CONFIRM | **+195%** | **+86 pts** ✓ |
+| NEW — same + TREND_CONFIRM Path A+B | **+171%** | +62 pts |
+| TREND_CONFIRM A+B isolated impact | **−24 pts** | destroys edge |
+
+**Key findings:**
+- **Pooled cap fix is the real winner (+86 pts):** Cross-day signal pooling (group files by date, rank globally by Quality→WinProb→R:R→Dist≤25%→Vol, apply MAX_ADDS_PER_SCAN=10 globally) eliminates the per-file first-3-wins problem that caused 2026-04-06 backlog to cap-skip INTC/AMD/NVDA.
+- **TREND_CONFIRM Path B destroys edge (−24 pts):** Path B (4-of-5 prior bars score ≥6) fires 3.4× more signals in choppy/trending markets (600–900 extra/year in 2023–2025) — turns a sniper into a dragnet. Disabled.
+- **TREND_CONFIRM Path A retained (dormant):** Path A (all 7 gates in single bar) fires ~50–100 signals/year — high-conviction only. Net impact untested but likely neutral; kept active for live capture of textbook SMA150+MACD+RSI+vol breakouts.
+- **Dist tiebreak capped at 25%:** Prevents YPF-style picks (high prior momentum ≠ forward returns). Vol is secondary tiebreaker.
+- **Current best config:** NEW-no-TC (+195%) — if Path A proves noisy, set `TREND_CONFIRM['enabled'] = False`.

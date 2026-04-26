@@ -1459,13 +1459,15 @@ class BreakoutDetector:
         if not hard_ok:
             return None
 
+        enabled_paths = TREND_CONFIRM.get('enabled_paths', ['A', 'B'])
+
         # Path A: all 7 pass
-        path_a = last['score'] == 7
+        path_a = ('A' in enabled_paths) and (last['score'] == 7)
 
         # Path B: persistent setup — N of last K bars have score >= 6 AND
         # the gates that fail today are only among {G2, G6}.
         path_b = False
-        if not path_a:
+        if 'B' in enabled_paths and not path_a:
             failing_today = [k for k in ('G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7') if not last[k]]
             allowed_to_fail = set(failing_today).issubset({'G2', 'G6'})
             if allowed_to_fail and last['score'] >= 6:

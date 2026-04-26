@@ -224,6 +224,18 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
             sig = detector.detect_sma20_cross(df_slice, symbol, mode, '1 day', spy_perf)
         except Exception:
             sig = None
+    if sig:
+        return sig
+
+    # TREND_CONFIRM — final fallback (Apr 2026, commit 0e79c17).  Catches the
+    # SMA150+MACD+RSI+vol momentum pattern that the consolidation breakout
+    # detector misses (INTC/AMD/NVDA/MU April 2026 rally).  Same regime-block
+    # rules as SMA20_CROSS — skip in BEARISH/RED_MARKET to be conservative.
+    if regime not in ('RED_MARKET', 'BEARISH'):
+        try:
+            sig = detector.detect_trend_confirm(df_slice, symbol, mode, '1 day', spy_perf)
+        except Exception:
+            sig = None
     return sig
 
 

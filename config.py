@@ -170,6 +170,8 @@ BOUNCE_BEAR_GATE = 15
 TREND_CONFIRM = {
     'enabled':              True,
     'enabled_modes':        ['longterm', 'swing'],
+    'enabled_paths':        ['A'],       # Path B disabled: fires 3.4× more in choppy markets, dilutes edge.
+                                         # See note in scanner.detect_trend_confirm.
     'sma_cross_lookback':   10,    # bars within which SMA150 cross must have happened
     'sma_slope_lookback':   20,    # bars over which SMA150 slope is measured
     'macd_cross_lookback':  10,    # bars within which MACD bull cross must have happened
