@@ -31,11 +31,20 @@ stat -f %Sm api/server.py auto_portfolio.py
 
 ```bash
 cd mobile
-npx expo export --platform web --output-dir ../api/static
+npx expo export --platform web --output-dir dist
 ```
 
-No server restart needed — FastAPI serves the static bundle directly.
-The update is live immediately after the export finishes.
+Then restart the API server (static mount is initialized at startup):
+
+```bash
+kill $(lsof -ti:8000)
+sleep 3
+# expect 401 (auth-gated), not 404
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8000/portfolio/execute-swap \
+  -H "Content-Type: application/json" -d '{"close_symbol":"X","open_symbol":"Y"}'
+```
+
+Then **hard refresh** the browser (Cmd+Shift+R) to bust cached `index.html`.
 
 ---
 
@@ -107,7 +116,8 @@ curl -s http://127.0.0.1:8000/portfolio/recalculate/status/$JOB \
 |---|---|---|
 | New endpoint returns 404 | Server not restarted after `server.py` edit | `kill $(lsof -ti:8000)` |
 | `AttributeError` on running process | `auto_portfolio.py` changed, server stale | Same as above |
-| Mobile shows old UI | Forgot to re-export | `npx expo export --platform web --output-dir ../api/static` |
+| Mobile shows old UI after export | Browser cached old `index.html` | Hard refresh (Cmd+Shift+R) or clear cache |
+| Mobile export to wrong dir | Exported to `api/static` instead of `mobile/dist` | `cd mobile && npx expo export --platform web --output-dir dist` then restart server |
 | Streamlit shows `KeyError` | Old trade records missing new fields | Add `.get('field', default)` fallback |
 | `ModuleNotFoundError` in Streamlit | Streamlit uses system Python, not venv | `pip install <module>` in system Python |
 | Recalculate slow every time | `entry_price_cache.json` deleted or never written | Check file exists; first run is always slow |
