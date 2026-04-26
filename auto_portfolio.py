@@ -261,10 +261,19 @@ def scan_and_add(min_date: str | None = None,
         v9h = pd.concat(per_file_dfs, ignore_index=True)
 
         # Pooled priority sort across all files for this date:
-        # Quality (GOLD first) → WinProb desc → R:R desc → Dist desc (momentum tiebreak).
-        # Without the Dist tiebreak, ties at PREMIUM+R:R=2.5 fell to alphabetical sort,
-        # so AA/ADM/AMX won 4 longterm slots over INTC even though INTC had a stronger
-        # 20-day move.  Dist is computed by every detector (% move from base/streak/20-day).
+        # Quality (GOLD first) → WinProb desc → R:R desc → Dist desc (capped).
+        #
+        # Dist tiebreak rationale: ties at PREMIUM+R:R=2.5 used to fall to alphabetical
+        # sort (AA/ADM/AMX/APGE won longterm slots over INTC).  Adding Dist promotes
+        # higher-momentum names.
+        #
+        # Cap rationale (YPF problem): pure "highest Dist" picks the most extended
+        # candidate, which is most likely to mean-revert.  Apr 2026 example — YPF
+        # (~+30% prior Dist) won the slot over INTC (+21.8% Dist), then YPF -3% while
+        # INTC +72%.  Capping at TIEBREAK_DIST_CAP makes anything above the cap
+        # tie, then secondary keys decide.  20-25% prior return is "strong but not
+        # parabolic" — the sweet spot for follow-through.
+        TIEBREAK_DIST_CAP = 25.0
         sort_cols, sort_asc = [], []
         if 'Quality' in v9h.columns:
             v9h['_q_rank'] = v9h['Quality'].map({'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2}).fillna(3)
@@ -276,11 +285,17 @@ def scan_and_add(min_date: str | None = None,
             v9h['_rr'] = pd.to_numeric(v9h['R:R'], errors='coerce').fillna(0)
             sort_cols.append('_rr'); sort_asc.append(False)
         if 'Dist' in v9h.columns:
-            v9h['_dist'] = pd.to_numeric(v9h['Dist'], errors='coerce').fillna(-1e9)
+            # Cap Dist before sorting — anything above TIEBREAK_DIST_CAP ties.
+            v9h['_dist'] = (pd.to_numeric(v9h['Dist'], errors='coerce')
+                            .fillna(-1e9).clip(upper=TIEBREAK_DIST_CAP))
             sort_cols.append('_dist'); sort_asc.append(False)
+        # Vol_Ratio as final tiebreak — institutional confirmation when Dist ties.
+        if 'Vol' in v9h.columns:
+            v9h['_vol'] = pd.to_numeric(v9h['Vol'], errors='coerce').fillna(0)
+            sort_cols.append('_vol'); sort_asc.append(False)
         if sort_cols:
             v9h = v9h.sort_values(sort_cols, ascending=sort_asc).drop(
-                columns=[c for c in ['_q_rank', '_wp', '_rr', '_dist'] if c in v9h.columns]
+                columns=[c for c in ['_q_rank', '_wp', '_rr', '_dist', '_vol'] if c in v9h.columns]
             )
 
         # Dedup within the date — if the same symbol appears in both swing and
