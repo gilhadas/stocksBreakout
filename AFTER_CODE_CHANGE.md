@@ -26,13 +26,26 @@ stat -f %Sm api/server.py auto_portfolio.py
 
 ---
 
-## 2. Mobile app (Expo web) changes
-**Files:** anything under `mobile/` — `mobile/app/**`, `mobile/lib/api.ts`, `mobile/components/**`, etc.
+## 2. Mobile app (Expo native & web) changes
+**Files:** anything under `mobile/` — `mobile/app/**`, `mobile/lib/api.ts`, `mobile/components/**`, `app.json`
 
-### UI/Logic changes (no export needed)
-For TypeScript/React code changes that don't affect the static web export:
-- Rebuild and push APK to a device / emulator (Expo Go or built binary)
-- Web export (see below) is only needed for `mobile/app/(tabs)/*` and web-specific code
+### Native app changes (`mobile/app/**`, `app.json`)
+Changes to native code or app config require a rebuild and redeploy:
+```bash
+# For development (local emulator / device)
+cd mobile
+npx expo start  # or `expo run:ios` / `expo run:android`
+
+# For production APK/IPA — use EAS build or local eas-cli
+eas build --platform ios --profile production  # or android
+```
+
+If `app.json` changed (e.g., scheme, permissions), the app MUST be rebuilt.
+
+### UI/Logic changes (web only, no rebuild needed)
+For TypeScript/React code in `mobile/app/(tabs)/*` that only affects the web export:
+- Web export (see below) is enough; no native rebuild
+- Works immediately after export + server restart
 
 ### Static web export (for web app)
 ```bash
