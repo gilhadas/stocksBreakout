@@ -57,7 +57,7 @@ async function exportSkippedCSV(rows: any[]) {
   }
 }
 import { useFocusEffect, router } from 'expo-router';
-import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, executeSwap, undoSwap, getToken, clearToken, resetPortfolio, recalculatePortfolio } from '../../lib/api';
+import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, executeSwap, undoSwap, getToken, clearToken, resetPortfolio, recalculatePortfolio, getEmailFromToken } from '../../lib/api';
 import SummaryBar from '../../components/SummaryBar';
 import PositionCard from '../../components/PositionCard';
 
@@ -200,11 +200,13 @@ export default function PortfolioScreen() {
   const [manageDate, setManageDate] = useState('');
   const [manageBusy, setManageBusy] = useState(false);
   const [pendingAction, setPendingAction] = useState<'recalculate' | 'reset' | null>(null);
+  const [userEmail, setUserEmail] = useState('');
 
   const loadData = useCallback(async () => {
     try {
       const token = await getToken();
       if (!token) { router.replace('/login'); return; }
+      getEmailFromToken().then(e => setUserEmail(e));
       const [data, skippedData] = await Promise.all([fetchPortfolio(), fetchSkipped()]);
       setPositions(data.positions || []);
       setClosed(
@@ -389,7 +391,7 @@ export default function PortfolioScreen() {
       {showManage && (
         <View style={styles.managePanel}>
           <Text style={styles.managePanelTitle}>
-            Manage Portfolio{__DEV__ && pendingAction ? ` [${pendingAction}]` : ''}
+            Manage Portfolio{userEmail ? ` · ${userEmail}` : ''}{__DEV__ && pendingAction ? ` [${pendingAction}]` : ''}
           </Text>
 
           {/* Confirmation row — always mounted, shown when pendingAction is set */}

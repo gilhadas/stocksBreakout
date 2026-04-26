@@ -34,6 +34,19 @@ export async function clearToken() {
   await AsyncStorage.removeItem(TOKEN_KEY);
 }
 
+export async function getEmailFromToken(): Promise<string> {
+  const token = await getToken();
+  if (!token) return '';
+  try {
+    const payload = token.split('.')[1];
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const json = JSON.parse(atob(base64));
+    return (json.email as string) || '';
+  } catch {
+    return '';
+  }
+}
+
 async function authFetch(path: string, opts: RequestInit = {}) {
   const base = await getBaseUrl();
   const token = await getToken();
