@@ -29,6 +29,12 @@ stat -f %Sm api/server.py auto_portfolio.py
 ## 2. Mobile app (Expo web) changes
 **Files:** anything under `mobile/` — `mobile/app/**`, `mobile/lib/api.ts`, `mobile/components/**`, etc.
 
+### UI/Logic changes (no export needed)
+For TypeScript/React code changes that don't affect the static web export:
+- Rebuild and push APK to a device / emulator (Expo Go or built binary)
+- Web export (see below) is only needed for `mobile/app/(tabs)/*` and web-specific code
+
+### Static web export (for web app)
 ```bash
 cd mobile
 npx expo export --platform web --output-dir dist
