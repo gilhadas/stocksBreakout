@@ -1054,6 +1054,45 @@ def _build_result(added, dup, cash, no_v9c, files, data):
     }
 
 
+# ── Multi-user scan_and_add ───────────────────────────────────────────────────
+
+def scan_and_add_all_users(min_date: str | None = None,
+                           position_pct: float | None = None) -> dict:
+    """
+    Run scan_and_add for every registered user in the database.
+    Called by cron after each scanner run to keep all portfolios up-to-date
+    without requiring each user to manually trigger recalculate.
+
+    Returns a dict: {email: scan_and_add result} for each user.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    try:
+        from api.database import get_db
+        from api.models import User as _User
+        db = next(get_db())
+        users = db.query(_User).all()
+    except Exception as exc:
+        _log.error(f"scan_and_add_all_users: could not load users from DB: {exc}")
+        # Fall back to default user only
+        return {'default': scan_and_add(min_date=min_date, position_pct=position_pct)}
+
+    results = {}
+    for user in users:
+        try:
+            result = scan_and_add(min_date=min_date, position_pct=position_pct,
+                                  user_id=user.id)
+            added = len(result.get('added', []))
+            _log.info(f"scan_and_add [{user.email}]: {added} position(s) added")
+            results[user.email] = result
+        except Exception as exc:
+            _log.error(f"scan_and_add [{user.email}]: {exc}")
+            results[user.email] = {'error': str(exc)}
+
+    return results
+
+
 # ── Refresh prices & auto-close stops ────────────────────────────────────────
 
 def refresh_prices(user_id: str | None = None) -> dict:
