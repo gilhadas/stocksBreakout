@@ -1078,12 +1078,24 @@ def scan_and_add_all_users(min_date: str | None = None,
         # Fall back to default user only
         return {'default': scan_and_add(min_date=min_date, position_pct=position_pct)}
 
+    from datetime import date as _date
+    today = str(_date.today())
+
     results = {}
     for user in users:
         try:
-            result = scan_and_add(min_date=min_date, position_pct=position_pct,
+            data = load(user_id=user.id)
+            # First-run guard: if user has no processed_files and no positions,
+            # only pick up signals from today onwards to avoid flooding them
+            # with all historical backfill files.
+            user_min_date = min_date
+            if not data.get('processed_files') and not data.get('positions'):
+                user_min_date = today
+                _log.info(f"scan_and_add [{user.email}]: new user — using min_date={today}")
+
+            result = scan_and_add(min_date=user_min_date, position_pct=position_pct,
                                   user_id=user.id)
-            added = len(result.get('added', []))
+            added = result.get('added', 0)
             _log.info(f"scan_and_add [{user.email}]: {added} position(s) added")
             results[user.email] = result
         except Exception as exc:
