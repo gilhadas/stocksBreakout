@@ -265,13 +265,13 @@ function PortfolioBadge({ pf }: { pf: any }) {
   }
   const color = PORTFOLIO_STATUS_COLOR[pf.status] || '#94a3b8';
   const pnlColor = (pf.pnl_pct ?? 0) >= 0 ? '#22c55e' : '#ef4444';
-  const isSell = pf.status === 'SELL' || pf.status === 'CAUTION';
   const icon = pf.status === 'SELL' ? '🚨' : pf.status === 'CAUTION' ? '⚠️' : pf.status === 'TARGET' ? '🎯' : '📈';
+  const label = pf.status === 'SELL' ? 'SELL' : pf.status === 'CAUTION' ? 'NEAR STOP' : pf.status;
   return (
     <View style={[styles.portfolioBanner, { backgroundColor: color + '22', borderColor: color }]}>
       <View style={styles.portfolioBannerHeader}>
         <Text style={[styles.portfolioBannerTitle, { color }]}>
-          {icon} {isSell ? 'SELL SIGNAL' : pf.status} · held in {pf.source}
+          {icon} {label} · held in {pf.source}
         </Text>
         {pf.pnl_pct != null && (
           <Text style={[styles.portfolioPnl, { color: pnlColor }]}>
