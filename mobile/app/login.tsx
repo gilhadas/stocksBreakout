@@ -11,16 +11,6 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Web: Google OAuth redirects back to /?token=... — read it here
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const urlToken = params.get('token');
-      if (urlToken) {
-        window.history.replaceState({}, '', '/');  // remove token from URL
-        saveToken(urlToken).then(() => router.replace('/(tabs)'));
-        return;
-      }
-    }
     getToken().then((t) => {
       if (t) router.replace('/(tabs)');
       else setLoading(false);

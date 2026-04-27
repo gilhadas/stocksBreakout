@@ -160,5 +160,5 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     if client_type == 'mobile':
         # Native app: custom scheme intercepted by openAuthSessionAsync
         return RedirectResponse(f"stocksbreakout://oauth-callback?token={token}")
-    # Web browser: redirect to login page; JS reads ?token= from URL
+    # Web browser: redirect to root with token param; _layout.tsx useEffect catches it
     return RedirectResponse(f"/?token={token}")

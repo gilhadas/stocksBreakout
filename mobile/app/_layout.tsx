@@ -1,9 +1,10 @@
 import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { useFonts } from 'expo-font';
-import { Stack } from 'expo-router';
+import { Stack, router } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import 'react-native-reanimated';
+import { saveToken } from '../lib/api';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -25,6 +26,17 @@ export default function RootLayout() {
   useEffect(() => {
     if (loaded) SplashScreen.hideAsync();
   }, [loaded]);
+
+  // Web OAuth redirect: Google sends back to /?token=... — catch it here before any route mounts
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get('token');
+    if (urlToken) {
+      window.history.replaceState({}, '', '/');
+      saveToken(urlToken).then(() => router.replace('/(tabs)'));
+    }
+  }, []);
 
   if (!loaded) return null;
 
