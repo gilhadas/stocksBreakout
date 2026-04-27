@@ -161,15 +161,15 @@ class Notifier:
             )
     
     def send_email(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
-                   csv_path: Optional[str] = None) -> bool:
+                   csv_path: Optional[str] = None, recipient: Optional[str] = None) -> bool:
         """Send email notification with optional CSV attachment"""
         try:
             config = NOTIFICATIONS['email']
-            
+
             msg = MIMEMultipart('mixed')
             msg['Subject'] = subject
             msg['From'] = config['sender_email']
-            msg['To'] = config['recipient_email']
+            msg['To'] = recipient or config['recipient_email']
             
             # Build email body
             body = f"{message}\n\n"
@@ -493,21 +493,24 @@ class Notifier:
             return False
 
     def send_exit_notification(self, exit_results: List[Dict],
-                               csv_path: Optional[str] = None):
-        """Send notification for exit decisions with optional CSV attachment"""
+                               csv_path: Optional[str] = None,
+                               symbol_to_users: Optional[dict] = None):
+        """Send exit notifications.
+
+        Telegram: one general broadcast with all actionable exits.
+        Email: per-user — each user only receives exits for symbols they hold.
+          If symbol_to_users is not provided, falls back to single recipient email.
+        """
         if not exit_results:
             return
 
-        # Filter for actionable exits
         actionable = [r for r in exit_results if r['Action'] != 'HOLD']
-
         if not actionable:
             return
 
         subject = f"Exit Alerts: {len(actionable)} positions need attention"
         message = f"Exit evaluation completed. {len(actionable)} positions require action:"
 
-        # Format for notification
         formatted = []
         for r in actionable:
             formatted.append({
@@ -520,7 +523,31 @@ class Notifier:
                 'Vol': r.get('VolRatio', 0),
             })
 
-        self.send_all(subject, message, formatted, csv_path=csv_path)
+        # Telegram / Discord / Push — general broadcast
+        if self.telegram_enabled:
+            self.send_telegram(message, formatted)
+        if self.discord_enabled:
+            self.send_discord(subject, message, formatted)
+        if hasattr(self, 'push_enabled') and self.push_enabled:
+            self.send_expo_push(subject, message, formatted)
+
+        # Email — per-user if symbol_to_users provided, else single broadcast
+        if self.email_enabled:
+            if symbol_to_users:
+                # Collect unique users and their actionable symbols
+                user_exits: dict[str, list] = {}  # email -> list of formatted exits
+                for sig in formatted:
+                    for user_info in symbol_to_users.get(sig['Symbol'], []):
+                        email = user_info['email']
+                        user_exits.setdefault(email, []).append(sig)
+                for email, user_sigs in user_exits.items():
+                    user_subject = f"Exit Alert ({len(user_sigs)} position{'s' if len(user_sigs) > 1 else ''})"
+                    user_message = f"{len(user_sigs)} of your position{'s require' if len(user_sigs) > 1 else ' requires'} attention:"
+                    self.send_email(user_subject, user_message, user_sigs,
+                                    csv_path=csv_path, recipient=email)
+                    logger.info(f"Exit email sent to {email} ({len(user_sigs)} symbols)")
+            else:
+                self.send_email(subject, message, formatted, csv_path=csv_path)
 
     def send_monitor_alert(self, alerts: List[Dict], all_positions: List[Dict],
                            portfolio_label: str = "Portfolio"):

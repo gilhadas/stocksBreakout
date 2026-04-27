@@ -768,7 +768,8 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
     return results
 
 
-async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notifier):
+async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notifier,
+                        symbol_to_users: dict | None = None):
     """Execute exit evaluation mode"""
     # Load positions
     positions = get_positions_from_file(args.exit_file)
@@ -852,7 +853,8 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
 
         # Send exit notifications (only new actionable exits)
         if new_exits:
-            notifier.send_exit_notification(exit_results, csv_path=exit_csv_path)
+            notifier.send_exit_notification(exit_results, csv_path=exit_csv_path,
+                                            symbol_to_users=symbol_to_users)
 
             # Record newly notified symbols
             new_symbols = [r['Symbol'] for r in new_exits]
@@ -1824,22 +1826,52 @@ Examples:
             p = Portfolio()
             exit_positions.extend(p.get_positions_as_exit_format())
 
-            # 2. Load from auto_portfolio.json (merge, dedup by symbol)
-            ap_data = auto_portfolio.load()
+            # 2. Load from ALL users' auto_portfolio (dedup by symbol, track per-user)
             existing_symbols = {ep['symbol'] for ep in exit_positions}
-            for pos in ap_data.get('positions', []):
-                if pos['symbol'] not in existing_symbols:
-                    mode = pos.get('mode', 'swing')
-                    exit_positions.append({
-                        'symbol': pos['symbol'],
-                        'mode': mode,
-                        'entry': pos['entry_price'],
-                        'entry_date': pos.get('date_added', ''),
-                        'stop': pos['stop'],
-                        'target': pos['target'],
-                        'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
-                        'quality': pos.get('quality', 'PREMIUM'),
-                    })
+            symbol_to_users: dict[str, list] = {}  # symbol -> [{email, user_id}]
+            try:
+                from api.database import get_db as _get_db
+                from api.models import User as _User
+                _db = next(_get_db())
+                _users = _db.query(_User).all()
+                for _user in _users:
+                    _ap_data = auto_portfolio.load(user_id=_user.id)
+                    for pos in _ap_data.get('positions', []):
+                        sym = pos['symbol']
+                        # Dedup: add to exit list only once
+                        if sym not in existing_symbols:
+                            mode = pos.get('mode', 'swing')
+                            exit_positions.append({
+                                'symbol': sym,
+                                'mode': mode,
+                                'entry': pos['entry_price'],
+                                'entry_date': pos.get('date_added', ''),
+                                'stop': pos['stop'],
+                                'target': pos['target'],
+                                'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
+                                'quality': pos.get('quality', 'PREMIUM'),
+                            })
+                            existing_symbols.add(sym)
+                        symbol_to_users.setdefault(sym, []).append(
+                            {'email': _user.email, 'user_id': _user.id}
+                        )
+            except Exception as _e:
+                logger.warning(f"Multi-user portfolio load failed, falling back to default: {_e}")
+                _ap_data = auto_portfolio.load()
+                for pos in _ap_data.get('positions', []):
+                    if pos['symbol'] not in existing_symbols:
+                        mode = pos.get('mode', 'swing')
+                        exit_positions.append({
+                            'symbol': pos['symbol'],
+                            'mode': mode,
+                            'entry': pos['entry_price'],
+                            'entry_date': pos.get('date_added', ''),
+                            'stop': pos['stop'],
+                            'target': pos['target'],
+                            'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
+                            'quality': pos.get('quality', 'PREMIUM'),
+                        })
+                symbol_to_users = {}
 
             if not exit_positions:
                 logger.info("Portfolio has no open positions — nothing to evaluate")
@@ -1852,7 +1884,8 @@ Examples:
                 writer.writerows(exit_positions)
                 tmp.close()
                 args.exit_file = tmp.name
-                logger.info(f"Loaded {len(exit_positions)} positions from portfolio.json + auto_portfolio.json for exit evaluation")
+                args._symbol_to_users = symbol_to_users  # carried through to run_exit_mode
+                logger.info(f"Loaded {len(exit_positions)} positions across {len(set(u['email'] for v in symbol_to_users.values() for u in v))} users for exit evaluation")
 
         # Determine execution mode
         if getattr(args, 'monitor_auto_portfolio', False) or getattr(args, 'monitor_portfolio', False):
@@ -1870,7 +1903,8 @@ Examples:
             await run_combined_mode(orchestrator, args, notifier)
         elif args.exit_file:
             # Exit evaluation only
-            await run_exit_mode(orchestrator, args, notifier)
+            await run_exit_mode(orchestrator, args, notifier,
+                                symbol_to_users=getattr(args, '_symbol_to_users', None))
         else:
             # Breakout scan only
             await run_scan_mode(orchestrator, args, notifier)
