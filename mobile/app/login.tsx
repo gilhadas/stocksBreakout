@@ -11,6 +11,16 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // Web: Google OAuth redirects back to /?token=... — read it here
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const urlToken = params.get('token');
+      if (urlToken) {
+        window.history.replaceState({}, '', '/');  // remove token from URL
+        saveToken(urlToken).then(() => router.replace('/(tabs)'));
+        return;
+      }
+    }
     getToken().then((t) => {
       if (t) router.replace('/(tabs)');
       else setLoading(false);
@@ -37,9 +47,16 @@ export default function LoginScreen() {
     try {
       setLoading(true);
       const url = await getGoogleAuthUrl();
-      // openAuthSessionAsync intercepts the custom scheme redirect
-      const result = await WebBrowser.openAuthSessionAsync(url, 'stocksbreakout://oauth-callback');
 
+      const { Platform } = require('react-native');
+      if (Platform.OS === 'web') {
+        // Web: full-page redirect — API sends back to /?token= which useEffect catches
+        window.location.href = url;
+        return;
+      }
+
+      // Native: openAuthSessionAsync intercepts the stocksbreakout:// custom scheme
+      const result = await WebBrowser.openAuthSessionAsync(url, 'stocksbreakout://oauth-callback');
       if (result.type === 'success' && result.url) {
         const urlObj = new URL(result.url);
         const token = urlObj.searchParams.get('token');

@@ -95,7 +95,10 @@ export async function loginWithEmail(email: string, password: string) {
 
 export async function getGoogleAuthUrl(): Promise<string> {
   const base = await getBaseUrl();
-  return `${base}/auth/google?client=mobile`;
+  // Platform import is from react-native — 'web' when running as Expo web export
+  const { Platform } = require('react-native');
+  const client = Platform.OS === 'web' ? 'web' : 'mobile';
+  return `${base}/auth/google?client=${client}`;
 }
 
 export function resetPortfolio() {

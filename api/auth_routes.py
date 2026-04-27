@@ -35,7 +35,7 @@ GOOGLE_REDIRECT_URI = os.getenv(
 )
 
 # In-memory CSRF state store (fine for single-process personal tool)
-_oauth_states: dict[str, str] = {}
+_oauth_states: dict[str, str] = {}  # state_token -> client_type ('web' | 'mobile')
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -71,12 +71,12 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 # ── Google OAuth (web browser only) ──────────────────────────────────────────
 
 @router.get("/google")
-def google_redirect():
+def google_redirect(client: str = "web"):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=501, detail="Google OAuth not configured — add GOOGLE_CLIENT_ID to .env")
 
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = state
+    _oauth_states[state] = client  # 'web' or 'mobile'
 
     params = {
         "client_id":     GOOGLE_CLIENT_ID,
@@ -95,7 +95,7 @@ def google_redirect():
 def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     if state not in _oauth_states:
         raise HTTPException(status_code=400, detail="Invalid OAuth state — please try again")
-    del _oauth_states[state]
+    client_type = _oauth_states.pop(state)  # 'web' or 'mobile'
 
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise HTTPException(status_code=501, detail="Google OAuth not configured")
@@ -157,6 +157,8 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     db.refresh(user)
 
     token = create_user_token(user.id, user.email)
-    # Redirect to app root with token in query param; the web client stores it
-    # For mobile app, use custom scheme so openAuthSessionAsync can intercept it
-    return RedirectResponse(f"stocksbreakout://oauth-callback?token={token}")
+    if client_type == 'mobile':
+        # Native app: custom scheme intercepted by openAuthSessionAsync
+        return RedirectResponse(f"stocksbreakout://oauth-callback?token={token}")
+    # Web browser: redirect to login page; JS reads ?token= from URL
+    return RedirectResponse(f"/?token={token}")
