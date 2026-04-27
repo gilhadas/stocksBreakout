@@ -247,7 +247,7 @@ def parse_cron_jobs(cron_file: Path) -> List[CronJob]:
         # Extract command: look for the first Python command
         cmd_match = re.search(r'\$PYTHON_BIN\s+(\S+(?:\s+[\S"]+)*)', rest)
         if cmd_match:
-            command = cmd_match.group(0).replace('$PYTHON_BIN', 'python3')
+            command = cmd_match.group(0).replace('$PYTHON_BIN', sys.executable)
         else:
             # Fallback: capture everything after 'cd $PROJECT_ROOT &&'
             if '&&' in rest:
