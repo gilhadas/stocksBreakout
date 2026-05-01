@@ -1,0 +1,9 @@
+# Minimal dependencies for CI (Tier 1/2 offline tests only).
+# ib_insync is NOT listed — it's stubbed in tests/conftest.py via sys.modules.
+# torch, transformers, streamlit etc. are excluded — not imported by any test file.
+
+pytest>=7.0.0
+pytest-mock>=3.10.0
+numpy>=1.24.0
+pandas>=2.0.0
+python-dotenv>=1.0.0
