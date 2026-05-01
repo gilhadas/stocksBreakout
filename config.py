@@ -193,6 +193,25 @@ TREND_CONFIRM = {
     'persistent_min_days':  4,     # need this many of N to qualify
 }
 
+# --- Selective Mode (high-conviction, ~100 trades/yr) ---
+# Toggleable filter for the auto-portfolio admission stage. When enabled,
+# stacks on top of the existing V9-H Quality+Minervini mask and the cross-day
+# pooled cap. Designed to land at ~2 trades/week by excluding daytrade entirely
+# (5-yr canonical backtest: ≤15-day holds = −2,851% sum PnL @ 10% wr; >15-day
+# holds = +6,438% @ 66% wr — entire +195% edge comes from long holds) and
+# capping daily admissions to 1.
+# See tools/analyze_winning_patterns.py for the supporting evidence.
+SELECTIVE_MODE = {
+    'enabled':                False,                                 # OFF by default; flip to enable
+    'min_quality':            ['GOLD', 'PREMIUM'],                   # drop HIGH/STANDARD
+    'allowed_modes':          ['longterm', 'swing'],                 # daytrade EXCLUDED
+    'allowed_signal_types':   ['BOUNCE', 'CONTINUATION', 'TREND_CONFIRM'],  # SMA20_CROSS dropped (canonical: 10 trades, −30% sum)
+    'min_rr':                 2.0,                                   # conservative (no canonical evidence to tune higher)
+    'min_winprob':            0.55,                                  # only applied when WinProb column present
+    'min_minervini':          7,                                     # match existing baseline
+    'max_adds_per_scan':      2,                                     # dominant volume lever; 2/day × ~50% active days ≈ ~100–130/yr on 200-sym list
+}
+
 # --- Max Hold Period (bars) ---
 MAX_HOLD_BARS = {
     'swing': 30,

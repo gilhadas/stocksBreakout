@@ -247,6 +247,29 @@ def scan_and_add(min_date: str | None = None,
                 mask = mask & (pd.to_numeric(df_raw['MinerviniScore'], errors='coerce')
                                .fillna(0) >= MIN_MINERVINI)
             df_filtered = df_raw[mask].copy()
+
+            # Selective mode: stack a stricter filter on top of V9-H. Drops daytrade
+            # entirely (canonical 5-yr data: ≤15d holds = net loss) plus per-row gates.
+            from config import SELECTIVE_MODE
+            if SELECTIVE_MODE.get('enabled') and not df_filtered.empty:
+                sm = SELECTIVE_MODE
+                file_mode = _mode_from_filename(fname)
+                if file_mode not in sm['allowed_modes']:
+                    df_filtered = df_filtered.iloc[0:0]
+                else:
+                    sel = pd.Series(True, index=df_filtered.index)
+                    if 'Quality' in df_filtered.columns:
+                        sel &= df_filtered['Quality'].isin(sm['min_quality'])
+                    if 'Type' in df_filtered.columns:
+                        sel &= df_filtered['Type'].isin(sm['allowed_signal_types'])
+                    if 'R:R' in df_filtered.columns:
+                        sel &= pd.to_numeric(df_filtered['R:R'], errors='coerce').fillna(0) >= sm['min_rr']
+                    if 'WinProb' in df_filtered.columns:
+                        sel &= pd.to_numeric(df_filtered['WinProb'], errors='coerce').fillna(0) >= sm['min_winprob']
+                    if 'MinerviniScore' in df_filtered.columns:
+                        sel &= pd.to_numeric(df_filtered['MinerviniScore'], errors='coerce').fillna(0) >= sm['min_minervini']
+                    df_filtered = df_filtered[sel].copy()
+
             if df_filtered.empty:
                 skipped_no_v9c += len(df_raw)
                 processed.add(fname)
@@ -327,7 +350,11 @@ def scan_and_add(min_date: str | None = None,
 
             # Daily deployment cap — prevent all capital spent in one scan.
             # Signals are now sorted by priority above, so we skip the lowest-ranked ones.
-            if adds_this_scan >= MAX_ADDS_PER_SCAN:
+            from config import SELECTIVE_MODE
+            _effective_cap = (SELECTIVE_MODE['max_adds_per_scan']
+                              if SELECTIVE_MODE.get('enabled')
+                              else MAX_ADDS_PER_SCAN)
+            if adds_this_scan >= _effective_cap:
                 entry_price, current_price = _fetch_entry_and_current(sym, date_str, price)
                 if price and entry_price:
                     _sf = _detect_split_factor(sym, date_str)

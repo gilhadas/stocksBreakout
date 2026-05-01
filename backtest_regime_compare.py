@@ -231,7 +231,10 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
     # SMA150+MACD+RSI+vol momentum pattern that the consolidation breakout
     # detector misses (INTC/AMD/NVDA/MU April 2026 rally).  Same regime-block
     # rules as SMA20_CROSS — skip in BEARISH/RED_MARKET to be conservative.
-    if regime not in ('RED_MARKET', 'BEARISH'):
+    # Respects TREND_CONFIRM['enabled'] so that setting it to False in config.py
+    # reproduces the pre-TC baseline (the +195% NEW-no-TC result).
+    from config import TREND_CONFIRM as _TC_CFG
+    if _TC_CFG.get('enabled') and regime not in ('RED_MARKET', 'BEARISH'):
         try:
             sig = detector.detect_trend_confirm(df_slice, symbol, mode, '1 day', spy_perf)
         except Exception:
@@ -377,6 +380,10 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
                         'is_vcp': bool(sig.get('VCP', False)),
                         'checks': sig.get('Checks', {}),
                         'bear_macro': bear_macro,
+                        # Pooled-cap ranking fields (mirrors auto_portfolio.py sort)
+                        'rr':          float(sig.get('R:R', 0) or 0),
+                        'win_prob':    float(sig.get('WinProb', 0) or 0),
+                        'sma_dist_pct': float(sig.get('SMA_Dist%', 0) or 0),
                     })
                     cooldowns[symbol] = sim_date
                     break  # one signal per symbol per day
@@ -401,6 +408,41 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
     return signals
 
 
+# ─── Pooled-cap helper ────────────────────────────────────────────────────────
+# Mirrors auto_portfolio.py's cross-day pooled cap logic:
+#   rank signals within each date by Quality → WinProb → R:R → Dist≤25% → mode
+#   keep top N per day  (N = MAX_ADDS_PER_SCAN = 10 in production)
+# Without this, the backtest enters unlimited positions per day — not what
+# live auto_portfolio.py does, and the source of the +195% irreproducibility.
+
+_QUALITY_RANK = {'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2, 'STANDARD': 3}
+
+
+def _pooled_cap(signals, max_per_day: int = 10):
+    """Return a new signal list with at most *max_per_day* entries per trading
+    day, selected by the same ranking used in auto_portfolio.py."""
+    from collections import defaultdict
+    by_date: dict = defaultdict(list)
+    for s in signals:
+        by_date[pd.Timestamp(s['date']).normalize()].append(s)
+
+    result = []
+    for dt in sorted(by_date.keys()):
+        day_sigs = sorted(
+            by_date[dt],
+            key=lambda s: (
+                _QUALITY_RANK.get(s.get('quality', 'STANDARD'), 9),
+                -float(s.get('win_prob', 0) or 0),       # higher WinProb first
+                -float(s.get('rr', 0) or 0),             # higher R:R first
+                # Dist≤25% preferred; beyond 25% sorted last (YPF-style filter)
+                0 if float(s.get('sma_dist_pct', 0) or 0) <= 25 else 1,
+                float(s.get('sma_dist_pct', 0) or 0),    # closer to trend first
+            ),
+        )
+        result.extend(day_sigs[:max_per_day])
+    return result
+
+
 # ─── Simulation ───────────────────────────────────────────────────────────────
 def simulate(signals, start_date, end_date, end_prices, historical,
              capital=100_000, tp_as_trail=True, label='', regime_sizing=False,
@@ -408,7 +450,8 @@ def simulate(signals, start_date, end_date, end_prices, historical,
              max_positions=0, dd_breaker_pct=0.0,
              bear_macro_mult=1.0, output_dir=None,
              stall_exit=False, stall_sma_period=20,
-             bounce_bear_gate=0):
+             bounce_bear_gate=0,
+             selective_max_per_day=0):
     """
     Simple, self-contained simulation that avoids SimulationMode bugs.
     - Enters at signal price on signal date
@@ -506,6 +549,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                 effective_max_pos = min(3, max_positions)
 
         # --- Enter new positions ---
+        adds_today = 0
         for sig in sig_by_date.get(today_norm, []):
             sym = sig['symbol']
             if sym in open_pos:
@@ -513,6 +557,9 @@ def simulate(signals, start_date, end_date, end_prices, historical,
             # Position cap check
             if len(open_pos) >= effective_max_pos:
                 break  # no more room
+            # Selective per-day cap (matches auto_portfolio.py SELECTIVE_MODE['max_adds_per_scan'])
+            if selective_max_per_day > 0 and adds_today >= selective_max_per_day:
+                break
             # Bounce-bear gate: skip BOUNCE in RED_MARKET during sustained bear
             if (bounce_bear_gate > 0
                     and sig.get('type') == 'BOUNCE'
@@ -555,6 +602,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                 'quality': sig.get('quality', ''), 'regime': sig.get('regime', ''),
                 'signal_type': sig.get('type', ''),
             }
+            adds_today += 1
 
         # --- Check exits ---
         for sym, pos in list(open_pos.items()):
@@ -780,7 +828,7 @@ def section_header():
 # ─── Run one year period ───────────────────────────────────────────────────────
 def run_year(year, symbols, watchlist_path, limit, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
-             bounce_bear_gate=0):
+             bounce_bear_gate=0, selective=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -811,6 +859,15 @@ def run_year(year, symbols, watchlist_path, limit, capital,
                         or s.get('type') in ('SMA20_CROSS', 'BOUNCE', 'CONTINUATION', 'Momentum'))]
     print(f"  V9-C filter: {len(v9c_signals)} signals (from {len(old_signals)} total)")
 
+    # Selective filter: drop SMA20_CROSS/Momentum types (canonical 5-yr data shows
+    # SMA20_CROSS = 10 trades / -30% sum; Momentum = 1 trade). BOUNCE/CONTINUATION/
+    # TREND_CONFIRM kept. Daytrade is already excluded — modes=['swing','longterm'].
+    if selective:
+        keep = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
+        before = len(v9c_signals)
+        v9c_signals = [s for s in v9c_signals if s.get('type') in keep]
+        print(f"  [SELECTIVE] drop SMA20_CROSS/Momentum: {before} → {len(v9c_signals)} signals")
+
     # ── NEW config signals ─────────────────────────────────────────────────
     print(f"\n[NEW CONFIG — Regime-Adaptive]")
     new_signals = run_scan(historical, start, end, modes, config='new')
@@ -831,7 +888,8 @@ def run_year(year, symbols, watchlist_path, limit, capital,
 
     output_dir = 'scanner_output/backtests' if trades_log else None
     sim_kw = dict(slippage_pct=slippage_pct, commission=commission, output_dir=output_dir,
-                  bounce_bear_gate=bounce_bear_gate)
+                  bounce_bear_gate=bounce_bear_gate,
+                  selective_max_per_day=(2 if selective else 0))
 
     # OLD V9-C (best previous)
     rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
@@ -843,10 +901,27 @@ def run_year(year, symbols, watchlist_path, limit, capital,
                    tp_as_trail=True, label='OLD V9-C RegimeSized', regime_sizing=True, **sim_kw)
     print_report(rpt, f'OLD V9-C  PREMIUM+ TP→Trail + RegimeSizing', len(v9c_signals), spy_info)
 
-    # NEW PREMIUM+
+    # NEW PREMIUM+ (unlimited — legacy baseline)
     rpt = simulate(new_premium, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label='NEW PREMIUM+', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ TP→Trail', len(new_premium), spy_info)
+
+    # NEW PREMIUM+ pooled-cap=10 — mirrors auto_portfolio.py MAX_ADDS_PER_SCAN=10
+    # This is the config that produced the documented +195% 5yr compound.
+    # Requires --no-tc (TREND_CONFIRM disabled) + --bounce-bear-gate 15 to reproduce.
+    new_premium_pooled = _pooled_cap(new_premium, max_per_day=10)
+    rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='NEW PREMIUM+ pooled-10', **sim_kw)
+    print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap=10 ★', len(new_premium_pooled), spy_info)
+
+    # SELECTIVE NEW — drop SMA20_CROSS/Momentum + cap 2/day (matches SELECTIVE_MODE config)
+    # Baseline for comparing SELECTIVE_MODE against the current best NEW-no-TC config
+    _sel_types = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
+    selective_new = [s for s in new_premium if s.get('type') in _sel_types]
+    rpt = simulate(selective_new, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='SELECTIVE_NEW',
+                   **{**sim_kw, 'selective_max_per_day': 2})
+    print_report(rpt, f'SELECTIVE NEW  PREMIUM+ no-SMA20X cap=2/day', len(selective_new), spy_info)
 
     # NEW HIGH+
     rpt = simulate(new_all, start, end, end_prices, historical, capital,
@@ -1197,12 +1272,19 @@ def parse_args():
     p.add_argument('--trades-log',  action='store_true',       help='Write per-trade CSV logs to scanner_output/backtests/')
     p.add_argument('--stall-exit',       action='store_true', help='Add stall-exit comparison section (SMA20 crossunder replaces MaxHold)')
     p.add_argument('--bounce-bear-gate', type=int, default=0, help='Block BOUNCE+RED_MARKET when SPY below SMA200 >= N consecutive days (0=off, suggested 15)')
+    p.add_argument('--selective', action='store_true', help='Enable SELECTIVE_MODE: drop SMA20_CROSS/Momentum + cap at 1 admission/day (~100 trades/yr target)')
+    p.add_argument('--no-tc',    action='store_true', help='Disable TREND_CONFIRM in collect_signals_new (reproduces pre-TC +195%% baseline)')
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     years = [int(y.strip()) for y in args.years.split(',')]
+
+    if args.no_tc:
+        import config as _cfg
+        _cfg.TREND_CONFIRM['enabled'] = False
+        print("⚠  --no-tc: TREND_CONFIRM disabled for this run (reproducing NEW-no-TC baseline)")
 
     print("=" * 80)
     print("REGIME-AWARE BACKTEST: OLD CONFIG (V9-C) vs NEW CONFIG")
@@ -1221,7 +1303,8 @@ def main():
         run_year(year, symbols, args.watchlist, args.limit, args.capital,
                  slippage_pct=args.slippage, commission=args.commission,
                  trades_log=args.trades_log, compare_stall=args.stall_exit,
-                 bounce_bear_gate=args.bounce_bear_gate)
+                 bounce_bear_gate=args.bounce_bear_gate,
+                 selective=args.selective)
 
     print(f"\n{'='*80}")
     print("BACKTEST COMPLETE")
