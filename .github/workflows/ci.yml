@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Unit & Mock Tests (Tier 1/2)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Tier 1/2 tests (no IB, no S3)
+        run: |
+          pytest tests/ -m "not tier3" -v --tb=short --no-header
+        env:
+          # Prevent any accidental real API calls in CI
+          IB_HOST: "127.0.0.1"
+          IB_PORT: "7497"
