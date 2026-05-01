@@ -908,12 +908,21 @@ def run_year(year, symbols, watchlist_path, limit, capital,
 
     # NEW PREMIUM+ pooled-cap — mirrors auto_portfolio.py MAX_ADDS_PER_SCAN logic.
     # Default pooled_cap=10 reproduces the documented +195% 5yr compound.
-    # Pass --pooled-cap 2 to test the selective-cap ablation hypothesis.
     # Requires --no-tc + --bounce-bear-gate 15 to reproduce the +195% baseline.
     new_premium_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap)
     rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info)
+
+    # Ablation row — always emitted alongside the champion for direct comparison.
+    # cap=2: hypothesis that a tighter daily gate keeps only the highest-conviction
+    # setups and improves Sharpe without destroying total return.
+    # If pooled_cap is already 2 this row is skipped (redundant).
+    if pooled_cap != 2:
+        new_premium_cap2 = _pooled_cap(new_premium, max_per_day=2)
+        rpt = simulate(new_premium_cap2, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='NEW PREMIUM+ pooled-2', **sim_kw)
+        print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap=2  ★★', len(new_premium_cap2), spy_info)
 
     # SELECTIVE NEW — drop SMA20_CROSS/Momentum + cap 2/day (matches SELECTIVE_MODE config)
     # Baseline for comparing SELECTIVE_MODE against the current best NEW-no-TC config
