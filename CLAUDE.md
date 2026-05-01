@@ -117,3 +117,79 @@ Three-way comparison: OLD (V9-C+BBG15) vs NEW-no-TC (pooled cap) vs NEW+TC (pool
 - **TREND_CONFIRM Path A retained (dormant):** Path A (all 7 gates in single bar) fires ~50–100 signals/year — high-conviction only. Net impact untested but likely neutral; kept active for live capture of textbook SMA150+MACD+RSI+vol breakouts.
 - **Dist tiebreak capped at 25%:** Prevents YPF-style picks (high prior momentum ≠ forward returns). Vol is secondary tiebreaker.
 - **Current best config:** NEW-no-TC (+195%) — if Path A proves noisy, set `TREND_CONFIRM['enabled'] = False`.
+
+---
+
+## 8. Ablation Experiment: Pooled-Cap & Selective-Mode Isolation (2026-05-01)
+
+### Why This Exists
+The +195% 5yr compound edge lives almost entirely in **>15-day holds (66% WR)**.
+Short holds (≤15d) show ~10% WR and drag performance. Before tightening the cap
+or adding signal-type filters, each lever must be tested **independently**.
+
+Daytrade was **never** in the backtest (`modes=['swing','longterm']` hardcoded) —
+SELECTIVE_MODE's daytrade exclusion has zero effect on backtest results.
+SELECTIVE_MODE itself is not wired into `backtest_regime_compare.py`; it lives
+in `auto_portfolio.py` only. The `--pooled-cap` CLI flag is the correct lever.
+
+### Experiment Matrix
+
+| Run | CLI Flags | What It Isolates |
+|-----|-----------|-----------------|
+| A — Baseline | *(none)* | Current champion; reference anchor |
+| B — Cap only | `--pooled-cap 2` | Does tighter cap cut losers without cutting winners? |
+| C — Filter only | `--selective --pooled-cap 10` | Does signal-type gating alone improve hold duration? |
+| D — Both | `--selective --pooled-cap 2` | Compound effect |
+
+### Commands
+
+```bash
+# Prerequisite: regression tests must be green before interpreting results
+pytest tests/test_backtest_pooled_cap.py -v
+
+# A — Baseline (current champion)
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15
+
+# B — Cap only
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --pooled-cap 2
+
+# C — Filter only
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --selective --pooled-cap 10
+
+# D — Both
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --selective --pooled-cap 2
+```
+
+### Diagnostic Metrics (record per year, per run)
+
+| Metric | Role |
+|--------|------|
+| Total return % | Primary outcome — north star |
+| **Sharpe ratio** | **Key diagnostic** — integrates return and volatility; best predictor of forward total return in this momentum system |
+| Max drawdown % | Risk guardrail — not an optimization target |
+| Hold ≤15d: count + WR% | Must shrink in B/C/D if the lever is working |
+| Hold >15d: count + WR% | Must NOT shrink — this is the entire edge |
+
+### How to Interpret
+
+1. **Sharpe is the arbiter.** WR and return can diverge; Sharpe integrates both.
+2. **Hold-duration split is the litmus test.** If Run B raises the >15d share without shrinking >15d count, the cap is effective. If Run B raises WR but total return drops, it is over-filtering.
+3. **Regression gate is mandatory.** `tests/test_backtest_pooled_cap.py` must be green before any run result is treated as valid.
+
+### Decision Rules
+
+| Outcome | Action |
+|---------|--------|
+| D Sharpe > A by ≥ 0.10 | Ship `--selective` + lower default cap |
+| D Sharpe within ± 0.05 of A | Keep current champion; close experiment |
+| Any run: >15d WR drops vs A | Halt — the edge is being destroyed |
+
+### Results Log
+*(To be filled after runs complete)*
+
+| Run | 5yr Return | Sharpe | Max DD | Hold >15d WR% |
+|-----|-----------|--------|--------|--------------|
+| A — Baseline | +195% | — | — | — |
+| B — Cap=2 | TBD | TBD | TBD | TBD |
+| C — Filter only | TBD | TBD | TBD | TBD |
+| D — Both | TBD | TBD | TBD | TBD |

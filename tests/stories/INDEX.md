@@ -39,6 +39,12 @@ Before certain stories can be implemented:
 3. **EPIC-API-001 prereq:** Add `GET /healthz` endpoint to `api/server.py` (5 lines).
 4. **EPIC-SCAN-001 prereq:** Verify `_classify_quality()` and `_check_volume_expansion()` are extractable methods (not inlined in `detect()`).
 
+## Sprint 2b — Backtest Integrity
+
+| Story | Module | Title | Test File | Status |
+|-------|--------|-------|-----------|--------|
+| [EPIC-ABLATION-001](EPIC-ABLATION-001.md) | `backtest_regime_compare.py` | _pooled_cap() regression + --pooled-cap CLI wire-through | `test_backtest_pooled_cap.py` | ✅ DONE |
+
 ## Sprint 3 Backlog (Stories TBD)
 
 | Module | Epic | Sprint |

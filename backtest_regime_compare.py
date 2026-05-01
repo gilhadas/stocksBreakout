@@ -828,7 +828,7 @@ def section_header():
 # ─── Run one year period ───────────────────────────────────────────────────────
 def run_year(year, symbols, watchlist_path, limit, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
-             bounce_bear_gate=0, selective=False):
+             bounce_bear_gate=0, selective=False, pooled_cap=10):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -906,13 +906,14 @@ def run_year(year, symbols, watchlist_path, limit, capital,
                    tp_as_trail=True, label='NEW PREMIUM+', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ TP→Trail', len(new_premium), spy_info)
 
-    # NEW PREMIUM+ pooled-cap=10 — mirrors auto_portfolio.py MAX_ADDS_PER_SCAN=10
-    # This is the config that produced the documented +195% 5yr compound.
-    # Requires --no-tc (TREND_CONFIRM disabled) + --bounce-bear-gate 15 to reproduce.
-    new_premium_pooled = _pooled_cap(new_premium, max_per_day=10)
+    # NEW PREMIUM+ pooled-cap — mirrors auto_portfolio.py MAX_ADDS_PER_SCAN logic.
+    # Default pooled_cap=10 reproduces the documented +195% 5yr compound.
+    # Pass --pooled-cap 2 to test the selective-cap ablation hypothesis.
+    # Requires --no-tc + --bounce-bear-gate 15 to reproduce the +195% baseline.
+    new_premium_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap)
     rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='NEW PREMIUM+ pooled-10', **sim_kw)
-    print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap=10 ★', len(new_premium_pooled), spy_info)
+                   tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}', **sim_kw)
+    print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info)
 
     # SELECTIVE NEW — drop SMA20_CROSS/Momentum + cap 2/day (matches SELECTIVE_MODE config)
     # Baseline for comparing SELECTIVE_MODE against the current best NEW-no-TC config
@@ -1273,7 +1274,10 @@ def parse_args():
     p.add_argument('--stall-exit',       action='store_true', help='Add stall-exit comparison section (SMA20 crossunder replaces MaxHold)')
     p.add_argument('--bounce-bear-gate', type=int, default=0, help='Block BOUNCE+RED_MARKET when SPY below SMA200 >= N consecutive days (0=off, suggested 15)')
     p.add_argument('--selective', action='store_true', help='Enable SELECTIVE_MODE: drop SMA20_CROSS/Momentum + cap at 1 admission/day (~100 trades/yr target)')
-    p.add_argument('--no-tc',    action='store_true', help='Disable TREND_CONFIRM in collect_signals_new (reproduces pre-TC +195%% baseline)')
+    p.add_argument('--no-tc',      action='store_true', help='Disable TREND_CONFIRM in collect_signals_new (reproduces pre-TC +195%% baseline)')
+    p.add_argument('--pooled-cap', type=int, default=10,
+                   help='Max signals per day in pooled-cap★ row (default: 10). '
+                        'Use 2 for the selective-cap ablation experiment.')
     return p.parse_args()
 
 
@@ -1304,7 +1308,8 @@ def main():
                  slippage_pct=args.slippage, commission=args.commission,
                  trades_log=args.trades_log, compare_stall=args.stall_exit,
                  bounce_bear_gate=args.bounce_bear_gate,
-                 selective=args.selective)
+                 selective=args.selective,
+                 pooled_cap=args.pooled_cap)
 
     print(f"\n{'='*80}")
     print("BACKTEST COMPLETE")
