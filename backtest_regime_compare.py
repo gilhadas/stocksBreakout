@@ -59,7 +59,8 @@ YEAR_TYPE = {
 
 
 # ─── Load symbols ─────────────────────────────────────────────────────────────
-def load_symbols(path=None, limit=0):
+def load_symbols(path=None, limit=0, shuffle=False, seed=42):
+    import random
     paths = [path] if path else [
         'input/optimizer_watch.txt', 'input/watchlist3.txt', 'input/all.txt'
     ]
@@ -68,6 +69,10 @@ def load_symbols(path=None, limit=0):
             raw = Path(p).read_text().splitlines()
             syms = [s.strip().split()[0] for s in raw
                     if s.strip() and not s.startswith('#')]
+            if shuffle:
+                rng = random.Random(seed)
+                rng.shuffle(syms)
+                print(f"  Shuffled with seed={seed}")
             if limit:
                 syms = syms[:limit]
             print(f"  Loaded {len(syms)} symbols from {p}")
@@ -1287,6 +1292,12 @@ def parse_args():
     p.add_argument('--pooled-cap', type=int, default=10,
                    help='Max signals per day in pooled-cap★ row (default: 10). '
                         'Use 2 for the selective-cap ablation experiment.')
+    p.add_argument('--shuffle', action='store_true',
+                   help='Shuffle the watchlist before applying --limit (random sample vs first-N). '
+                        'Use --seed to fix the sample for reproducibility.')
+    p.add_argument('--seed',    type=int, default=42,
+                   help='Random seed for --shuffle (default: 42). '
+                        'Same seed always produces the same 200 symbols.')
     return p.parse_args()
 
 
@@ -1307,7 +1318,7 @@ def main():
     print(f"Years: {years}  |  Capital: ${args.capital:,}  |  "
           f"Slippage: {args.slippage*100:.2f}%  Commission: ${args.commission:.2f}/side")
 
-    symbols = load_symbols(args.watchlist, args.limit)
+    symbols = load_symbols(args.watchlist, args.limit, shuffle=args.shuffle, seed=args.seed)
     if not symbols:
         print("No symbols found.")
         return
