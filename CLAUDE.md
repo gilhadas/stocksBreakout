@@ -103,11 +103,12 @@ Includes RSI Wilder's EMA fix + regime fix + bounce_bear_gate=15.
 
 ### Backtest: 200 symbols, 5 years PREMIUM+ TP→Trail (run 2026-04-26)
 Three-way comparison: OLD (V9-C+BBG15) vs NEW-no-TC (pooled cap) vs NEW+TC (pooled cap + TREND_CONFIRM A+B).
+**Note:** The +195% figure used an unrecorded symbol set and a calendar-day exit bug. See corrected baselines below.
 
 | Config | 5yr Compound | vs OLD |
 |--------|-------------|--------|
 | OLD — V9-C + BBG15, per-file cap | **+109%** | baseline |
-| NEW — pooled cap + Dist tiebreak, no TREND_CONFIRM | **+195%** | **+86 pts** ✓ |
+| NEW — pooled cap + Dist tiebreak, no TREND_CONFIRM | **+195%** ⚠ unreprod. | **+86 pts** ✓ |
 | NEW — same + TREND_CONFIRM Path A+B | **+171%** | +62 pts |
 | TREND_CONFIRM A+B isolated impact | **−24 pts** | destroys edge |
 
@@ -116,7 +117,25 @@ Three-way comparison: OLD (V9-C+BBG15) vs NEW-no-TC (pooled cap) vs NEW+TC (pool
 - **TREND_CONFIRM Path B destroys edge (−24 pts):** Path B (4-of-5 prior bars score ≥6) fires 3.4× more signals in choppy/trending markets (600–900 extra/year in 2023–2025) — turns a sniper into a dragnet. Disabled.
 - **TREND_CONFIRM Path A retained (dormant):** Path A (all 7 gates in single bar) fires ~50–100 signals/year — high-conviction only. Net impact untested but likely neutral; kept active for live capture of textbook SMA150+MACD+RSI+vol breakouts.
 - **Dist tiebreak capped at 25%:** Prevents YPF-style picks (high prior momentum ≠ forward returns). Vol is secondary tiebreaker.
-- **Current best config:** NEW-no-TC (+195%) — if Path A proves noisy, set `TREND_CONFIRM['enabled'] = False`.
+- **Current best config:** NEW-no-TC — if Path A proves noisy, set `TREND_CONFIRM['enabled'] = False`.
+
+### Corrected Champion Baselines (2026-05-03, calendar-day exits fixed)
+Bug fixed: `days_held` for MAX_HOLD exit was using trading days (extended hold to ~43 cal days); reverted to calendar days (30 cal days = intended behavior). The +195% figure is not reproducible — it used an unrecorded symbol set.
+
+| Universe | 5yr Compound | Avg Sharpe | Notes |
+|----------|-------------|-----------|-------|
+| `optimizer_watch.txt` (50 curated) | **+136.8%** | **+0.88** | vs SPY +63.4% |
+| `all.txt` (200 random, seed=42) | **~+80%** | ~+0.80 | vs SPY +63.4%; May 1 pre-fix run |
+
+Per-year cap=10 ★ on optimizer_watch.txt:
+
+| Year | Return | Sharpe | >15d WR |
+|------|--------|--------|---------|
+| 2022 | -12.94% | -0.33 | 72 trades @ 73.6% |
+| 2023 | +98.17% | 3.28 | 59 trades @ 78.0% |
+| 2024 | +29.41% | 1.37 | 55 trades @ 67.3% |
+| 2025 | +9.78% | 0.57 | 45 trades @ 71.1% |
+| 2026 | -3.37% | -0.51 | 16 trades @ 75.0% |
 
 ---
 
@@ -184,12 +203,33 @@ python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --selective --po
 | D Sharpe within ± 0.05 of A | Keep current champion; close experiment |
 | Any run: >15d WR drops vs A | Halt — the edge is being destroyed |
 
-### Results Log
-*(To be filled after runs complete)*
+### Results Log — Run 1: all.txt 200 symbols (INVALIDATED)
+~~200 symbols, seed=42, `--no-tc --bounce-bear-gate 15` (run 2026-05-02)~~
+**Invalidated:** run used trading-day exits (bug). Results were -26pts low. See Run 2.
 
-| Run | 5yr Return | Sharpe | Max DD | Hold >15d WR% |
-|-----|-----------|--------|--------|--------------|
-| A — Baseline | +195% | — | — | — |
-| B — Cap=2 | TBD | TBD | TBD | TBD |
-| C — Filter only | TBD | TBD | TBD | TBD |
-| D — Both | TBD | TBD | TBD | TBD |
+### Results Log — Run 2: optimizer_watch.txt 50 symbols (2026-05-03, corrected)
+`optimizer_watch.txt`, `--no-tc --bounce-bear-gate 15`, calendar-day exits (fixed)
+
+| Run | 5yr Compound | Avg Sharpe | Worst DD | Notes |
+|-----|-------------|-----------|---------|-------|
+| A — cap=10 ★ | +136.8% | +0.88 | -29.49% | Reference anchor |
+| B — cap=2 ★★ | +36.7% | +0.42 | -26.17% | -100 pts — collapses on thin 50-stock pool |
+| C — Filter only | not run | — | — | No-op confirmed (D≈B) |
+| D — sel+cap2 | +36.7% | +0.44 | -26.17% | Indistinguishable from B |
+
+Per-year >15d WR (the litmus test):
+
+| Year | A >15d WR | B >15d WR | Delta |
+|------|-----------|-----------|-------|
+| 2022 | 73.6% (72 trades) | 72.7% (33 trades) | -0.9% ✓ sparse but ok |
+| 2023 | 78.0% (59 trades) | 79.2% (48 trades) | +1.2% ✓ |
+| 2024 | 67.3% (55 trades) | 64.1% (39 trades) | -3.2% ⚠ |
+| 2025 | 71.1% (45 trades) | 79.2% (24 trades) | +8.1% ✓ |
+| 2026 | 75.0% (16 trades) | 72.7% (11 trades) | -2.3% ⚠ sparse |
+
+**Verdict: Keep cap=10 champion. Experiment closed.**
+- D Sharpe −0.44 below A → decisively outside ±0.05 rule → keep champion
+- cap=2 destroys 2023 bull-year return (−38 pts) on the 50-stock universe — signal pool too thin
+- >15d WR holds up for A across all years (67–78%); cap=2 produces same or slightly worse WR at fewer trades
+- **Key structural finding:** cap=2 does NOT reduce ≤15d trade share — type mix is unchanged. Short-hold drag requires signal-side filtering, not cap adjustment.
+- **SELECTIVE is a confirmed no-op** on the NEW config path: new_premium is 99%+ BOUNCE type already.

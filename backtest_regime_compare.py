@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-Regime-Aware Backtest: Old Config vs New Config
-================================================
-Compares the last best version (V9-C: V8+TP→Trail, PREMIUM+) against the
-new regime-adaptive config across three market environments:
+Regime-Aware Backtest: V9-C (OLD) vs NEW (Regime-Adaptive) — 5-year ablation harness
+======================================================================================
+Champion config: NEW PREMIUM+ pooled-cap=10, --no-tc, --bounce-bear-gate 15
+Years: 2022 (Bear), 2023 (Bull), 2024 (Bull), 2025 (Mixed), 2026 (YTD)
 
-  2022: Bearish  (SPY -18.1%)
-  2023: Bullish  (SPY +26.3%)
-  2024: Mixed/Bull (SPY +23.3%)
-
-New config changes tested:
-  - SMA20_CROSS: vol >= 2.5 (was 1.8), RSI <48 or 55-68 (was 48-62)
-  - BOUNCE: quality GOLD only for auto-entry (PREMIUM blocked)
-  - Regime gate: RED_MARKET blocks longs, BEARISH blocks SMA20_CROSS,
-                 CHOPPY blocks SMA20_CROSS + BOUNCE non-GOLD
+Ablation axes:
+  --pooled-cap N        Max signals per day via Quality→WinProb→R:R ranking (default 10)
+  --selective           Apply BOUNCE/CONTINUATION/TREND_CONFIRM type-filter to NEW signals
+  --bounce-bear-gate N  Skip BOUNCE+RED_MARKET when SPY >= N consecutive days below SMA200
+  --no-tc               Disable TREND_CONFIRM (reproduces pre-TC +195% baseline)
+  --full-compare        Also run retired V9-H / V9-H2 / V9-H3 / V9-D sections
 
 Usage:
-  python backtest_regime_compare.py
-  python backtest_regime_compare.py --watchlist input/optimizer_watch.txt --years 2022,2023,2024
+  python backtest_regime_compare.py --no-tc --bounce-bear-gate 15
+  python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --pooled-cap 2 --selective --trades-log
 """
 
 import argparse
@@ -36,17 +33,20 @@ except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 from scanner import BreakoutDetector
+from config import TREND_CONFIRM as _TC_CFG
 from yfinance_adapter import YFinanceAdapter
 
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
 logger = logging.getLogger(__name__)
+
+_sharpe_accum: dict[str, list[float]] = {}
 
 # ─── SPY annual returns for reference ─────────────────────────────────────────
 SPY_ANNUAL = {
     '2022': -18.1,
     '2023': +26.3,
     '2024': +23.3,
-    '2025': -5.0,   # approx through Mar 2026
+    '2025': +18.9,  # actual full-year 2025
     '2026': +2.0,   # YTD partial (through Apr 2026)
 }
 YEAR_TYPE = {
@@ -238,7 +238,6 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
     # rules as SMA20_CROSS — skip in BEARISH/RED_MARKET to be conservative.
     # Respects TREND_CONFIRM['enabled'] so that setting it to False in config.py
     # reproduces the pre-TC baseline (the +195% NEW-no-TC result).
-    from config import TREND_CONFIRM as _TC_CFG
     if _TC_CFG.get('enabled') and regime not in ('RED_MARKET', 'BEARISH'):
         try:
             sig = detector.detect_trend_confirm(df_slice, symbol, mode, '1 day', spy_perf)
@@ -448,6 +447,24 @@ def _pooled_cap(signals, max_per_day: int = 10):
     return result
 
 
+
+def _hold_split(trades: list, td_idx: dict) -> dict:
+    """Split trades into <=15 and >15 trading-day hold buckets; return count+WR for each."""
+    result = {}
+    for bucket, pred in [('short', lambda d: d <= 15), ('long', lambda d: d > 15)]:
+        sub = []
+        for t in trades:
+            entry = pd.Timestamp(t['entry_date']).normalize()
+            exit_ = pd.Timestamp(t['exit_date']).normalize()
+            hold_td = td_idx.get(exit_, 0) - td_idx.get(entry, 0)
+            if pred(hold_td):
+                sub.append(t)
+        n = len(sub)
+        wr = sum(1 for t in sub if t.get('win')) / n * 100 if n else float('nan')
+        result[bucket] = {'n': n, 'wr': wr}
+    return result
+
+
 # ─── Simulation ───────────────────────────────────────────────────────────────
 def simulate(signals, start_date, end_date, end_prices, historical,
              capital=100_000, tp_as_trail=True, label='', regime_sizing=False,
@@ -478,11 +495,10 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         print(f"  [{label}] No signals → skip")
         return None
 
-    MAX_HOLD = 60 if stall_exit else 30   # trading days; stall_exit uses 60d as safety cap
+    MAX_HOLD = 60 if stall_exit else 30   # calendar days; stall_exit uses 60d as safety cap
     ATR_TRAIL_MULT = 2.0
     MAX_POS_PCT   = 0.10
     MAX_RISK_PCT  = 0.02
-    QUALITY_MULT  = {'GOLD': 1.0, 'PREMIUM': 1.0, 'HIGH': 1.0, 'STANDARD': 1.0}
     # Only reduce BEARISH (22.2% WR, -3.28% avg P&L, -13.4% P&L share)
     # RED_MARKET = +55.8% P&L share — do NOT cut it
     REGIME_SIZE   = {'EXPANSION': 1.0, 'NORMAL': 1.0, 'CHOPPY': 0.8,
@@ -513,6 +529,8 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         d = pd.Timestamp(s['date']).normalize()
         sig_by_date.setdefault(d, []).append(s)
 
+    td_idx = {pd.Timestamp(d).normalize(): i for i, d in enumerate(trading_days)}
+
     # Pre-compute SPY consecutive days below SMA200 (for bounce_bear_gate)
     spy_consec_below: dict[pd.Timestamp, int] = {}
     if bounce_bear_gate > 0 and spy is not None:
@@ -540,9 +558,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         if dd_breaker_pct > 0 and peak_equity > 0:
             current_dd = current_equity / peak_equity - 1.0
             if current_dd < -dd_breaker_pct:
-                dd_mult = 0.25  # cut to 25% size during drawdown
-            elif current_dd < -dd_breaker_pct * 0.33:
-                dd_mult = 1.0   # recovered within 1/3 of threshold → full size
+                dd_mult = 0.25
             # else stays at 1.0
 
         # --- Dynamic position cap (bear_macro aware) ---
@@ -580,8 +596,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
             risk_per_share = abs(price - stop)
             if risk_per_share <= 0:
                 continue
-            qual = sig.get('quality', 'STANDARD')
-            mult = QUALITY_MULT.get(qual, 1.0)
+            mult = 1.0
             mult *= dd_mult  # apply DD breaker sizing
             if regime_sizing:
                 mult *= REGIME_SIZE.get(sig.get('regime', 'NORMAL'), 1.0)
@@ -788,6 +803,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         'avg_win':       np.mean([t['pnl_pct'] for t in trades if t['win']]) if n_wins else 0,
         'avg_loss':      np.mean([t['pnl_pct'] for t in trades if not t['win']]) if (n_trades-n_wins) else 0,
         'trades':        trades,
+        'td_idx':        td_idx,
     }
 
 
@@ -807,21 +823,32 @@ def spy_benchmark(historical, start_date, end_date, capital=100_000):
 
 
 # ─── Report ───────────────────────────────────────────────────────────────────
-def print_report(report, label, n_signals, spy_info=None):
+def print_report(report, label, n_signals, spy_info=None, show_hold_split=False):
     if report is None:
         print(f"  {label:<42} NO DATA")
         return
-    # mock_trader uses 'total_return' (not 'total_return_pct'), 'max_drawdown' (not '_pct')
-    # win_rate is already a percentage (0-100)
-    ret    = report.get('total_return', report.get('total_return_pct', 0)) or 0
-    sharpe = report.get('sharpe_ratio', 0) or 0
-    dd     = report.get('max_drawdown', report.get('max_drawdown_pct', 0)) or 0
-    wr     = report.get('win_rate', 0) or 0        # already 0-100
+    ret      = report.get('total_return', report.get('total_return_pct', 0)) or 0
+    sharpe   = report.get('sharpe_ratio', 0) or 0
+    dd       = report.get('max_drawdown', report.get('max_drawdown_pct', 0)) or 0
+    wr       = report.get('win_rate', 0) or 0
     n_trades = report.get('total_trades', 0)
     spy_diff = (ret - spy_info['return']) if spy_info else 0
-    spy_str = f"{spy_diff:>+8.2f}%" if spy_info else "     N/A"
+    spy_str  = f"{spy_diff:>+8.2f}%" if spy_info else "     N/A"
     print(f"  {label:<42} {n_signals:>7} {n_trades:>7} {ret:>+9.2f}% {wr:>7.1f}% "
           f"{sharpe:>7.2f} {dd:>+7.2f}%  {spy_str}")
+    if show_hold_split:
+        trades = report.get('trades', [])
+        td_idx = report.get('td_idx', {})
+        if trades and td_idx:
+            split = _hold_split(trades, td_idx)
+            s = split['short']
+            l = split['long']
+            s_wr = f"{s['wr']:.1f}%" if not (isinstance(s['wr'], float) and s['wr'] != s['wr']) else 'N/A'
+            l_wr = f"{l['wr']:.1f}%" if not (isinstance(l['wr'], float) and l['wr'] != l['wr']) else 'N/A'
+            print(f"    {'':42} Hold ≤15d: {s['n']:>4} trades WR={s_wr:<6}  "
+                  f">15d: {l['n']:>4} trades WR={l_wr}")
+    if sharpe != 0:
+        _sharpe_accum.setdefault(label.strip(), []).append(sharpe)
 
 
 def section_header():
@@ -831,9 +858,9 @@ def section_header():
 
 
 # ─── Run one year period ───────────────────────────────────────────────────────
-def run_year(year, symbols, watchlist_path, limit, capital,
+def run_year(year, symbols, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
-             bounce_bear_gate=0, selective=False, pooled_cap=10):
+             bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -881,6 +908,13 @@ def run_year(year, symbols, watchlist_path, limit, capital,
     new_all     = [s for s in new_signals if s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH')]
     print(f"  New PREMIUM+: {len(new_premium)} signals | HIGH+: {len(new_all)}")
 
+    if selective:
+        _sel_keep = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
+        before_new = len(new_premium)
+        new_premium = [s for s in new_premium if s.get('type') in _sel_keep]
+        new_all     = [s for s in new_all     if s.get('type') in _sel_keep]
+        print(f"  [SELECTIVE] NEW filtered: {before_new} → {len(new_premium)} PREMIUM+ signals")
+
     # ── Simulate ──────────────────────────────────────────────────────────
     print(f"\n[RESULTS]")
     section_header()
@@ -893,8 +927,7 @@ def run_year(year, symbols, watchlist_path, limit, capital,
 
     output_dir = 'scanner_output/backtests' if trades_log else None
     sim_kw = dict(slippage_pct=slippage_pct, commission=commission, output_dir=output_dir,
-                  bounce_bear_gate=bounce_bear_gate,
-                  selective_max_per_day=(2 if selective else 0))
+                  bounce_bear_gate=bounce_bear_gate)
 
     # OLD V9-C (best previous)
     rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
@@ -917,7 +950,7 @@ def run_year(year, symbols, watchlist_path, limit, capital,
     new_premium_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap)
     rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}', **sim_kw)
-    print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info)
+    print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info, show_hold_split=True)
 
     # Ablation row — always emitted alongside the champion for direct comparison.
     # cap=2: hypothesis that a tighter daily gate keeps only the highest-conviction
@@ -927,16 +960,20 @@ def run_year(year, symbols, watchlist_path, limit, capital,
         new_premium_cap2 = _pooled_cap(new_premium, max_per_day=2)
         rpt = simulate(new_premium_cap2, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='NEW PREMIUM+ pooled-2', **sim_kw)
-        print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap=2  ★★', len(new_premium_cap2), spy_info)
+        print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap=2  ★★', len(new_premium_cap2), spy_info, show_hold_split=True)
 
-    # SELECTIVE NEW — drop SMA20_CROSS/Momentum + cap 2/day (matches SELECTIVE_MODE config)
-    # Baseline for comparing SELECTIVE_MODE against the current best NEW-no-TC config
-    _sel_types = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
-    selective_new = [s for s in new_premium if s.get('type') in _sel_types]
-    rpt = simulate(selective_new, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='SELECTIVE_NEW',
-                   **{**sim_kw, 'selective_max_per_day': 2})
-    print_report(rpt, f'SELECTIVE NEW  PREMIUM+ no-SMA20X cap=2/day', len(selective_new), spy_info)
+    # SELECTIVE NEW — when --selective is active, new_premium is already filtered;
+    # otherwise compute it here for the standalone comparison row.
+    # Uses _pooled_cap(cap=2) for ranking consistency with the champion row.
+    if not selective:
+        _sel_types = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
+        selective_new = [s for s in new_premium if s.get('type') in _sel_types]
+    else:
+        selective_new = new_premium  # already filtered by Fix 7
+    selective_new_pooled = _pooled_cap(selective_new, max_per_day=2)
+    rpt = simulate(selective_new_pooled, start, end, end_prices, historical, capital,
+                   tp_as_trail=True, label='SELECTIVE_NEW', **sim_kw)
+    print_report(rpt, f'SELECTIVE NEW  PREMIUM+ no-SMA20X pooled-cap=2', len(selective_new_pooled), spy_info, show_hold_split=True)
 
     # NEW HIGH+
     rpt = simulate(new_all, start, end, end_prices, historical, capital,
@@ -965,226 +1002,231 @@ def run_year(year, symbols, watchlist_path, limit, capital,
                              tp_as_trail=True, **sim_kw)
             print_report(rpt_r, f'  ↳ {r}', len(r_signals), spy_info)
 
-    # ── HYBRID config — V9-H ─────────────────────────────────────────────
-    print(f"\n[HYBRID CONFIG — V9-H]")
-    hybrid_signals = run_scan(historical, start, end, modes, config='hybrid')
-    hybrid_premium = [s for s in hybrid_signals if s.get('quality') in ('GOLD', 'PREMIUM')]
-    hybrid_all     = [s for s in hybrid_signals if s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH')]
-    n_bear_macro = sum(1 for s in hybrid_signals if s.get('bear_macro'))
-    n_bull_macro = len(hybrid_signals) - n_bear_macro
-    print(f"  Hybrid PREMIUM+: {len(hybrid_premium)} signals | HIGH+: {len(hybrid_all)}")
-    print(f"  Macro split: {n_bull_macro} BULL_MACRO, {n_bear_macro} BEAR_MACRO signals")
+    if full_compare:
+        # ── HYBRID config — V9-H ─────────────────────────────────────────────
+        print(f"\n[HYBRID CONFIG — V9-H]")
+        hybrid_signals = run_scan(historical, start, end, modes, config='hybrid')
+        hybrid_premium = [s for s in hybrid_signals if s.get('quality') in ('GOLD', 'PREMIUM')]
+        hybrid_all     = [s for s in hybrid_signals if s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH')]
+        n_bear_macro = sum(1 for s in hybrid_signals if s.get('bear_macro'))
+        n_bull_macro = len(hybrid_signals) - n_bear_macro
+        print(f"  Hybrid PREMIUM+: {len(hybrid_premium)} signals | HIGH+: {len(hybrid_all)}")
+        print(f"  Macro split: {n_bull_macro} BULL_MACRO, {n_bear_macro} BEAR_MACRO signals")
 
-    # V9-H Base: hybrid signals, TP→Trail (no caps/breakers)
-    rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H Base', **sim_kw)
-    print_report(rpt, 'V9-H  SMA200+BEARISH Block', len(hybrid_premium), spy_info)
+        # V9-H Base: hybrid signals, TP→Trail (no caps/breakers)
+        rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H Base', **sim_kw)
+        print_report(rpt, 'V9-H  SMA200+BEARISH Block', len(hybrid_premium), spy_info)
 
-    # V9-H + MaxPos: + position cap (8 bull / 3 bear)
-    rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H+Cap', max_positions=8, **sim_kw)
-    print_report(rpt, 'V9-H  + MaxPos=8/3', len(hybrid_premium), spy_info)
+        # V9-H + MaxPos: + position cap (8 bull / 3 bear)
+        rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H+Cap', max_positions=8, **sim_kw)
+        print_report(rpt, 'V9-H  + MaxPos=8/3', len(hybrid_premium), spy_info)
 
-    # V9-H Full: + position cap + DD breaker at 15%
-    rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H Full', max_positions=8,
-                   dd_breaker_pct=0.15, **sim_kw)
-    print_report(rpt, 'V9-H  + MaxPos + DD15%', len(hybrid_premium), spy_info)
+        # V9-H Full: + position cap + DD breaker at 15%
+        rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H Full', max_positions=8,
+                       dd_breaker_pct=0.15, **sim_kw)
+        print_report(rpt, 'V9-H  + MaxPos + DD15%', len(hybrid_premium), spy_info)
 
-    # V9-H HIGH+: broader quality gate
-    rpt = simulate(hybrid_all, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H HIGH+', max_positions=8,
-                   dd_breaker_pct=0.15, **sim_kw)
-    print_report(rpt, 'V9-H  HIGH+ + MaxPos + DD15%', len(hybrid_all), spy_info)
+        # V9-H HIGH+: broader quality gate
+        rpt = simulate(hybrid_all, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H HIGH+', max_positions=8,
+                       dd_breaker_pct=0.15, **sim_kw)
+        print_report(rpt, 'V9-H  HIGH+ + MaxPos + DD15%', len(hybrid_all), spy_info)
 
-    # Regime-specific breakdown (hybrid PREMIUM+)
-    if hybrid_premium:
-        sig_df = pd.DataFrame(hybrid_premium)
-        print(f"\n  V9-H PREMIUM+ by regime:")
-        for r in ['RED_MARKET', 'BEARISH', 'CHOPPY', 'NORMAL', 'EXPANSION']:
-            rsigs = sig_df[sig_df['regime'] == r]
-            if rsigs.empty: continue
-            r_signals = [s for s in hybrid_premium if s.get('regime') == r]
-            rpt_r = simulate(r_signals, start, end, end_prices, historical, capital,
-                             tp_as_trail=True, **sim_kw)
-            print_report(rpt_r, f'  ↳ {r}', len(r_signals), spy_info)
+        # Regime-specific breakdown (hybrid PREMIUM+)
+        if hybrid_premium:
+            sig_df = pd.DataFrame(hybrid_premium)
+            print(f"\n  V9-H PREMIUM+ by regime:")
+            for r in ['RED_MARKET', 'BEARISH', 'CHOPPY', 'NORMAL', 'EXPANSION']:
+                rsigs = sig_df[sig_df['regime'] == r]
+                if rsigs.empty: continue
+                r_signals = [s for s in hybrid_premium if s.get('regime') == r]
+                rpt_r = simulate(r_signals, start, end, end_prices, historical, capital,
+                                 tp_as_trail=True, **sim_kw)
+                print_report(rpt_r, f'  ↳ {r}', len(r_signals), spy_info)
 
-        # Bear/Bull macro breakdown
-        print(f"\n  V9-H by macro regime:")
-        for macro_label, macro_val in [('BULL_MACRO', False), ('BEAR_MACRO', True)]:
-            m_sigs = [s for s in hybrid_premium if s.get('bear_macro') == macro_val]
-            if not m_sigs: continue
-            rpt_m = simulate(m_sigs, start, end, end_prices, historical, capital,
-                             tp_as_trail=True, **sim_kw)
-            print_report(rpt_m, f'  ↳ {macro_label}', len(m_sigs), spy_info)
+            # Bear/Bull macro breakdown
+            print(f"\n  V9-H by macro regime:")
+            for macro_label, macro_val in [('BULL_MACRO', False), ('BEAR_MACRO', True)]:
+                m_sigs = [s for s in hybrid_premium if s.get('bear_macro') == macro_val]
+                if not m_sigs: continue
+                rpt_m = simulate(m_sigs, start, end, end_prices, historical, capital,
+                                 tp_as_trail=True, **sim_kw)
+                print_report(rpt_m, f'  ↳ {macro_label}', len(m_sigs), spy_info)
 
-    # ── V9-H2: V9-C signals + SMA200 kill switch at simulate level ───────
-    # Use SAME V9-C signal pipeline but filter out BEAR_MACRO signals
-    # and add DD breaker + position cap. This preserves V9-C's proven
-    # signal population while adding bear-market protection.
-    print(f"\n[V9-H2 — V9-C signals + SMA200 Defense]")
+        # ── V9-H2: V9-C signals + SMA200 kill switch at simulate level ───────
+        # Use SAME V9-C signal pipeline but filter out BEAR_MACRO signals
+        # and add DD breaker + position cap. This preserves V9-C's proven
+        # signal population while adding bear-market protection.
+        print(f"\n[V9-H2 — V9-C signals + SMA200 Defense]")
 
-    # Tag V9-C signals with bear_macro flag
-    spy_df_raw = historical.get('SPY')
-    v9c_tagged = []
-    for s in v9c_signals:
-        s_copy = dict(s)
-        if spy_df_raw is not None:
-            s_copy['bear_macro'] = is_spy_below_sma200(spy_df_raw, s['date'])
-        else:
-            s_copy['bear_macro'] = False
-        v9c_tagged.append(s_copy)
+        # Tag V9-C signals with bear_macro flag
+        spy_df_raw = historical.get('SPY')
+        v9c_tagged_h2 = []
+        for s in v9c_signals:
+            s_copy = dict(s)
+            if spy_df_raw is not None:
+                s_copy['bear_macro'] = is_spy_below_sma200(spy_df_raw, s['date'])
+            else:
+                s_copy['bear_macro'] = False
+            v9c_tagged_h2.append(s_copy)
 
-    n_bear = sum(1 for s in v9c_tagged if s['bear_macro'])
-    n_bull = len(v9c_tagged) - n_bear
-    v9c_bull_only = [s for s in v9c_tagged if not s['bear_macro']]
-    print(f"  V9-C signals: {len(v9c_tagged)} total | {n_bull} BULL_MACRO, {n_bear} BEAR_MACRO")
-    print(f"  After SMA200 filter: {len(v9c_bull_only)} signals")
+        n_bear = sum(1 for s in v9c_tagged_h2 if s['bear_macro'])
+        n_bull = len(v9c_tagged_h2) - n_bear
+        v9c_bull_only = [s for s in v9c_tagged_h2 if not s['bear_macro']]
+        print(f"  V9-C signals: {len(v9c_tagged_h2)} total | {n_bull} BULL_MACRO, {n_bear} BEAR_MACRO")
+        print(f"  After SMA200 filter: {len(v9c_bull_only)} signals")
 
-    # V9-H2 Base: V9-C but skip BEAR_MACRO signals entirely
-    rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H2 Base', **sim_kw)
-    print_report(rpt, 'V9-H2  V9-C + SMA200 filter', len(v9c_bull_only), spy_info)
+        # V9-H2 Base: V9-C but skip BEAR_MACRO signals entirely
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H2 Base', **sim_kw)
+        print_report(rpt, 'V9-H2  V9-C + SMA200 filter', len(v9c_bull_only), spy_info)
 
-    # V9-H2 + MaxPos cap (8 bull)
-    rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H2+Cap', max_positions=8, **sim_kw)
-    print_report(rpt, 'V9-H2  + MaxPos=8', len(v9c_bull_only), spy_info)
+        # V9-H2 + MaxPos cap (8 bull)
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H2+Cap', max_positions=8, **sim_kw)
+        print_report(rpt, 'V9-H2  + MaxPos=8', len(v9c_bull_only), spy_info)
 
-    # V9-H2 + DD breaker (15%)
-    rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H2+DD', dd_breaker_pct=0.15, **sim_kw)
-    print_report(rpt, 'V9-H2  + DD15%', len(v9c_bull_only), spy_info)
+        # V9-H2 + DD breaker (15%)
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H2+DD', dd_breaker_pct=0.15, **sim_kw)
+        print_report(rpt, 'V9-H2  + DD15%', len(v9c_bull_only), spy_info)
 
-    # V9-H2 Full: MaxPos + DD breaker
-    rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H2 Full', max_positions=8,
-                   dd_breaker_pct=0.15, **sim_kw)
-    print_report(rpt, 'V9-H2  + MaxPos=8 + DD15%', len(v9c_bull_only), spy_info)
+        # V9-H2 Full: MaxPos + DD breaker
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H2 Full', max_positions=8,
+                       dd_breaker_pct=0.15, **sim_kw)
+        print_report(rpt, 'V9-H2  + MaxPos=8 + DD15%', len(v9c_bull_only), spy_info)
 
-    # V9-H2 with BEAR_MACRO at reduced size (not blocked, 25% size)
-    rpt = simulate(v9c_tagged, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H2 Reduced', max_positions=8,
-                   dd_breaker_pct=0.15, **sim_kw)
-    print_report(rpt, 'V9-H2  All sigs + MaxPos + DD15%', len(v9c_tagged), spy_info)
+        # V9-H2 with BEAR_MACRO at reduced size (not blocked, 25% size)
+        rpt = simulate(v9c_tagged_h2, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H2 Reduced', max_positions=8,
+                       dd_breaker_pct=0.15, **sim_kw)
+        print_report(rpt, 'V9-H2  All sigs + MaxPos + DD15%', len(v9c_tagged_h2), spy_info)
 
-    # ── V9-H3: V9-C pure + DD breaker only (no SMA200, no MaxPos) ────────
-    # Isolate DD circuit breaker effect on V9-C signals
-    print(f"\n[V9-H3 — V9-C + DD Breaker Only]")
+        # ── V9-H3: V9-C pure + DD breaker only (no SMA200, no MaxPos) ────────
+        # Isolate DD circuit breaker effect on V9-C signals
+        print(f"\n[V9-H3 — V9-C + DD Breaker Only]")
 
-    # V9-H3 DD10%: cut to 25% size at 10% drawdown
-    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H3 DD10', dd_breaker_pct=0.10, **sim_kw)
-    print_report(rpt, 'V9-H3  V9-C + DD10%', len(v9c_signals), spy_info)
+        # V9-H3 DD10%: cut to 25% size at 10% drawdown
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H3 DD10', dd_breaker_pct=0.10, **sim_kw)
+        print_report(rpt, 'V9-H3  V9-C + DD10%', len(v9c_signals), spy_info)
 
-    # V9-H3 DD15%: cut to 25% size at 15% drawdown
-    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H3 DD15', dd_breaker_pct=0.15, **sim_kw)
-    print_report(rpt, 'V9-H3  V9-C + DD15%', len(v9c_signals), spy_info)
+        # V9-H3 DD15%: cut to 25% size at 15% drawdown
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H3 DD15', dd_breaker_pct=0.15, **sim_kw)
+        print_report(rpt, 'V9-H3  V9-C + DD15%', len(v9c_signals), spy_info)
 
-    # V9-H3 DD20%: cut to 25% size at 20% drawdown
-    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H3 DD20', dd_breaker_pct=0.20, **sim_kw)
-    print_report(rpt, 'V9-H3  V9-C + DD20%', len(v9c_signals), spy_info)
+        # V9-H3 DD20%: cut to 25% size at 20% drawdown
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H3 DD20', dd_breaker_pct=0.20, **sim_kw)
+        print_report(rpt, 'V9-H3  V9-C + DD20%', len(v9c_signals), spy_info)
 
-    # V9-H3 MaxPos only: position cap without DD breaker
-    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H3 MaxPos', max_positions=8, **sim_kw)
-    print_report(rpt, 'V9-H3  V9-C + MaxPos=8', len(v9c_signals), spy_info)
+        # V9-H3 MaxPos only: position cap without DD breaker
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H3 MaxPos', max_positions=8, **sim_kw)
+        print_report(rpt, 'V9-H3  V9-C + MaxPos=8', len(v9c_signals), spy_info)
 
-    # V9-H3 Combined: MaxPos + DD15%
-    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-H3 Full', max_positions=8,
-                   dd_breaker_pct=0.15, **sim_kw)
-    print_report(rpt, 'V9-H3  V9-C + MaxPos=8 + DD15%', len(v9c_signals), spy_info)
+        # V9-H3 Combined: MaxPos + DD15%
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-H3 Full', max_positions=8,
+                       dd_breaker_pct=0.15, **sim_kw)
+        print_report(rpt, 'V9-H3  V9-C + MaxPos=8 + DD15%', len(v9c_signals), spy_info)
 
-    # ── V9-D: Regime as POST-FILTER + POSITION SIZING (not signal blocker) ──
-    # Uses V9-C signal pipeline (proven best), applies regime intelligence via:
-    #   1. BEARISH post-filter: drop signals generated during BEARISH regime
-    #   2. Bear macro sizing: reduce position size when SPY < SMA200
-    #   3. Combined: both BEARISH filter + bear_macro sizing
-    # Key insight: regime info is valuable for SIZING, not for BLOCKING signals
-    print(f"\n{'─'*80}")
-    print(f"[V9-D — V9-C signals + Regime as Post-Filter & Sizing]")
-    print(f"  Approach: same V9-C signals, regime used for filtering/sizing ONLY")
-    print(f"{'─'*80}")
+        # ── V9-D: Regime as POST-FILTER + POSITION SIZING (not signal blocker) ──
+        # Uses V9-C signal pipeline (proven best), applies regime intelligence via:
+        #   1. BEARISH post-filter: drop signals generated during BEARISH regime
+        #   2. Bear macro sizing: reduce position size when SPY < SMA200
+        #   3. Combined: both BEARISH filter + bear_macro sizing
+        # Key insight: regime info is valuable for SIZING, not for BLOCKING signals
+        print(f"\n{'─'*80}")
+        print(f"[V9-D — V9-C signals + Regime as Post-Filter & Sizing]")
+        print(f"  Approach: same V9-C signals, regime used for filtering/sizing ONLY")
+        print(f"{'─'*80}")
 
-    # Tag V9-C signals with bear_macro + regime
-    # NOTE: run_scan(config='old') sets bear_macro=False for all signals,
-    # so we ALWAYS recompute it here from SPY data
-    spy_df_raw = historical.get('SPY')
-    v9c_tagged = []
-    for s in v9c_signals:
-        s_copy = dict(s)
-        if spy_df_raw is not None:
-            s_copy['bear_macro'] = is_spy_below_sma200(spy_df_raw, s['date'])
-            regime_tag, _, _ = classify_day_regime(spy_df_raw, s['date'])
-            s_copy['regime'] = regime_tag
-        v9c_tagged.append(s_copy)
+        # Tag V9-C signals with bear_macro + regime
+        # NOTE: run_scan(config='old') sets bear_macro=False for all signals,
+        # so we ALWAYS recompute it here from SPY data
+        spy_df_raw = historical.get('SPY')
+        v9c_tagged = []
+        for s in v9c_signals:
+            s_copy = dict(s)
+            if spy_df_raw is not None:
+                s_copy['bear_macro'] = is_spy_below_sma200(spy_df_raw, s['date'])
+                regime_tag, _, _ = classify_day_regime(spy_df_raw, s['date'])
+                s_copy['regime'] = regime_tag
+            v9c_tagged.append(s_copy)
 
-    n_bearish = sum(1 for s in v9c_tagged if s.get('regime') == 'BEARISH')
-    n_bear_macro = sum(1 for s in v9c_tagged if s.get('bear_macro'))
-    n_red = sum(1 for s in v9c_tagged if s.get('regime') == 'RED_MARKET')
-    print(f"  V9-C signals: {len(v9c_tagged)} total")
-    print(f"    BEARISH regime: {n_bearish} | RED_MARKET: {n_red} | bear_macro (SPY<SMA200): {n_bear_macro}")
+        n_bearish = sum(1 for s in v9c_tagged if s.get('regime') == 'BEARISH')
+        n_bear_macro = sum(1 for s in v9c_tagged if s.get('bear_macro'))
+        n_red = sum(1 for s in v9c_tagged if s.get('regime') == 'RED_MARKET')
+        print(f"  V9-C signals: {len(v9c_tagged)} total")
+        print(f"    BEARISH regime: {n_bearish} | RED_MARKET: {n_red} | bear_macro (SPY<SMA200): {n_bear_macro}")
 
-    # ── V9-D1: Drop BEARISH regime only (22.2% WR, -3.28% avg, -13.4% P&L share)
-    v9d_no_bearish = [s for s in v9c_tagged if s.get('regime') != 'BEARISH']
-    print(f"\n  V9-D1: Drop BEARISH signals → {len(v9d_no_bearish)} signals ({n_bearish} dropped)")
+        # ── V9-D1: Drop BEARISH regime only (22.2% WR, -3.28% avg, -13.4% P&L share)
+        v9d_no_bearish = [s for s in v9c_tagged if s.get('regime') != 'BEARISH']
+        print(f"\n  V9-D1: Drop BEARISH signals → {len(v9d_no_bearish)} signals ({n_bearish} dropped)")
 
-    rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-D1', **sim_kw)
-    print_report(rpt, 'V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
-
-    # ── V9-D2: Bear macro position sizing (reduce, not block)
-    for bm_mult in [0.25, 0.50, 0.75]:
-        rpt = simulate(v9c_tagged, start, end, end_prices, historical, capital,
-                       tp_as_trail=True, label=f'V9-D2 bm={bm_mult}',
-                       bear_macro_mult=bm_mult, **sim_kw)
-        print_report(rpt, f'V9-D2  V9-C + bear_macro size={bm_mult:.0%}',
-                     len(v9c_tagged), spy_info)
-
-    # ── V9-D3: Combined — drop BEARISH + bear_macro sizing
-    for bm_mult in [0.25, 0.50]:
         rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
-                       tp_as_trail=True, label=f'V9-D3 bm={bm_mult}',
-                       bear_macro_mult=bm_mult, **sim_kw)
-        print_report(rpt, f'V9-D3  − BEARISH + bear_macro={bm_mult:.0%}',
-                     len(v9d_no_bearish), spy_info)
+                       tp_as_trail=True, label='V9-D1', **sim_kw)
+        print_report(rpt, 'V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
 
-    # ── V9-D4: Combined — drop BEARISH + regime-based sizing (no bear_macro)
-    rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-D4', regime_sizing=True, **sim_kw)
-    print_report(rpt, 'V9-D4  − BEARISH + regime sizing', len(v9d_no_bearish), spy_info)
+        # ── V9-D2: Bear macro position sizing (reduce, not block)
+        for bm_mult in [0.25, 0.50, 0.75]:
+            rpt = simulate(v9c_tagged, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'V9-D2 bm={bm_mult}',
+                           bear_macro_mult=bm_mult, **sim_kw)
+            print_report(rpt, f'V9-D2  V9-C + bear_macro size={bm_mult:.0%}',
+                         len(v9c_tagged), spy_info)
 
-    # ── V9-D5: Combined — drop BEARISH + bear_macro sizing + regime sizing
-    rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-D5',
-                   regime_sizing=True, bear_macro_mult=0.50, **sim_kw)
-    print_report(rpt, 'V9-D5  − BEARISH + regime + bm=50%', len(v9d_no_bearish), spy_info)
+        # ── V9-D3: Combined — drop BEARISH + bear_macro sizing
+        for bm_mult in [0.25, 0.50]:
+            rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'V9-D3 bm={bm_mult}',
+                           bear_macro_mult=bm_mult, **sim_kw)
+            print_report(rpt, f'V9-D3  − BEARISH + bear_macro={bm_mult:.0%}',
+                         len(v9d_no_bearish), spy_info)
 
-    # ── V9-D6: BEARISH block + bear_macro block (compare sizing vs blocking)
-    v9d_no_bear_all = [s for s in v9c_tagged
-                       if s.get('regime') != 'BEARISH' and not s.get('bear_macro')]
-    print(f"\n  V9-D6 (block both): {len(v9d_no_bear_all)} signals "
-          f"(dropped {len(v9c_tagged) - len(v9d_no_bear_all)})")
-    rpt = simulate(v9d_no_bear_all, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='V9-D6', **sim_kw)
-    print_report(rpt, 'V9-D6  − BEARISH − bear_macro (block)', len(v9d_no_bear_all), spy_info)
+        # ── V9-D4: Combined — drop BEARISH + regime-based sizing (no bear_macro)
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-D4', regime_sizing=True, **sim_kw)
+        print_report(rpt, 'V9-D4  − BEARISH + regime sizing', len(v9d_no_bearish), spy_info)
 
-    # ── Summary: V9-C bear_macro trade quality breakdown
-    if v9c_tagged:
-        bear_sigs = [s for s in v9c_tagged if s.get('bear_macro')]
-        bull_sigs = [s for s in v9c_tagged if not s.get('bear_macro')]
-        print(f"\n  Signal breakdown:")
-        print(f"    BULL_MACRO: {len(bull_sigs)} signals")
-        print(f"    BEAR_MACRO: {len(bear_sigs)} signals")
-        for regime in ['RED_MARKET', 'BEARISH', 'NORMAL', 'EXPANSION', 'CHOPPY']:
-            n = sum(1 for s in v9c_tagged if s.get('regime') == regime)
-            if n:
-                bm = sum(1 for s in v9c_tagged
-                         if s.get('regime') == regime and s.get('bear_macro'))
-                print(f"      {regime}: {n} total ({bm} during bear_macro)")
+        # ── V9-D5: Combined — drop BEARISH + bear_macro sizing + regime sizing
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-D5',
+                       regime_sizing=True, bear_macro_mult=0.50, **sim_kw)
+        print_report(rpt, 'V9-D5  − BEARISH + regime + bm=50%', len(v9d_no_bearish), spy_info)
+
+        # ── V9-D6: BEARISH block + bear_macro block (compare sizing vs blocking)
+        v9d_no_bear_all = [s for s in v9c_tagged
+                           if s.get('regime') != 'BEARISH' and not s.get('bear_macro')]
+        print(f"\n  V9-D6 (block both): {len(v9d_no_bear_all)} signals "
+              f"(dropped {len(v9c_tagged) - len(v9d_no_bear_all)})")
+        rpt = simulate(v9d_no_bear_all, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='V9-D6', **sim_kw)
+        print_report(rpt, 'V9-D6  − BEARISH − bear_macro (block)', len(v9d_no_bear_all), spy_info)
+
+        # ── Summary: V9-C bear_macro trade quality breakdown
+        if v9c_tagged:
+            bear_sigs = [s for s in v9c_tagged if s.get('bear_macro')]
+            bull_sigs = [s for s in v9c_tagged if not s.get('bear_macro')]
+            print(f"\n  Signal breakdown:")
+            print(f"    BULL_MACRO: {len(bull_sigs)} signals")
+            print(f"    BEAR_MACRO: {len(bear_sigs)} signals")
+            for regime in ['RED_MARKET', 'BEARISH', 'NORMAL', 'EXPANSION', 'CHOPPY']:
+                n = sum(1 for s in v9c_tagged if s.get('regime') == regime)
+                if n:
+                    bm = sum(1 for s in v9c_tagged
+                             if s.get('regime') == regime and s.get('bear_macro'))
+                    print(f"      {regime}: {n} total ({bm} during bear_macro)")
+
+    if not full_compare:
+        v9d_no_bearish = []
+        v9c_tagged = []
 
     # ── Stall-Exit Comparison ─────────────────────────────────────────────
     # Re-runs key strategies with stall_exit=True (SMA20 crossunder instead
@@ -1288,6 +1330,8 @@ def parse_args():
     p.add_argument('--stall-exit',       action='store_true', help='Add stall-exit comparison section (SMA20 crossunder replaces MaxHold)')
     p.add_argument('--bounce-bear-gate', type=int, default=0, help='Block BOUNCE+RED_MARKET when SPY below SMA200 >= N consecutive days (0=off, suggested 15)')
     p.add_argument('--selective', action='store_true', help='Enable SELECTIVE_MODE: drop SMA20_CROSS/Momentum + cap at 1 admission/day (~100 trades/yr target)')
+    p.add_argument('--full-compare', action='store_true',
+                   help='Also run retired V9-H / V9-H2 / V9-H3 / V9-D comparison sections (slower)')
     p.add_argument('--no-tc',      action='store_true', help='Disable TREND_CONFIRM in collect_signals_new (reproduces pre-TC +195%% baseline)')
     p.add_argument('--pooled-cap', type=int, default=10,
                    help='Max signals per day in pooled-cap★ row (default: 10). '
@@ -1324,12 +1368,23 @@ def main():
         return
 
     for year in years:
-        run_year(year, symbols, args.watchlist, args.limit, args.capital,
+        run_year(year, symbols, args.capital,
                  slippage_pct=args.slippage, commission=args.commission,
                  trades_log=args.trades_log, compare_stall=args.stall_exit,
                  bounce_bear_gate=args.bounce_bear_gate,
                  selective=args.selective,
-                 pooled_cap=args.pooled_cap)
+                 pooled_cap=args.pooled_cap,
+                 full_compare=args.full_compare)
+
+    if len(years) > 1 and _sharpe_accum:
+        print(f"\n{'='*80}")
+        print(f"MULTI-YEAR SHARPE SUMMARY ({len(years)} years)")
+        print(f"{'='*80}")
+        print(f"  {'Strategy':<50} {'Avg Sharpe':>10}  {'Years':>5}")
+        print("  " + "-" * 70)
+        for lbl, vals in sorted(_sharpe_accum.items(), key=lambda x: -sum(x[1])/len(x[1])):
+            avg = sum(vals) / len(vals)
+            print(f"  {lbl:<50} {avg:>+10.2f}   {len(vals):>5}")
 
     print(f"\n{'='*80}")
     print("BACKTEST COMPLETE")
