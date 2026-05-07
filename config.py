@@ -97,6 +97,13 @@ THEMATIC_BOOSTED_SIZING = {
     'PREMIUM_mult': 3.0,               # override QUALITY_SIZING PREMIUM (2.0 → 3.0)
 }
 
+# --- ATR Always-On Trailing Stop (champion exit, validated 2026-05-07) ---
+# Trail activates from entry bar 1: stop = max(fixed_floor, price - ATR_TRAIL_MULT × ATR14).
+# Fixed stop_loss acts as absolute floor for the first ATR_TRAIL_FLOOR_BARS trading bars
+# (while ATR history warms up). After warmup, only the trail applies.
+ATR_TRAIL_MULT       = 2.0   # ATR×2.0 — sweep winner: +234% 5yr vs +137% post-TP
+ATR_TRAIL_FLOOR_BARS = 14    # Wilder's ATR(14) needs 14 bars to be meaningful
+
 # --- ATR-Adjusted Position Sizing ---
 # Scales position size inversely with stock volatility.
 # High ATR% → smaller position. Low ATR% → capped at 1.0 (no oversizing).

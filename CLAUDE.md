@@ -73,10 +73,11 @@ Summarize our progress, key decisions, and next steps into the CLAUDE.md file.
 
 ## 7. Current Live Config & Backtest Decision Log
 
-### Active Config: V9-C + BBG15 + Pooled Cap + TREND_CONFIRM Path A (2026-04-26)
+### Active Config: V9-C + BBG15 + Pooled Cap + ATR×2.0 Always-On Trail (2026-05-07)
 **Files:**
 - `config.py` — `V9H_REGIME_GATE['enabled'] = False`, `BOUNCE_BEAR_GATE = 15`, `TREND_CONFIRM['enabled'] = True`, `TREND_CONFIRM['enabled_paths'] = ['A']`
 - `auto_portfolio.py` — cross-day pooled cap (`MAX_ADDS_PER_SCAN = 10`, date-grouped pooling, Dist tiebreak capped at 25%)
+- `backtest_regime_compare.py` — `--atr-trail-always --atr-trail-mult 2.0` (always-on ATR×2.0 trailing stop from entry, replaces post-TP trail)
 
 ### Backtest: `backtest_regime_compare.py` — 200 symbols, 5 years (run 2026-04-22)
 Includes RSI Wilder's EMA fix + regime fix + bounce_bear_gate=15.
@@ -127,7 +128,7 @@ Bug fixed: `days_held` for MAX_HOLD exit was using trading days (extended hold t
 | `optimizer_watch.txt` (50 curated) | **+136.8%** | **+0.88** | vs SPY +63.4% |
 | `all.txt` (200 random, seed=42) | **~+80%** | ~+0.80 | vs SPY +63.4%; May 1 pre-fix run |
 
-Per-year cap=10 ★ on optimizer_watch.txt:
+Per-year cap=10 ★ on optimizer_watch.txt (post-TP trail baseline):
 
 | Year | Return | Sharpe | >15d WR |
 |------|--------|--------|---------|
@@ -136,6 +137,28 @@ Per-year cap=10 ★ on optimizer_watch.txt:
 | 2024 | +29.41% | 1.37 | 55 trades @ 67.3% |
 | 2025 | +9.78% | 0.57 | 45 trades @ 71.1% |
 | 2026 | -3.37% | -0.51 | 16 trades @ 75.0% |
+
+### NEW Champion: ATR×2.0 Always-On Trail (2026-05-07)
+CLI: `python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --watchlist input/optimizer_watch.txt --atr-trail-always`
+Exit code 0, validated on optimizer_watch.txt (50 curated symbols). Avg Sharpe +1.75 (5yr) confirmed by full validation run.
+
+**Mechanism:** ATR×2.0 trailing stop rides up from entry day 1 (replaces fixed stop_loss for active positions). Fixed stop_loss acts as ultimate floor before trail is established (first 14 bars). Much tighter exit on losers — ≤15d WR jumps from 34% → 54%.
+
+| Year | Return (ATR-always) | Return (post-TP baseline) | Delta |
+|------|--------------------|-----------------------------|-------|
+| 2022 | **-5.26%** | -12.94% | +7.68% |
+| 2023 | **+102.22%** | +98.17% | +4.05% |
+| 2024 | **+30.93%** | +29.41% | +1.52% |
+| 2025 | **+22.93%** | +9.78% | +13.15% |
+| 2026 | **+8.37%** | -3.37% | +11.74% |
+| **5yr compound** | **+234.2%** | +136.8% | **+97 pts** |
+| **Avg Sharpe** | **+1.66** (sweep) / **+1.75** (validation) | +0.88 | **+0.78–0.87** |
+
+**Key insight:** ATR trail cuts bear-year losses aggressively (2022: -5% vs -13%) while letting winners ride in bull years. The trail is always active so it exits near local highs rather than waiting for TP trigger.
+
+**2026 hold-split (full validation):**
+- ATR-always: ≤15d 39 trades WR=53.8%, >15d 9 trades WR=100%
+- Post-TP: ≤15d 32 trades WR=34.4%, >15d 16 trades WR=75%
 
 ---
 

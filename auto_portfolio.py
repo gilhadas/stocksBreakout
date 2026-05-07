@@ -1148,14 +1148,14 @@ def refresh_prices(user_id: str | None = None) -> dict:
         return {'closed': [], 'updated': 0, 'data': data}
 
     symbols = [p['symbol'] for p in data['positions']]
-    prices  = {}
+    hists   = {}
 
-    # Individual fetches — reliable for small portfolios
+    # Fetch 30d history for ATR trail computation (ATR needs 14+ bars)
     for sym in symbols:
         try:
-            hist = yf.Ticker(sym.replace(' ', '-')).history(period='2d')
+            hist = yf.Ticker(sym.replace(' ', '-')).history(period='30d')
             if hist is not None and not hist.empty:
-                prices[sym] = float(hist['Close'].dropna().iloc[-1])
+                hists[sym] = hist
         except Exception:
             pass
 
@@ -1165,8 +1165,13 @@ def refresh_prices(user_id: str | None = None) -> dict:
 
     for p in data['positions']:
         sym     = p['symbol']
-        current = prices.get(sym, p.get('current_price', p['entry_price']))
+        hist    = hists.get(sym)
+        current = float(hist['Close'].dropna().iloc[-1]) if hist is not None and not hist.empty \
+                  else p.get('current_price', p['entry_price'])
         p['current_price'] = round(current, 4)
+
+        # Raise stop using ATR×2.0 always-on trail before checking exit
+        _raise_atr_trail(p, hist)
 
         if current <= p['stop']:
             # Stop hit — find the ACTUAL day the low first crossed the stop
@@ -1182,7 +1187,7 @@ def refresh_prices(user_id: str | None = None) -> dict:
                 'exit_price':   round(exit_px, 4),
                 'pnl':          pnl,
                 'pnl_pct':      pnl_pct,
-                'close_reason': 'stop_hit',
+                'close_reason': 'atr_trail_stop',
             })
             closed_now.append(sym)
         else:
@@ -1194,7 +1199,47 @@ def refresh_prices(user_id: str | None = None) -> dict:
         for t in data['closed'][-len(closed_now):]:
             data['capital'] += t['pnl']
     _save(data, user_id=user_id)
-    return {'closed': closed_now, 'updated': len(prices), 'data': data}
+    return {'closed': closed_now, 'updated': len(hists), 'data': data}
+
+
+# ── ATR always-on trail (live exit logic) ─────────────────────────────────────
+
+def _raise_atr_trail(p: dict, hist: 'pd.DataFrame') -> None:
+    """
+    Update p['stop'] in-place using the ATR×2.0 always-on trail.
+
+    The trail is computed from the last ATR_TRAIL_FLOOR_BARS bars of history.
+    The fixed stop_loss is the absolute floor — stop only ever moves up.
+    Mirrors the backtest's `elif atr_trail_always:` branch in simulate() exactly.
+    """
+    import pandas as pd
+    from config import ATR_TRAIL_MULT, ATR_TRAIL_FLOOR_BARS
+
+    if hist is None or len(hist) < ATR_TRAIL_FLOOR_BARS:
+        return  # not enough history — keep fixed stop
+
+    # Strip tz if present
+    idx = hist.index
+    if hasattr(idx, 'tz') and idx.tz is not None:
+        idx = idx.tz_localize(None)
+        hist = hist.copy()
+        hist.index = idx
+
+    df = hist.tail(ATR_TRAIL_FLOOR_BARS + 1)
+    tr = pd.concat([
+        df['High'] - df['Low'],
+        (df['High'] - df['Close'].shift(1)).abs(),
+        (df['Low']  - df['Close'].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    atr = float(tr.mean())
+    if atr <= 0:
+        return
+
+    current_close = float(hist['Close'].dropna().iloc[-1])
+    trail_candidate = round(current_close - ATR_TRAIL_MULT * atr, 4)
+    # Stop only moves up — fixed stop is the absolute floor
+    p['stop'] = max(p['stop'], trail_candidate)
+    p['trail_stop'] = p['stop']  # expose for mobile UI display
 
 
 # ── Trailing stop simulation ──────────────────────────────────────────────────

@@ -901,33 +901,15 @@ def section_header():
 # ─── Run one year period ───────────────────────────────────────────────────────
 def run_year(year, symbols, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
-             bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False,
-             compare_sma150=False, starting_capitals=None):
-    """
-    starting_capitals: dict[label → float] of compounded capital per config from prior years.
-    Returns dict[label → final_capital] so main() can forward it to the next year.
-    """
+             bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
     spy_expected = SPY_ANNUAL.get(str(year), 0)
     modes = ['swing', 'longterm']
-    ending_capitals: dict = {}
-
-    def _sim(sigs, _s, _e, _ep, _hist, _cap_ignored, **kwargs):
-        """Same signature as simulate() but substitutes compounded capital per label."""
-        lbl = kwargs.get('label', '')
-        c = starting_capitals.get(lbl, capital) if starting_capitals else capital
-        rpt = simulate(sigs, _s, _e, _ep, _hist, c, **kwargs)
-        if rpt and lbl:
-            ending_capitals[lbl] = rpt['final_capital']
-        return rpt
 
     print(f"\n{'='*80}")
     print(f"YEAR {year}  |  {year_type}  |  SPY expected: {spy_expected:+.1f}%")
-    if starting_capitals:
-        print(f"  Compounded capitals: " +
-              ", ".join(f"{k}=${v:,.0f}" for k, v in list(starting_capitals.items())[:4]))
     print(f"{'='*80}")
 
     print("\nFetching data...")
@@ -989,17 +971,17 @@ def run_year(year, symbols, capital,
                   bounce_bear_gate=bounce_bear_gate)
 
     # OLD V9-C (best previous)
-    rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label='OLD V9-C', **sim_kw)
     print_report(rpt, f'OLD V9-C  PREMIUM+ TP→Trail', len(v9c_signals), spy_info)
 
     # OLD V9-C + regime-based position sizing
-    rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label='OLD V9-C RegimeSized', regime_sizing=True, **sim_kw)
     print_report(rpt, f'OLD V9-C  PREMIUM+ TP→Trail + RegimeSizing', len(v9c_signals), spy_info)
 
     # NEW PREMIUM+ (unlimited — legacy baseline)
-    rpt = _sim(new_premium, start, end, end_prices, historical, capital,
+    rpt = simulate(new_premium, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label='NEW PREMIUM+', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ TP→Trail', len(new_premium), spy_info)
 
@@ -1007,7 +989,7 @@ def run_year(year, symbols, capital,
     # Default pooled_cap=10 reproduces the documented +195% 5yr compound.
     # Requires --no-tc + --bounce-bear-gate 15 to reproduce the +195% baseline.
     new_premium_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap)
-    rpt = _sim(new_premium_pooled, start, end, end_prices, historical, capital,
+    rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info, show_hold_split=True)
 
@@ -1017,7 +999,7 @@ def run_year(year, symbols, capital,
     # If pooled_cap is already 2 this row is skipped (redundant).
     if pooled_cap != 2:
         new_premium_cap2 = _pooled_cap(new_premium, max_per_day=2)
-        rpt = _sim(new_premium_cap2, start, end, end_prices, historical, capital,
+        rpt = simulate(new_premium_cap2, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='NEW PREMIUM+ pooled-2', **sim_kw)
         print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap=2  ★★', len(new_premium_cap2), spy_info, show_hold_split=True)
 
@@ -1030,22 +1012,22 @@ def run_year(year, symbols, capital,
     else:
         selective_new = new_premium  # already filtered by Fix 7
     selective_new_pooled = _pooled_cap(selective_new, max_per_day=2)
-    rpt = _sim(selective_new_pooled, start, end, end_prices, historical, capital,
+    rpt = simulate(selective_new_pooled, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label='SELECTIVE_NEW', **sim_kw)
     print_report(rpt, f'SELECTIVE NEW  PREMIUM+ no-SMA20X pooled-cap=2', len(selective_new_pooled), spy_info, show_hold_split=True)
 
     # NEW HIGH+
-    rpt = _sim(new_all, start, end, end_prices, historical, capital,
+    rpt = simulate(new_all, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label='NEW HIGH+', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  HIGH+    TP→Trail', len(new_all), spy_info)
 
     # NEW HIGH+ + regime sizing
-    rpt = _sim(new_all, start, end, end_prices, historical, capital,
+    rpt = simulate(new_all, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label='NEW HIGH+ RegimeSized', regime_sizing=True, **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  HIGH+    TP→Trail + RegimeSizing', len(new_all), spy_info)
 
     # NEW PREMIUM+ no trailing
-    rpt = _sim(new_premium, start, end, end_prices, historical, capital,
+    rpt = simulate(new_premium, start, end, end_prices, historical, capital,
                    tp_as_trail=False, label='NEW PREMIUM+ NoTrail', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ Fixed TP', len(new_premium), spy_info)
 
@@ -1057,7 +1039,7 @@ def run_year(year, symbols, capital,
             rsigs = sig_df[sig_df['regime'] == r]
             if rsigs.empty: continue
             r_signals = [s for s in new_premium if s.get('regime') == r]
-            rpt_r = _sim(r_signals, start, end, end_prices, historical, capital,
+            rpt_r = simulate(r_signals, start, end, end_prices, historical, capital,
                              tp_as_trail=True, **sim_kw)
             print_report(rpt_r, f'  ↳ {r}', len(r_signals), spy_info)
 
@@ -1073,23 +1055,23 @@ def run_year(year, symbols, capital,
         print(f"  Macro split: {n_bull_macro} BULL_MACRO, {n_bear_macro} BEAR_MACRO signals")
 
         # V9-H Base: hybrid signals, TP→Trail (no caps/breakers)
-        rpt = _sim(hybrid_premium, start, end, end_prices, historical, capital,
+        rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H Base', **sim_kw)
         print_report(rpt, 'V9-H  SMA200+BEARISH Block', len(hybrid_premium), spy_info)
 
         # V9-H + MaxPos: + position cap (8 bull / 3 bear)
-        rpt = _sim(hybrid_premium, start, end, end_prices, historical, capital,
+        rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H+Cap', max_positions=8, **sim_kw)
         print_report(rpt, 'V9-H  + MaxPos=8/3', len(hybrid_premium), spy_info)
 
         # V9-H Full: + position cap + DD breaker at 15%
-        rpt = _sim(hybrid_premium, start, end, end_prices, historical, capital,
+        rpt = simulate(hybrid_premium, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H Full', max_positions=8,
                        dd_breaker_pct=0.15, **sim_kw)
         print_report(rpt, 'V9-H  + MaxPos + DD15%', len(hybrid_premium), spy_info)
 
         # V9-H HIGH+: broader quality gate
-        rpt = _sim(hybrid_all, start, end, end_prices, historical, capital,
+        rpt = simulate(hybrid_all, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H HIGH+', max_positions=8,
                        dd_breaker_pct=0.15, **sim_kw)
         print_report(rpt, 'V9-H  HIGH+ + MaxPos + DD15%', len(hybrid_all), spy_info)
@@ -1102,7 +1084,7 @@ def run_year(year, symbols, capital,
                 rsigs = sig_df[sig_df['regime'] == r]
                 if rsigs.empty: continue
                 r_signals = [s for s in hybrid_premium if s.get('regime') == r]
-                rpt_r = _sim(r_signals, start, end, end_prices, historical, capital,
+                rpt_r = simulate(r_signals, start, end, end_prices, historical, capital,
                                  tp_as_trail=True, **sim_kw)
                 print_report(rpt_r, f'  ↳ {r}', len(r_signals), spy_info)
 
@@ -1111,7 +1093,7 @@ def run_year(year, symbols, capital,
             for macro_label, macro_val in [('BULL_MACRO', False), ('BEAR_MACRO', True)]:
                 m_sigs = [s for s in hybrid_premium if s.get('bear_macro') == macro_val]
                 if not m_sigs: continue
-                rpt_m = _sim(m_sigs, start, end, end_prices, historical, capital,
+                rpt_m = simulate(m_sigs, start, end, end_prices, historical, capital,
                                  tp_as_trail=True, **sim_kw)
                 print_report(rpt_m, f'  ↳ {macro_label}', len(m_sigs), spy_info)
 
@@ -1139,28 +1121,28 @@ def run_year(year, symbols, capital,
         print(f"  After SMA200 filter: {len(v9c_bull_only)} signals")
 
         # V9-H2 Base: V9-C but skip BEAR_MACRO signals entirely
-        rpt = _sim(v9c_bull_only, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H2 Base', **sim_kw)
         print_report(rpt, 'V9-H2  V9-C + SMA200 filter', len(v9c_bull_only), spy_info)
 
         # V9-H2 + MaxPos cap (8 bull)
-        rpt = _sim(v9c_bull_only, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H2+Cap', max_positions=8, **sim_kw)
         print_report(rpt, 'V9-H2  + MaxPos=8', len(v9c_bull_only), spy_info)
 
         # V9-H2 + DD breaker (15%)
-        rpt = _sim(v9c_bull_only, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H2+DD', dd_breaker_pct=0.15, **sim_kw)
         print_report(rpt, 'V9-H2  + DD15%', len(v9c_bull_only), spy_info)
 
         # V9-H2 Full: MaxPos + DD breaker
-        rpt = _sim(v9c_bull_only, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_bull_only, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H2 Full', max_positions=8,
                        dd_breaker_pct=0.15, **sim_kw)
         print_report(rpt, 'V9-H2  + MaxPos=8 + DD15%', len(v9c_bull_only), spy_info)
 
         # V9-H2 with BEAR_MACRO at reduced size (not blocked, 25% size)
-        rpt = _sim(v9c_tagged_h2, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_tagged_h2, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H2 Reduced', max_positions=8,
                        dd_breaker_pct=0.15, **sim_kw)
         print_report(rpt, 'V9-H2  All sigs + MaxPos + DD15%', len(v9c_tagged_h2), spy_info)
@@ -1170,27 +1152,27 @@ def run_year(year, symbols, capital,
         print(f"\n[V9-H3 — V9-C + DD Breaker Only]")
 
         # V9-H3 DD10%: cut to 25% size at 10% drawdown
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H3 DD10', dd_breaker_pct=0.10, **sim_kw)
         print_report(rpt, 'V9-H3  V9-C + DD10%', len(v9c_signals), spy_info)
 
         # V9-H3 DD15%: cut to 25% size at 15% drawdown
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H3 DD15', dd_breaker_pct=0.15, **sim_kw)
         print_report(rpt, 'V9-H3  V9-C + DD15%', len(v9c_signals), spy_info)
 
         # V9-H3 DD20%: cut to 25% size at 20% drawdown
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H3 DD20', dd_breaker_pct=0.20, **sim_kw)
         print_report(rpt, 'V9-H3  V9-C + DD20%', len(v9c_signals), spy_info)
 
         # V9-H3 MaxPos only: position cap without DD breaker
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H3 MaxPos', max_positions=8, **sim_kw)
         print_report(rpt, 'V9-H3  V9-C + MaxPos=8', len(v9c_signals), spy_info)
 
         # V9-H3 Combined: MaxPos + DD15%
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-H3 Full', max_positions=8,
                        dd_breaker_pct=0.15, **sim_kw)
         print_report(rpt, 'V9-H3  V9-C + MaxPos=8 + DD15%', len(v9c_signals), spy_info)
@@ -1229,13 +1211,13 @@ def run_year(year, symbols, capital,
         v9d_no_bearish = [s for s in v9c_tagged if s.get('regime') != 'BEARISH']
         print(f"\n  V9-D1: Drop BEARISH signals → {len(v9d_no_bearish)} signals ({n_bearish} dropped)")
 
-        rpt = _sim(v9d_no_bearish, start, end, end_prices, historical, capital,
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-D1', **sim_kw)
         print_report(rpt, 'V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
 
         # ── V9-D2: Bear macro position sizing (reduce, not block)
         for bm_mult in [0.25, 0.50, 0.75]:
-            rpt = _sim(v9c_tagged, start, end, end_prices, historical, capital,
+            rpt = simulate(v9c_tagged, start, end, end_prices, historical, capital,
                            tp_as_trail=True, label=f'V9-D2 bm={bm_mult}',
                            bear_macro_mult=bm_mult, **sim_kw)
             print_report(rpt, f'V9-D2  V9-C + bear_macro size={bm_mult:.0%}',
@@ -1243,19 +1225,19 @@ def run_year(year, symbols, capital,
 
         # ── V9-D3: Combined — drop BEARISH + bear_macro sizing
         for bm_mult in [0.25, 0.50]:
-            rpt = _sim(v9d_no_bearish, start, end, end_prices, historical, capital,
+            rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
                            tp_as_trail=True, label=f'V9-D3 bm={bm_mult}',
                            bear_macro_mult=bm_mult, **sim_kw)
             print_report(rpt, f'V9-D3  − BEARISH + bear_macro={bm_mult:.0%}',
                          len(v9d_no_bearish), spy_info)
 
         # ── V9-D4: Combined — drop BEARISH + regime-based sizing (no bear_macro)
-        rpt = _sim(v9d_no_bearish, start, end, end_prices, historical, capital,
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-D4', regime_sizing=True, **sim_kw)
         print_report(rpt, 'V9-D4  − BEARISH + regime sizing', len(v9d_no_bearish), spy_info)
 
         # ── V9-D5: Combined — drop BEARISH + bear_macro sizing + regime sizing
-        rpt = _sim(v9d_no_bearish, start, end, end_prices, historical, capital,
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-D5',
                        regime_sizing=True, bear_macro_mult=0.50, **sim_kw)
         print_report(rpt, 'V9-D5  − BEARISH + regime + bm=50%', len(v9d_no_bearish), spy_info)
@@ -1265,7 +1247,7 @@ def run_year(year, symbols, capital,
                            if s.get('regime') != 'BEARISH' and not s.get('bear_macro')]
         print(f"\n  V9-D6 (block both): {len(v9d_no_bear_all)} signals "
               f"(dropped {len(v9c_tagged) - len(v9d_no_bear_all)})")
-        rpt = _sim(v9d_no_bear_all, start, end, end_prices, historical, capital,
+        rpt = simulate(v9d_no_bear_all, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='V9-D6', **sim_kw)
         print_report(rpt, 'V9-D6  − BEARISH − bear_macro (block)', len(v9d_no_bear_all), spy_info)
 
@@ -1302,23 +1284,23 @@ def run_year(year, symbols, capital,
             stall_kw = {**sim_kw, 'stall_exit': True, 'stall_sma_period': sma_p}
             print(f"\n  ── {tag} crossunder (2 consecutive bars) ──")
 
-            rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+            rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                            tp_as_trail=True, label=f'SE{sma_p} V9-C', **stall_kw)
             print_report(rpt, f'SE{sma_p}  V9-C  PREMIUM+ TP→Trail', len(v9c_signals), spy_info)
 
-            rpt = _sim(new_premium, start, end, end_prices, historical, capital,
+            rpt = simulate(new_premium, start, end, end_prices, historical, capital,
                            tp_as_trail=True, label=f'SE{sma_p} NEW PREMIUM+', **stall_kw)
             print_report(rpt, f'SE{sma_p}  NEW PREMIUM+ TP→Trail', len(new_premium), spy_info)
 
-            rpt = _sim(new_all, start, end, end_prices, historical, capital,
+            rpt = simulate(new_all, start, end, end_prices, historical, capital,
                            tp_as_trail=True, label=f'SE{sma_p} NEW HIGH+', **stall_kw)
             print_report(rpt, f'SE{sma_p}  NEW HIGH+ TP→Trail', len(new_all), spy_info)
 
-            rpt = _sim(v9d_no_bearish, start, end, end_prices, historical, capital,
+            rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
                            tp_as_trail=True, label=f'SE{sma_p} V9-D1', **stall_kw)
             print_report(rpt, f'SE{sma_p}  V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
 
-            rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+            rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                            tp_as_trail=True, label=f'SE{sma_p} V9-C RegimeSized',
                            regime_sizing=True, **stall_kw)
             print_report(rpt, f'SE{sma_p}  V9-C  + RegimeSizing', len(v9c_signals), spy_info)
@@ -1333,7 +1315,7 @@ def run_year(year, symbols, capital,
                 if rsigs.empty:
                     continue
                 r_signals = [s for s in new_premium if s.get('regime') == r]
-                rpt_r = _sim(r_signals, start, end, end_prices, historical, capital,
+                rpt_r = simulate(r_signals, start, end, end_prices, historical, capital,
                                  tp_as_trail=True, **stall20_kw)
                 print_report(rpt_r, f'  ↳ {r}', len(r_signals), spy_info)
 
@@ -1350,68 +1332,30 @@ def run_year(year, symbols, capital,
         bbg_kw   = {**sim_kw, 'bounce_bear_gate': 15}
         bbg10_kw = {**sim_kw, 'bounce_bear_gate': 10}
 
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='BBG15 V9-C', **bbg_kw)
         print_report(rpt, 'BBG15  V9-C  PREMIUM+ TP→Trail', len(v9c_signals), spy_info)
 
-        rpt = _sim(new_premium, start, end, end_prices, historical, capital,
+        rpt = simulate(new_premium, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='BBG15 NEW PREMIUM+', **bbg_kw)
         print_report(rpt, 'BBG15  NEW PREMIUM+ TP→Trail', len(new_premium), spy_info)
 
-        rpt = _sim(v9d_no_bearish, start, end, end_prices, historical, capital,
+        rpt = simulate(v9d_no_bearish, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='BBG15 V9-D1', **bbg_kw)
         print_report(rpt, 'BBG15  V9-D1  V9-C − BEARISH', len(v9d_no_bearish), spy_info)
 
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='BBG15 V9-C RegimeSized',
                        regime_sizing=True, **bbg_kw)
         print_report(rpt, 'BBG15  V9-C  + RegimeSizing', len(v9c_signals), spy_info)
 
-        rpt = _sim(v9c_signals, start, end, end_prices, historical, capital,
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='BBG10 V9-C', **bbg10_kw)
         print_report(rpt, 'BBG10  V9-C  PREMIUM+ (gate=10d)', len(v9c_signals), spy_info)
 
-        rpt = _sim(new_premium, start, end, end_prices, historical, capital,
+        rpt = simulate(new_premium, start, end, end_prices, historical, capital,
                        tp_as_trail=True, label='BBG10 NEW PREMIUM+', **bbg10_kw)
         print_report(rpt, 'BBG10  NEW PREMIUM+ (gate=10d)', len(new_premium), spy_info)
-
-    # ── V9-SMA150: SMA150 slope gate + cross-down exit ───────────────────────
-    if compare_sma150:
-        print(f"\n{'─'*80}")
-        print(f"[V9-SMA150 — SMA150 Slope Gate + Cross-Down Exit]")
-        print(f"  Slope gate : skip entry if SMA150[today] < SMA150[10d ago]")
-        print(f"  SMA150 exit: exit on close cross-below SMA150 (90d safety cap)")
-        print(f"  MaxDeploy  : peak % of $capital simultaneously in open positions")
-        print(f"{'─'*80}")
-        section_header()
-
-        champ_kw = {**sim_kw, 'bounce_bear_gate': 15}
-        champ_sigs = new_premium_pooled  # champion: pooled-cap NEW PREMIUM+
-
-        rpt = _sim(champ_sigs, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='SMA150 Base', **champ_kw)
-        dep = f"  MaxDeploy={rpt['max_deployed_pct']*100:.0f}%" if rpt else ""
-        print_report(rpt, f'Baseline  pooled-cap★+BBG15{dep}', len(champ_sigs), spy_info)
-
-        rpt = _sim(champ_sigs, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='SMA150Gate',
-                   sma150_slope_gate=True, **champ_kw)
-        dep = f"  MaxDeploy={rpt['max_deployed_pct']*100:.0f}%" if rpt else ""
-        print_report(rpt, f'+ SMA150 slope gate{dep}', len(champ_sigs), spy_info)
-
-        rpt = _sim(champ_sigs, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='SMA150Exit',
-                   sma150_exit=True, **champ_kw)
-        dep = f"  MaxDeploy={rpt['max_deployed_pct']*100:.0f}%" if rpt else ""
-        print_report(rpt, f'+ SMA150 cross-down exit{dep}', len(champ_sigs), spy_info)
-
-        rpt = _sim(champ_sigs, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='SMA150Both',
-                   sma150_slope_gate=True, sma150_exit=True, **champ_kw)
-        dep = f"  MaxDeploy={rpt['max_deployed_pct']*100:.0f}%" if rpt else ""
-        print_report(rpt, f'+ gate + exit combined{dep}', len(champ_sigs), spy_info)
-
-    return ending_capitals
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -1439,10 +1383,6 @@ def parse_args():
     p.add_argument('--seed',    type=int, default=42,
                    help='Random seed for --shuffle (default: 42). '
                         'Same seed always produces the same 200 symbols.')
-    p.add_argument('--sma150',    action='store_true',
-                   help='Add [V9-SMA150] section: slope gate + cross-down exit on champion config')
-    p.add_argument('--compound',  action='store_true',
-                   help='Compound capital across years: year N+1 starts with year N ending capital')
     return p.parse_args()
 
 
@@ -1463,27 +1403,19 @@ def main():
     print(f"Years: {years}  |  Capital: ${args.capital:,}  |  "
           f"Slippage: {args.slippage*100:.2f}%  Commission: ${args.commission:.2f}/side")
 
-    if args.compound:
-        print("  Compounding: ENABLED — gains roll forward into next year's position sizing")
-
     symbols = load_symbols(args.watchlist, args.limit, shuffle=args.shuffle, seed=args.seed)
     if not symbols:
         print("No symbols found.")
         return
 
-    running_capitals: dict = {}
     for year in years:
-        ending = run_year(year, symbols, args.capital,
-                          slippage_pct=args.slippage, commission=args.commission,
-                          trades_log=args.trades_log, compare_stall=args.stall_exit,
-                          bounce_bear_gate=args.bounce_bear_gate,
-                          selective=args.selective,
-                          pooled_cap=args.pooled_cap,
-                          full_compare=args.full_compare,
-                          compare_sma150=args.sma150,
-                          starting_capitals=running_capitals if args.compound else None)
-        if args.compound and ending:
-            running_capitals.update(ending)
+        run_year(year, symbols, args.capital,
+                 slippage_pct=args.slippage, commission=args.commission,
+                 trades_log=args.trades_log, compare_stall=args.stall_exit,
+                 bounce_bear_gate=args.bounce_bear_gate,
+                 selective=args.selective,
+                 pooled_cap=args.pooled_cap,
+                 full_compare=args.full_compare)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")

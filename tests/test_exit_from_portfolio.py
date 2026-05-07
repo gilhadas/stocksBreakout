@@ -322,7 +322,7 @@ class TestRefreshPricesStopHit(unittest.TestCase):
                          "No open positions should remain")
         self.assertEqual(len(saved_data['closed']), 1,
                          "One closed position should exist")
-        self.assertEqual(saved_data['closed'][0]['close_reason'], 'stop_hit')
+        self.assertEqual(saved_data['closed'][0]['close_reason'], 'atr_trail_stop')
 
     def test_above_stop_stays_open(self):
         """Position above stop should remain open."""
@@ -421,7 +421,7 @@ class TestDayAfterExit(unittest.TestCase):
         self.assertEqual(closed_pos['symbol'], 'RGC')
         self.assertEqual(closed_pos['exit_price'], 21.3,
                          "Exit should be at stop price, not gap price")
-        self.assertEqual(closed_pos['close_reason'], 'stop_hit')
+        self.assertEqual(closed_pos['close_reason'], 'atr_trail_stop')
         expected_pnl = round((21.3 - 26.38) * 75, 2)
         self.assertEqual(closed_pos['pnl'], expected_pnl,
                          f"P&L should be (stop - entry) * shares = {expected_pnl}")
