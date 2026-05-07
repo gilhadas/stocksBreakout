@@ -91,9 +91,8 @@ app.include_router(admin_router)
 
 def _portfolio_key(user_id: str) -> tuple[str, Path]:
     """Return (s3_key, local_path) for this user's portfolio.json."""
-    default_id = os.getenv('DEFAULT_USER_ID', '')
     root = Path(__file__).resolve().parent.parent
-    if not user_id or user_id == default_id:
+    if not user_id:
         s3_key = 'scanner_output/portfolio/portfolio.json'
         local = root / 'scanner_output' / 'portfolio' / 'portfolio.json'
     else:

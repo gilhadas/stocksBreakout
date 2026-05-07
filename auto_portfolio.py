@@ -30,11 +30,9 @@ def _portfolio_path_for(user_id: str | None = None) -> str:
 
     Background agents call load()/save() with no user_id and always get the
     flat legacy path so they are unaffected by the multi-user change.
-    The API layer passes the logged-in user's UUID.
+    The API layer always passes the logged-in user's UUID → per-user path.
     """
-    import os as _os
-    default_id = _os.environ.get('DEFAULT_USER_ID', '')
-    if not user_id or user_id == default_id:
+    if not user_id:
         return _PORTFOLIO_PATH
     return f'scanner_output/portfolio/{user_id}/auto_portfolio.json'
 
