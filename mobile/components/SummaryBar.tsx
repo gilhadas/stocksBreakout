@@ -6,6 +6,7 @@ interface Summary {
   cash: number;
   total_value: number;
   total_pnl: number;
+  return_pct?: number;
   unrealized: number;
   realized: number;
   open_count: number;
@@ -15,23 +16,29 @@ interface Summary {
 }
 
 export default function SummaryBar({ summary }: { summary: Summary }) {
-  const pnlColor = summary.total_pnl >= 0 ? '#22c55e' : '#ef4444';
-  const winRate = summary.closed_count > 0
-    ? ((summary.win_count / summary.closed_count) * 100).toFixed(1)
-    : '0.0';
+  const pnlColor   = summary.total_pnl >= 0 ? '#22c55e' : '#ef4444';
+  const retPct     = summary.return_pct ?? 0;
+  const retColor   = retPct >= 0 ? '#22c55e' : '#ef4444';
+  const winRate    = summary.closed_count > 0
+    ? ((summary.win_count / summary.closed_count) * 100).toFixed(0)
+    : '0';
+
+  const fmtPnl = (v: number) =>
+    `${v >= 0 ? '+' : ''}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
   return (
     <View style={styles.container}>
+      {/* Row 1: headline numbers */}
       <View style={styles.row}>
-        <Stat label="Total Value" value={`$${summary.total_value.toLocaleString()}`} />
-        <Stat label="P&L" value={`${summary.total_pnl >= 0 ? '+' : ''}$${summary.total_pnl.toFixed(0)}`} color={pnlColor} />
-        <Stat label="Cash" value={`$${summary.cash.toLocaleString()}`} />
+        <Stat label="Total Value" value={`$${summary.total_value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+        <Stat label="P&L"        value={fmtPnl(summary.total_pnl)} color={pnlColor} />
+        <Stat label="Return"     value={`${retPct >= 0 ? '+' : ''}${retPct.toFixed(1)}%`} color={retColor} />
       </View>
+      {/* Row 2: breakdown */}
       <View style={styles.row}>
-        <Stat label="Open" value={`${summary.open_count}`} />
-        <Stat label="Closed" value={`${summary.closed_count}`} />
-        <Stat label="Win Rate" value={`${winRate}%`} />
-        <Stat label="Realized" value={`$${summary.realized.toFixed(0)}`} color={summary.realized >= 0 ? '#22c55e' : '#ef4444'} />
+        <Stat label="Open"     value={`${summary.open_count}`} />
+        <Stat label={`Closed · ${winRate}% WR`} value={`${summary.closed_count}`} />
+        <Stat label="Realized" value={fmtPnl(summary.realized)} color={summary.realized >= 0 ? '#22c55e' : '#ef4444'} />
         {summary.start_date ? <Stat label="Since" value={summary.start_date} /> : null}
       </View>
     </View>
@@ -49,8 +56,8 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
 
 const styles = StyleSheet.create({
   container: { backgroundColor: '#1a1a2e', padding: 12, borderRadius: 8, margin: 12, gap: 8 },
-  row: { flexDirection: 'row', justifyContent: 'space-around' },
-  stat: { alignItems: 'center', minWidth: 70 },
-  label: { color: '#888', fontSize: 11, marginBottom: 2 },
-  value: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  row:       { flexDirection: 'row', justifyContent: 'space-around' },
+  stat:      { alignItems: 'center', minWidth: 70 },
+  label:     { color: '#888', fontSize: 11, marginBottom: 2 },
+  value:     { color: '#fff', fontSize: 15, fontWeight: '600' },
 });

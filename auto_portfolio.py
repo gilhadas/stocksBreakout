@@ -1964,7 +1964,11 @@ def get_summary(data: dict) -> dict:
     unrealized = market_val - cost_basis
     realized   = sum(t.get('pnl', 0) for t in data['closed'])
     total_val  = cash + market_val
-    total_pnl  = total_val - data['capital']
+    # capital accumulates realized P&L on each close, so true total P&L is
+    # unrealized + realized (not total_val - capital, which omits realized).
+    total_pnl    = unrealized + realized
+    initial_cap  = data['capital'] - realized  # reverse out accumulated realized
+    return_pct   = (total_pnl / initial_cap * 100) if initial_cap else 0.0
 
     all_dates = [p.get('date_added', '') for p in data.get('positions', [])] + \
                 [t.get('date_added', '') for t in data.get('closed', [])]
@@ -1979,6 +1983,7 @@ def get_summary(data: dict) -> dict:
         'realized':     round(realized, 2),
         'total_value':  round(total_val, 2),
         'total_pnl':    round(total_pnl, 2),
+        'return_pct':   round(return_pct, 2),
         'open_count':   len(data['positions']),
         'closed_count': len(data['closed']),
         'win_count':    sum(1 for t in data['closed'] if t.get('pnl', 0) > 0),
