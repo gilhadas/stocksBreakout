@@ -70,7 +70,12 @@ SCORING_WEIGHTS = {
     'adx_trending': 5,          # V1: ADX showing trend strength
     # Shared checks
     'not_overextended': 5,      # V4: Not blown off from SMA (swing/longterm only)
+    'aroon_confirm': 5,         # V12: Aroon oscillator confirms uptrend (osc > threshold)
 }
+
+# Aroon indicator settings
+AROON_N                  = 25   # standard lookback period
+AROON_CONFIRM_THRESHOLD  = 50   # oscillator > 50 = strong uptrend confirmation
 
 SCORE_THRESHOLDS = {
     'GOLD': 99,      # was 90 — optimizer tightened GOLD (fewer but higher conviction)

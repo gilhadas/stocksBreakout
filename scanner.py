@@ -450,6 +450,16 @@ class BreakoutDetector:
                         not_overextended = sma_dist_pct <= v4_thresholds['mild']
                         checks['not_overextended'] = not_overextended
 
+            # V12: Aroon oscillator confirmation (uptrend strength check)
+            try:
+                from indicators import calculate_aroon
+                from config import AROON_N, AROON_CONFIRM_THRESHOLD
+                _aroon = calculate_aroon(df, n=AROON_N)
+                _aroon_osc = float(_aroon['aroon_osc'].iloc[-1]) if not pd.isna(_aroon['aroon_osc'].iloc[-1]) else 0.0
+                checks['aroon_confirm'] = _aroon_osc > AROON_CONFIRM_THRESHOLD
+            except Exception:
+                pass  # insufficient history or missing columns — skip silently
+
             _surge_thresholds = _sc.get('score_thresholds') if is_surge else None
             score, max_score, quality = self._calculate_signal_score(
                 checks, score_thresholds_override=_surge_thresholds

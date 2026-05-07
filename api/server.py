@@ -267,10 +267,37 @@ def get_skipped(current_user: User = Depends(get_current_user)):
 
 # ── Manual Portfolio ─────────────────────────────────────────────────────────
 
+# Price cache: {user_id: {"prices": {...}, "ts": float}}
+_PRICE_CACHE: dict[str, dict] = {}
+_PRICE_CACHE_TTL = 300  # 5 minutes
+
+
+def _fetch_prices(symbols: list[str], user_id: str) -> dict[str, float | None]:
+    """Return cached prices if fresh, otherwise re-download from yfinance."""
+    import time, yfinance as yf
+
+    cached = _PRICE_CACHE.get(user_id)
+    if cached and (time.time() - cached["ts"]) < _PRICE_CACHE_TTL:
+        return cached["prices"]
+
+    prices: dict[str, float | None] = {}
+    if symbols:
+        try:
+            tickers = yf.download(symbols, period="2d", progress=False, auto_adjust=True,
+                                  timeout=20)
+            if not tickers.empty:
+                closes = tickers["Close"].iloc[-1]
+                for sym in symbols:
+                    prices[sym] = float(closes[sym]) if sym in closes else None
+        except Exception:
+            pass
+
+    _PRICE_CACHE[user_id] = {"prices": prices, "ts": time.time()}
+    return prices
+
+
 @app.get("/manual-portfolio")
 def get_manual_portfolio(current_user: User = Depends(get_current_user)):
-    import yfinance as yf
-
     data = _load_portfolio_json(current_user.id)
     if not data:
         return {"positions": [], "closed": [], "cash": 0, "last_updated": ""}
@@ -279,16 +306,7 @@ def get_manual_portfolio(current_user: User = Depends(get_current_user)):
     pos_list = [{"symbol": k, **v} for k, v in raw.items()] if isinstance(raw, dict) else raw
 
     symbols = [p["symbol"] for p in pos_list if p.get("symbol")]
-    prices = {}
-    if symbols:
-        try:
-            tickers = yf.download(symbols, period="1d", progress=False, auto_adjust=True)
-            if not tickers.empty:
-                closes = tickers["Close"].iloc[-1]
-                for sym in symbols:
-                    prices[sym] = float(closes[sym]) if sym in closes else None
-        except Exception:
-            pass
+    prices = _fetch_prices(symbols, current_user.id)
 
     def _status(pos, price):
         stop = pos.get("stop", 0)
@@ -539,8 +557,9 @@ class RecalculateRequest(BaseModel):
 
 
 # In-memory job store for background recalculate jobs.
-# { job_id: {"status": "running"|"done"|"error", "result": {...}, "error": str} }
+# { job_id: {"status": "running"|"done"|"error", "result": {...}, "error": str, "started": float} }
 _RECALC_JOBS: dict[str, dict] = {}
+_RECALC_JOB_TTL = 300  # mark as error after 5 minutes if still "running"
 
 
 @app.post("/portfolio/recalculate")
@@ -548,9 +567,9 @@ def portfolio_recalculate_endpoint(
     req: RecalculateRequest,
     current_user: User = Depends(get_current_user),
 ):
-    import threading, uuid
+    import threading, uuid, time
     job_id = uuid.uuid4().hex[:12]
-    _RECALC_JOBS[job_id] = {"status": "running"}
+    _RECALC_JOBS[job_id] = {"status": "running", "started": time.time()}
 
     def _run():
         import auto_portfolio as ap
@@ -571,10 +590,13 @@ def portfolio_recalculate_endpoint(
 
 @app.get("/portfolio/recalculate/status/{job_id}")
 def portfolio_recalculate_status(job_id: str, current_user: User = Depends(get_current_user)):
+    import time
     job = _RECALC_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    if job.get("status") == "running" and (time.time() - job.get("started", 0)) > _RECALC_JOB_TTL:
+        _RECALC_JOBS[job_id] = {**job, "status": "error", "error": "timeout"}
+    return _RECALC_JOBS[job_id]
 
 
 # ── Push Notifications ───────────────────────────────────────────────────────

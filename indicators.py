@@ -210,6 +210,19 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return adx
 
 
+def calculate_aroon(df: pd.DataFrame, n: int = 25) -> pd.DataFrame:
+    """Aroon Up/Down/Oscillator over n periods. Osc > +50 = strong uptrend."""
+    roll_high = df['high'].rolling(n + 1)
+    roll_low  = df['low'].rolling(n + 1)
+    # argmax/argmin position (0=oldest, n=newest) directly encodes recency
+    aroon_up   = roll_high.apply(lambda x: int(x.argmax()) / n * 100, raw=True)
+    aroon_down = roll_low.apply(lambda x: int(x.argmin()) / n * 100, raw=True)
+    return pd.DataFrame(
+        {'aroon_up': aroon_up, 'aroon_down': aroon_down, 'aroon_osc': aroon_up - aroon_down},
+        index=df.index,
+    )
+
+
 def calculate_roc(df: pd.DataFrame, period: int = 10) -> pd.Series:
     """Calculate Rate of Change — price velocity indicator"""
     prev_close = df['close'].shift(period)
