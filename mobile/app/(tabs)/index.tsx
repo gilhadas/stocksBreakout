@@ -57,7 +57,7 @@ async function exportSkippedCSV(rows: any[]) {
   }
 }
 import { useFocusEffect, router } from 'expo-router';
-import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, executeSwap, undoSwap, getToken, clearToken, resetPortfolio, recalculatePortfolio, getEmailFromToken } from '../../lib/api';
+import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, fetchSwapSuggestions, executeSwap, undoSwap, getToken, clearToken, resetPortfolio, recalculatePortfolio, getEmailFromToken } from '../../lib/api';
 import SummaryBar from '../../components/SummaryBar';
 import PositionCard from '../../components/PositionCard';
 
@@ -225,6 +225,11 @@ export default function PortfolioScreen() {
       if (e.message === 'Session expired') router.replace('/login');
       else setError(e.message);
     }
+    // Silently pre-load swap suggestions so banner is visible without scrolling
+    try {
+      const swapData: any = await fetchSwapSuggestions();
+      if (swapData.swaps?.length > 0) setSwapResults(swapData.swaps);
+    } catch { /* non-critical */ }
   }, []);
 
   useFocusEffect(useCallback(() => { loadData(); }, [loadData]));
@@ -445,6 +450,21 @@ export default function PortfolioScreen() {
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
+      {activeTab === 'positions' && swapResults !== null && swapResults.length > 0 && (
+        <Pressable style={styles.swapBanner} onPress={() => {
+          // Scroll user to swap results at bottom — just highlight the button area
+          setShowManage(false);
+        }}>
+          <Text style={{ fontSize: 18 }}>⚡</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.swapBannerTitle}>
+              {swapResults.length} Swap Opportunit{swapResults.length === 1 ? 'y' : 'ies'} — scroll down
+            </Text>
+            <Text style={styles.swapBannerSub}>Skipped signals outperforming held positions</Text>
+          </View>
+        </Pressable>
+      )}
+
       {activeTab === 'positions' ? (
         <FlatList
           data={positions}
@@ -622,6 +642,9 @@ const styles = StyleSheet.create({
   stoppedBadge: { fontSize: 9, fontWeight: '700', color: '#ef4444', borderWidth: 1, borderColor: '#ef4444', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
   csvBtn: { marginLeft: 'auto', backgroundColor: '#1e3a5f', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#3b82f6' },
   csvBtnText: { color: '#60a5fa', fontSize: 12, fontWeight: '700' },
+  swapBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#422006', borderWidth: 1, borderColor: '#f59e0b', marginHorizontal: 8, marginTop: 6, marginBottom: 2, borderRadius: 10, padding: 12 },
+  swapBannerTitle: { color: '#fbbf24', fontSize: 14, fontWeight: '700' },
+  swapBannerSub: { color: '#92400e', fontSize: 11, marginTop: 1 },
   swapBtn: { backgroundColor: '#4c1d95', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8, borderWidth: 1, borderColor: '#7c3aed' },
   swapBtnDisabled: { opacity: 0.5 },
   swapBtnText: { color: '#c4b5fd', fontSize: 13, fontWeight: '700' },
