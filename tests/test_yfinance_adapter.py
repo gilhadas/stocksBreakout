@@ -4,12 +4,14 @@ Unit tests for yfinance adapter
 
 import unittest
 import pandas as pd
+import pytest
 from datetime import datetime
 from yfinance_adapter import YFinanceAdapter
 
 
+@pytest.mark.tier3
 class TestYFinanceAdapter(unittest.TestCase):
-    """Test yfinance data adapter"""
+    """Test yfinance data adapter — requires live yfinance network access."""
     
     def setUp(self):
         """Set up test fixtures"""
