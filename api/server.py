@@ -509,8 +509,18 @@ def buy_position(req: BuyRequest, current_user: User = Depends(get_current_user)
 
 # ── Swap Advisor ─────────────────────────────────────────────────────────────
 
+@app.get("/portfolio/swap-suggestions")
+def swap_suggestions_get(current_user: User = Depends(get_current_user)):
+    """Silent polling endpoint — no notification side-effect. Used by mobile on page load."""
+    import auto_portfolio as ap
+
+    swaps = ap.suggest_swaps(user_id=current_user.id, notify=False)
+    return {"swaps": swaps, "count": len(swaps)}
+
+
 @app.post("/portfolio/suggest-swaps")
 def suggest_swaps_endpoint(current_user: User = Depends(get_current_user)):
+    """Manual trigger — sends notification when swaps are found."""
     import auto_portfolio as ap
 
     swaps = ap.suggest_swaps(user_id=current_user.id, notify=True)
@@ -529,6 +539,29 @@ def execute_swap_endpoint(req: ExecuteSwapRequest, current_user: User = Depends(
     result = ap.execute_swap(req.close_symbol, req.open_symbol, user_id=current_user.id)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("reason", "swap failed"))
+
+    # Notify on successful execution
+    try:
+        from notifier import Notifier
+        opened = result.get("opened", {})
+        closed_rec = result.get("closed", {})
+        Notifier().send_all(
+            subject=f"✅ Swap Executed: {req.close_symbol} → {req.open_symbol}",
+            message=(
+                f"Portfolio swap completed:\n"
+                f"• Closed {req.close_symbol} @ ${closed_rec.get('exit_price', '?')}"
+                f"  (P&L: {closed_rec.get('pnl_pct', 0):+.1f}%)\n"
+                f"• Opened {req.open_symbol} @ ${opened.get('entry_price', '?')}"
+                f"  [{opened.get('quality', '')}]\n"
+                f"  Stop ${opened.get('stop', '?')} | Target ${opened.get('target', '?')}"
+            ),
+            signals=None,
+            notification_type='signals',
+            force=True,
+        )
+    except Exception:
+        pass
+
     return result
 
 

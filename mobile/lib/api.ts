@@ -164,6 +164,10 @@ export function buyPosition(data: {
   });
 }
 
+export function fetchSwapSuggestions() {
+  return authFetch('/portfolio/swap-suggestions');
+}
+
 export function suggestSwaps() {
   return authFetch('/portfolio/suggest-swaps', { method: 'POST' });
 }

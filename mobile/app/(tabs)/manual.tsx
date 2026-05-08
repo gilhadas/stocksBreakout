@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable, Modal, TextInput, ActivityIndicator } from 'react-native';
 import { useFocusEffect, router } from 'expo-router';
-import { fetchManualPortfolio, computeStops, sellPosition, getToken } from '../../lib/api';
+import { fetchManualPortfolio, computeStops, sellPosition, getToken, fetchSwapSuggestions, executeSwap, undoSwap } from '../../lib/api';
 import SummaryBar from '../../components/SummaryBar';
 
 const STATUS_COLOR: Record<string, string> = {
@@ -146,6 +146,11 @@ export default function ManualPortfolioScreen() {
   const [exitPrice, setExitPrice]     = useState('');
   const [selling, setSelling]         = useState(false);
   const [sellError, setSellError]     = useState('');
+  const [swaps, setSwaps]             = useState<any[]>([]);
+  const [swapModal, setSwapModal]     = useState(false);
+  const [executingSwap, setExecutingSwap] = useState<string | null>(null);
+  const [swapMsg, setSwapMsg]         = useState('');
+  const [undoAvailable, setUndoAvailable] = useState(false);
 
   const handleComputeStops = async () => {
     setComputing(true);
@@ -164,6 +169,32 @@ export default function ManualPortfolioScreen() {
     setSellTarget(pos);
     setExitPrice(pos.current_price ? pos.current_price.toFixed(2) : '');
     setSellError('');
+  };
+
+  const handleExecuteSwap = async (closeSymbol: string, openSymbol: string) => {
+    setExecutingSwap(closeSymbol);
+    setSwapMsg('');
+    try {
+      await executeSwap(closeSymbol, openSymbol);
+      setSwapMsg(`✅ Swapped ${closeSymbol} → ${openSymbol}`);
+      setUndoAvailable(true);
+      setSwaps(prev => prev.filter(s => s.close_symbol !== closeSymbol));
+      await loadData();
+    } catch (e: any) {
+      setSwapMsg(`Error: ${e.message}`);
+    }
+    setExecutingSwap(null);
+  };
+
+  const handleUndoSwap = async () => {
+    try {
+      await undoSwap();
+      setUndoAvailable(false);
+      setSwapMsg('↩ Swap undone');
+      await loadData();
+    } catch (e: any) {
+      setSwapMsg(`Undo failed: ${e.message}`);
+    }
   };
 
   const handleSell = async () => {
@@ -197,6 +228,13 @@ export default function ManualPortfolioScreen() {
     } catch (e: any) {
       if (e.message === 'Session expired') router.replace('/login');
       else setError(e.message);
+    }
+    // Silently fetch swap suggestions (no notification side-effect)
+    try {
+      const swapData: any = await fetchSwapSuggestions();
+      setSwaps(swapData.swaps || []);
+    } catch {
+      // non-critical — don't surface swap errors to the user
     }
   }, []);
 
@@ -311,8 +349,103 @@ export default function ManualPortfolioScreen() {
         </Pressable>
       </Modal>
 
+      {/* ── Swap Suggestions Modal ── */}
+      <Modal visible={swapModal} transparent animationType="slide" onRequestClose={() => setSwapModal(false)}>
+        <Pressable style={styles.modalOverlay} onPress={() => setSwapModal(false)}>
+          <Pressable style={styles.swapModalBox} onPress={() => {}}>
+            <View style={styles.swapModalHeader}>
+              <Text style={styles.swapModalTitle}>⚡ Swap Opportunities</Text>
+              <Pressable onPress={() => setSwapModal(false)}>
+                <Text style={styles.swapModalClose}>✕</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.swapModalSub}>
+              These skipped signals are outperforming your current positions.
+            </Text>
+
+            {swapMsg ? (
+              <Text style={[styles.swapMsg, { color: swapMsg.startsWith('Error') ? '#ef4444' : '#22c55e' }]}>
+                {swapMsg}
+              </Text>
+            ) : null}
+
+            {swaps.length === 0 ? (
+              <Text style={styles.swapEmpty}>No swap opportunities right now.</Text>
+            ) : (
+              swaps.map((sw, i) => {
+                const delta = (sw.open_momentum ?? 0) - (sw.close_pnl_pct ?? 0);
+                const isExecuting = executingSwap === sw.close_symbol;
+                return (
+                  <View key={i} style={styles.swapCard}>
+                    {/* Close side */}
+                    <View style={styles.swapSide}>
+                      <Text style={styles.swapSideLabel}>CLOSE</Text>
+                      <Text style={styles.swapSymbol}>{sw.close_symbol}</Text>
+                      <Text style={[styles.swapPnl, { color: (sw.close_pnl_pct ?? 0) >= 0 ? '#22c55e' : '#ef4444' }]}>
+                        {sw.close_pnl_pct != null ? `${sw.close_pnl_pct > 0 ? '+' : ''}${sw.close_pnl_pct.toFixed(1)}%` : '—'}
+                      </Text>
+                      {sw.close_quality ? <Text style={styles.swapQuality}>{sw.close_quality}</Text> : null}
+                    </View>
+
+                    <Text style={styles.swapArrow}>→</Text>
+
+                    {/* Open side */}
+                    <View style={styles.swapSide}>
+                      <Text style={styles.swapSideLabel}>OPEN</Text>
+                      <Text style={styles.swapSymbol}>{sw.open_symbol}</Text>
+                      <Text style={[styles.swapPnl, { color: '#22c55e' }]}>
+                        {sw.open_momentum != null ? `+${sw.open_momentum.toFixed(1)}%` : '—'}
+                      </Text>
+                      {sw.open_quality ? <Text style={styles.swapQuality}>{sw.open_quality}</Text> : null}
+                    </View>
+
+                    {/* Delta */}
+                    <View style={styles.swapDeltaCol}>
+                      <Text style={styles.swapDeltaLabel}>Δ improvement</Text>
+                      <Text style={styles.swapDelta}>+{delta.toFixed(1)}%</Text>
+                      {sw.open_rr ? <Text style={styles.swapMeta}>R:R {sw.open_rr}</Text> : null}
+                    </View>
+
+                    <Pressable
+                      style={[styles.swapExecBtn, isExecuting && { opacity: 0.5 }]}
+                      onPress={() => handleExecuteSwap(sw.close_symbol, sw.open_symbol)}
+                      disabled={!!executingSwap}
+                    >
+                      {isExecuting
+                        ? <ActivityIndicator color="#fff" size="small" />
+                        : <Text style={styles.swapExecText}>Swap</Text>
+                      }
+                    </Pressable>
+                  </View>
+                );
+              })
+            )}
+
+            {undoAvailable && (
+              <Pressable style={styles.undoBtn} onPress={handleUndoSwap}>
+                <Text style={styles.undoBtnText}>↩ Undo Last Swap</Text>
+              </Pressable>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {activeTab === 'positions' ? (
         <>
+          {/* ── Swap Banner ── */}
+          {swaps.length > 0 && (
+            <Pressable style={styles.swapBanner} onPress={() => setSwapModal(true)}>
+              <Text style={styles.swapBannerIcon}>⚡</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.swapBannerTitle}>
+                  {swaps.length} Swap Opportunit{swaps.length === 1 ? 'y' : 'ies'}
+                </Text>
+                <Text style={styles.swapBannerSub}>Skipped signals outperforming held positions</Text>
+              </View>
+              <Text style={styles.swapBannerArrow}>›</Text>
+            </Pressable>
+          )}
+
           <Pressable
             style={[styles.computeBtn, computing && { opacity: 0.6 }]}
             onPress={handleComputeStops}
@@ -433,6 +566,49 @@ const styles = StyleSheet.create({
 
   buyBtn:       { backgroundColor: '#22c55e22', borderWidth: 1, borderColor: '#22c55e', borderRadius: 8, margin: 8, padding: 11, alignItems: 'center' },
   buyBtnText:   { color: '#22c55e', fontSize: 13, fontWeight: '700' },
+
+  // Swap banner
+  swapBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: '#422006', borderWidth: 1, borderColor: '#f59e0b',
+    marginHorizontal: 8, marginTop: 6, marginBottom: 2, borderRadius: 10, padding: 12,
+  },
+  swapBannerIcon:  { fontSize: 20 },
+  swapBannerTitle: { color: '#fbbf24', fontSize: 14, fontWeight: '700' },
+  swapBannerSub:   { color: '#92400e', fontSize: 11, marginTop: 1 },
+  swapBannerArrow: { color: '#f59e0b', fontSize: 20, fontWeight: '700' },
+
+  // Swap modal
+  swapModalBox: {
+    backgroundColor: '#0f0f23', borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    padding: 20, maxHeight: '90%', position: 'absolute', bottom: 0, left: 0, right: 0,
+  },
+  swapModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  swapModalTitle:  { color: '#fbbf24', fontSize: 18, fontWeight: '700' },
+  swapModalClose:  { color: '#888', fontSize: 20, paddingHorizontal: 8 },
+  swapModalSub:    { color: '#555', fontSize: 12, marginBottom: 14 },
+  swapMsg:         { fontSize: 13, fontWeight: '600', textAlign: 'center', marginBottom: 10 },
+  swapEmpty:       { color: '#555', textAlign: 'center', paddingVertical: 20 },
+
+  // Swap card
+  swapCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#16213e', borderRadius: 10, padding: 10, marginBottom: 10,
+  },
+  swapSide:      { flex: 2, alignItems: 'center' },
+  swapSideLabel: { color: '#555', fontSize: 9, fontWeight: '700', letterSpacing: 1 },
+  swapSymbol:    { color: '#fff', fontSize: 16, fontWeight: '700', marginTop: 2 },
+  swapPnl:       { fontSize: 14, fontWeight: '600' },
+  swapQuality:   { color: '#888', fontSize: 10, marginTop: 2 },
+  swapArrow:     { color: '#6366f1', fontSize: 18, fontWeight: '700' },
+  swapDeltaCol:  { flex: 2, alignItems: 'center' },
+  swapDeltaLabel:{ color: '#555', fontSize: 9 },
+  swapDelta:     { color: '#22c55e', fontSize: 15, fontWeight: '700' },
+  swapMeta:      { color: '#888', fontSize: 10 },
+  swapExecBtn:   { flex: 2, backgroundColor: '#6366f1', borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
+  swapExecText:  { color: '#fff', fontWeight: '700', fontSize: 13 },
+  undoBtn:       { borderWidth: 1, borderColor: '#555', borderRadius: 8, padding: 10, alignItems: 'center', marginTop: 6 },
+  undoBtnText:   { color: '#888', fontWeight: '600' },
 
   modalOverlay: { flex: 1, backgroundColor: '#000000aa', justifyContent: 'center', padding: 24 },
   modalBox:     { backgroundColor: '#16213e', borderRadius: 14, padding: 20, gap: 12 },
