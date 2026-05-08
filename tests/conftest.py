@@ -19,6 +19,18 @@ if 'ib_insync' not in sys.modules:
     _ib_mock.util = MagicMock()
     sys.modules['ib_insync'] = _ib_mock
 
+# Stub requests and yfinance so scan_feedback_agent (and notifier) can be imported
+# in CI without these packages installed. Tests that need them patch at the call site.
+try:
+    import requests  # noqa: F401
+except ImportError:
+    sys.modules['requests'] = MagicMock()
+
+try:
+    import yfinance  # noqa: F401
+except ImportError:
+    sys.modules['yfinance'] = MagicMock()
+
 # Load test environment variables (dummy values — no real secrets in CI)
 try:
     from dotenv import load_dotenv
