@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable, Alert, Platform, TextInput } from 'react-native';
+import { View, FlatList, Text, StyleSheet, RefreshControl, Pressable, Alert, Platform, TextInput, ActivityIndicator } from 'react-native';
 import { cacheDirectory, writeAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
@@ -189,6 +189,7 @@ export default function PortfolioScreen() {
   const [skippedTotalGainPct, setSkippedTotalGainPct] = useState(0);
   const [skippedTotalNorm, setSkippedTotalNorm] = useState(0);
   const [summary, setSummary] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [swapping, setSwapping] = useState(false);
   const [swapResults, setSwapResults] = useState<any[] | null>(null);
@@ -230,6 +231,7 @@ export default function PortfolioScreen() {
       const swapData: any = await fetchSwapSuggestions();
       if (swapData.swaps?.length > 0) setSwapResults(swapData.swaps);
     } catch { /* non-critical */ }
+    setLoading(false);
   }, []);
 
   useFocusEffect(useCallback(() => { loadData(); }, [loadData]));
@@ -448,6 +450,13 @@ export default function PortfolioScreen() {
         </View>
       )}
 
+      {loading ? (
+        <View style={styles.loaderContainer}>
+          <ActivityIndicator size="large" color="#6366f1" />
+          <Text style={styles.loaderText}>Loading portfolio…</Text>
+        </View>
+      ) : (
+      <>
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
       {activeTab === 'positions' && swapResults !== null && swapResults.length > 0 && (
@@ -577,6 +586,8 @@ export default function PortfolioScreen() {
           }
         />
       )}
+      </>
+      )}
     </View>
   );
 }
@@ -642,6 +653,8 @@ const styles = StyleSheet.create({
   stoppedBadge: { fontSize: 9, fontWeight: '700', color: '#ef4444', borderWidth: 1, borderColor: '#ef4444', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
   csvBtn: { marginLeft: 'auto', backgroundColor: '#1e3a5f', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#3b82f6' },
   csvBtnText: { color: '#60a5fa', fontSize: 12, fontWeight: '700' },
+  loaderContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16, paddingTop: 80 },
+  loaderText: { color: '#555', fontSize: 14 },
   swapBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#422006', borderWidth: 1, borderColor: '#f59e0b', marginHorizontal: 8, marginTop: 6, marginBottom: 2, borderRadius: 10, padding: 12 },
   swapBannerTitle: { color: '#fbbf24', fontSize: 14, fontWeight: '700' },
   swapBannerSub: { color: '#92400e', fontSize: 11, marginTop: 1 },
