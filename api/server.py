@@ -511,10 +511,10 @@ def buy_position(req: BuyRequest, current_user: User = Depends(get_current_user)
 
 @app.get("/portfolio/swap-suggestions")
 def swap_suggestions_get(current_user: User = Depends(get_current_user)):
-    """Silent polling endpoint — no notification side-effect. Used by mobile on page load."""
+    """Silent polling endpoint — no notification. Uses 30-day window to surface missed opportunities."""
     import auto_portfolio as ap
 
-    swaps = ap.suggest_swaps(user_id=current_user.id, notify=False)
+    swaps = ap.suggest_swaps(user_id=current_user.id, notify=False, fresh_days=30)
     return {"swaps": swaps, "count": len(swaps)}
 
 
