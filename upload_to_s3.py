@@ -42,8 +42,13 @@ if _env_file.exists():
                 _val = _val.split('#')[0].strip().strip('"').strip("'")  # strip inline comments
                 os.environ.setdefault(_key.strip(), _val)
 
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
+try:
+    import boto3
+    from botocore.exceptions import ClientError, NoCredentialsError
+except ImportError:  # CI environment without boto3 installed
+    boto3 = None  # type: ignore[assignment]
+    ClientError = OSError  # type: ignore[assignment,misc]
+    NoCredentialsError = OSError  # type: ignore[assignment,misc]
 
 # ── Config ────────────────────────────────────────────────────────────────────
 S3_BUCKET = os.environ.get('S3_BUCKET', 'stocks-breakout-scanner-s3-bucket')

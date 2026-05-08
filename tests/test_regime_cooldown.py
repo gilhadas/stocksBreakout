@@ -24,6 +24,9 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
+_NY_TZ = ZoneInfo('America/New_York')
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -154,7 +157,7 @@ class TestCooldownActivation(_RegimeTestBase):
         # Backdate the regime change to 13 hours ago
         state = self._read_state()
         state['last_regime_change'] = (
-            datetime.now() - timedelta(hours=13)
+            datetime.now(_NY_TZ) - timedelta(hours=13)
         ).isoformat()
         self._write_state(state)
         active, remaining = check_regime_cooldown(12)

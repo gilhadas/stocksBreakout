@@ -356,7 +356,7 @@ class TestTelegramAlerts:
 
     @patch('scan_feedback_agent.requests.post')
     def test_send_telegram_alerts_breakout(self, mock_post, monkeypatch):
-        """_send_telegram_alerts() should send SCALP BREAKOUT message."""
+        """_send_telegram_alerts() should send BREAKOUT message."""
         monkeypatch.setattr(
             sfa, 'NOTIFICATIONS',
             {
@@ -380,7 +380,7 @@ class TestTelegramAlerts:
 
         mock_post.assert_called_once()
         call_data = mock_post.call_args[1]['data']
-        assert 'SCALP BREAKOUT' in call_data['text']
+        assert 'BREAKOUT [' in call_data['text']
         assert 'AAPL' in call_data['text']
 
 
@@ -429,8 +429,9 @@ class TestEventDetection:
                 {'AAPL': 150.5},  # prices (above prev_high)
                 {'AAPL': 2.5},    # vol_ratios (meets VOL_MULT requirement)
             )
-            with patch('scan_feedback_agent._run_scanner'):
-                alerts = sfa.run_once(date_str, rescan_interval=0)
+            with patch('scan_feedback_agent._fetch_prev_close', return_value={'AAPL': 148.0}):
+                with patch('scan_feedback_agent._validate_breakout_with_scanner', return_value={'Quality': 'PREMIUM', 'R:R': 2.5}):
+                    alerts = sfa.run_once(date_str, rescan_interval=0)
 
         breakout_alerts = [a for a in alerts if a['event'] == 'BREAKOUT']
         assert len(breakout_alerts) > 0
@@ -476,7 +477,7 @@ class TestEventDetection:
                 {'AAPL': 152.76},
                 {'AAPL': 1.0},
             )
-            with patch('scan_feedback_agent._run_scanner'):
+            with patch('scan_feedback_agent._validate_breakout_with_scanner'):
                 alerts = sfa.run_once(date_str, rescan_interval=0)
 
         surge_alerts = [a for a in alerts if a['event'] == 'SURGE']
@@ -521,7 +522,7 @@ class TestEventDetection:
                 {'AAPL': 147.44},
                 {'AAPL': 1.0},
             )
-            with patch('scan_feedback_agent._run_scanner'):
+            with patch('scan_feedback_agent._validate_breakout_with_scanner'):
                 alerts = sfa.run_once(date_str, rescan_interval=0)
 
         # Verify the function completes successfully
@@ -570,8 +571,8 @@ class TestEventDetection:
                 {'AAPL': 148.4},
                 {'AAPL': 1.0},
             )
-            with patch('scan_feedback_agent._run_scanner'):
-                with patch('scan_feedback_agent.sp.close_position'):
+            with patch('scan_feedback_agent._validate_breakout_with_scanner'):
+                with patch('scan_feedback_agent.ap.close_position'):
                     alerts = sfa.run_once(date_str, rescan_interval=0)
 
         exit_alerts = [a for a in alerts if a['event'] == 'EXIT']
@@ -608,7 +609,7 @@ class TestCSVOutput:
                 {'AAPL': 150.0, 'MSFT': 300.0},
                 {'AAPL': 1.0, 'MSFT': 1.0},
             )
-            with patch('scan_feedback_agent._run_scanner'):
+            with patch('scan_feedback_agent._validate_breakout_with_scanner'):
                 sfa.run_once(date_str, rescan_interval=0)
 
         fb_path = sfa._feedback_path(date_str)
