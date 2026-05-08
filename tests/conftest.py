@@ -31,6 +31,18 @@ try:
 except ImportError:
     sys.modules['yfinance'] = MagicMock()
 
+try:
+    import streamlit  # noqa: F401
+except ImportError:
+    import logging as _logging
+    _st_mock = MagicMock()
+    # streamlit.logger.get_logger must return a real logger so log calls work
+    _st_mock.logger.get_logger = _logging.getLogger
+    sys.modules['streamlit'] = _st_mock
+    sys.modules['streamlit.logger'] = _st_mock.logger
+    sys.modules['streamlit.runtime'] = MagicMock()
+    sys.modules['streamlit.runtime.scriptrunner'] = MagicMock()
+
 # Load test environment variables (dummy values — no real secrets in CI)
 try:
     from dotenv import load_dotenv
