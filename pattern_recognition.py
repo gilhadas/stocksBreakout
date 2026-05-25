@@ -21,6 +21,7 @@ from quantkit.patterns import (  # noqa: F401, F403
     detect_rising_wedge,
     detect_rounding_bottom,
     detect_inverted_cup_and_handle,
+    detect_tunnel,
     detect_vcp,
     detect_candle_patterns,
     detect_sr_levels,

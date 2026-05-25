@@ -1356,6 +1356,186 @@ def _cluster_levels(prices: List[float], tolerance_pct: float = 0.015) -> List[T
     return sorted(clusters, key=lambda x: -x[1])
 
 
+def detect_tunnel(df: pd.DataFrame, ticker: str = "") -> Optional[Dict]:
+    """
+    Detect parallel channel (tunnel) where price oscillates between support and resistance.
+
+    Structure:
+    1. Find swing highs and lows over last 60 bars
+    2. Fit linear regression through last 4 swing highs → resistance trendline
+    3. Fit linear regression through last 4 swing lows → support trendline
+    4. Check slope parallelism: abs(res_slope - sup_slope) / res_slope < 5%
+    5. Count touches: price within 1.5% of each trendline (min 3 touches per side)
+    6. Width: trendline distance ≥ 3% of current price, ≤ 15% (not too tight, not too wide)
+    7. Recent oscillation: last 10 bars show at least 1 touch per side
+    8. Breakout: price clears resistance (within 0.5 ATR above) or support (within 0.5 ATR below)
+    9. Volume: current volume > 1.2× 20-day average
+
+    Fires: bullish on resistance breakout, bearish on support breakdown
+    Target: opposite side of tunnel (e.g., bullish breakout target = resistance + tunnel_width)
+
+    Min bars: 30 | Window: last 60
+    """
+    try:
+        if len(df) < 30:
+            return None
+
+        window = df.tail(60).copy()
+        current_price = window['close'].iloc[-1]
+        current_high = window['high'].iloc[-1]
+        current_low = window['low'].iloc[-1]
+
+        # 1. Find swing points
+        swing_highs, swing_lows = _find_swing_points(
+            window['high'].values, window['low'].values, order=3
+        )
+
+        if len(swing_highs) < 4 or len(swing_lows) < 4:
+            return None
+
+        # 2. Get last 4 swing highs/lows (most recent structure)
+        res_indices = [idx for idx, _ in swing_highs[-4:]]
+        sup_indices = [idx for idx, _ in swing_lows[-4:]]
+        res_prices = [window['high'].iloc[idx] for idx in res_indices]
+        sup_prices = [window['low'].iloc[idx] for idx in sup_indices]
+
+        # 3. Fit trendlines via linear regression
+        try:
+            res_slope, res_intercept = np.polyfit(res_indices, res_prices, 1)
+            sup_slope, sup_intercept = np.polyfit(sup_indices, sup_prices, 1)
+        except Exception:
+            return None
+
+        # 4. Check parallelism: slope difference < 5%
+        if res_slope == 0:  # Avoid division by zero
+            slope_diff_pct = abs(sup_slope - res_slope) * 100
+        else:
+            slope_diff_pct = abs(sup_slope - res_slope) / abs(res_slope) * 100
+
+        if slope_diff_pct > 5.0:  # Not parallel enough
+            return None
+
+        # 5. Project trendlines to current bar (bar index = len(window) - 1)
+        current_idx = len(window) - 1
+        res_current = res_slope * current_idx + res_intercept
+        sup_current = sup_slope * current_idx + sup_intercept
+
+        # Ensure resistance > support
+        if res_current <= sup_current:
+            return None
+
+        tunnel_width = res_current - sup_current
+
+        # 6. Width check: 3% ≤ width ≤ 15% of current price
+        width_pct = tunnel_width / current_price * 100
+        if width_pct < 3.0 or width_pct > 15.0:
+            return None
+
+        # 7. Count touches within 1.5% of each trendline (last 50 bars)
+        lookback = min(50, len(window))
+        recent = window.tail(lookback)
+        tolerance = current_price * 0.015
+
+        res_touches = (
+            recent['high'].apply(lambda x: abs(x - res_current) <= tolerance)
+        ).sum()
+        sup_touches = (
+            recent['low'].apply(lambda x: abs(x - sup_current) <= tolerance)
+        ).sum()
+
+        if res_touches < 3 or sup_touches < 3:
+            return None
+
+        # 8. Check recent oscillation (price bouncing between lines, last 10 bars)
+        recent_10 = window.tail(10)
+        reaches_res = (recent_10['high'] >= (res_current * 0.98)).sum()
+        reaches_sup = (recent_10['low'] <= (sup_current * 1.02)).sum()
+
+        if reaches_res < 1 or reaches_sup < 1:
+            return None
+
+        # 9. Volume confirmation
+        avg_vol = window['volume'].rolling(20).mean().iloc[-1]
+        vol_confirmed = window['volume'].iloc[-1] > avg_vol * 1.2
+
+        # 10. Determine breakout direction
+        atr = (window['high'].iloc[-1] - window['low'].iloc[-1])  # Simplified; use full ATR if available
+        breaking_resistance = current_price >= (res_current * 0.97) and current_price <= (res_current + atr * 0.5)
+        breaking_support = current_price <= (sup_current * 1.03) and current_price >= (sup_current - atr * 0.5)
+
+        if not (breaking_resistance or breaking_support):
+            # No breakout yet, return the tunnel structure as a watch (low confidence)
+            conf = 0.55 if vol_confirmed else 0.50
+            return {
+                'name': 'Tunnel (Forming)',
+                'type': 'consolidation',
+                'bullish': None,  # Direction-neutral until breakout
+                'bearish': None,
+                'confidence': conf,
+                'volume_confirmed': vol_confirmed,
+                'current_price': round(current_price, 2),
+                'support': round(sup_current, 2),
+                'resistance': round(res_current, 2),
+                'tunnel_width': round(tunnel_width, 2),
+                'width_pct': round(width_pct, 2),
+                'touches_resistance': int(res_touches),
+                'touches_support': int(sup_touches),
+                'slope_diff_pct': round(slope_diff_pct, 2),
+                'risk_level': 'low',
+                'stage': 'consolidating',
+            }
+
+        # Breakout occurred
+        if breaking_resistance:
+            target = res_current + tunnel_width
+            conf = 0.85 if vol_confirmed else 0.70
+            return {
+                'name': 'Tunnel Breakout (Bull)',
+                'type': 'breakout',
+                'bullish': True,
+                'bearish': False,
+                'confidence': conf,
+                'volume_confirmed': vol_confirmed,
+                'current_price': round(current_price, 2),
+                'support': round(sup_current, 2),
+                'resistance': round(res_current, 2),
+                'breakout_target': round(target, 2),
+                'tunnel_width': round(tunnel_width, 2),
+                'width_pct': round(width_pct, 2),
+                'touches_resistance': int(res_touches),
+                'touches_support': int(sup_touches),
+                'slope_diff_pct': round(slope_diff_pct, 2),
+                'risk_level': 'low' if vol_confirmed else 'medium',
+                'stage': 'breakout_up',
+            }
+
+        if breaking_support:
+            target = sup_current - tunnel_width
+            conf = 0.85 if vol_confirmed else 0.70
+            return {
+                'name': 'Tunnel Breakdown (Bear)',
+                'type': 'breakout',
+                'bullish': False,
+                'bearish': True,
+                'confidence': conf,
+                'volume_confirmed': vol_confirmed,
+                'current_price': round(current_price, 2),
+                'support': round(sup_current, 2),
+                'resistance': round(res_current, 2),
+                'breakout_target': round(target, 2),
+                'tunnel_width': round(tunnel_width, 2),
+                'width_pct': round(width_pct, 2),
+                'touches_resistance': int(res_touches),
+                'touches_support': int(sup_touches),
+                'slope_diff_pct': round(slope_diff_pct, 2),
+                'risk_level': 'low' if vol_confirmed else 'medium',
+                'stage': 'breakout_down',
+            }
+
+    except Exception:
+        return None
+
+
 def detect_sr_levels(
     df: pd.DataFrame,
     current_price: float,
@@ -1993,6 +2173,7 @@ def detect_patterns_from_df(df: pd.DataFrame, ticker: str = "", mode: str = "swi
         detect_rising_wedge,            # V12
         detect_rounding_bottom,         # V12
         detect_inverted_cup_and_handle, # V12
+        detect_tunnel,                  # V13 - tunnel/parallel channel
     ]
 
     for detector in detectors:
