@@ -1,0 +1,179 @@
+Metadata-Version: 2.4
+Name: quantkit
+Version: 1.0.0
+Summary: Quantitative trading toolkit — indicators, patterns, Fibonacci, regime detection, sentiment
+Author-email: Gil Hadas <gil.hadas@gmail.com>
+License: MIT
+Keywords: trading,technical-analysis,finance,quant
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: pandas>=1.5
+Requires-Dist: numpy>=1.23
+Requires-Dist: requests>=2.28
+Provides-Extra: sentiment
+Requires-Dist: transformers>=4.30; extra == "sentiment"
+Requires-Dist: torch>=2.0; extra == "sentiment"
+Provides-Extra: data
+Requires-Dist: yfinance>=0.2.40; extra == "data"
+Provides-Extra: all
+Requires-Dist: transformers>=4.30; extra == "all"
+Requires-Dist: torch>=2.0; extra == "all"
+Requires-Dist: yfinance>=0.2.40; extra == "all"
+
+# quantkit — Quantitative Trading Toolkit
+
+A reusable Python library of technical-analysis and portfolio-management tools
+extracted from a professional breakout-scanning system.
+
+## Install
+
+```bash
+# From the repo root (editable — live-reloads changes):
+pip install -e .
+
+# From GitHub:
+pip install "git+https://github.com/gilhadas/stocksBreakout"
+
+# With FinBERT financial sentiment (downloads ~420 MB model on first use):
+pip install "git+https://github.com/gilhadas/stocksBreakout[sentiment]"
+
+# With live data helpers (yfinance):
+pip install "git+https://github.com/gilhadas/stocksBreakout[data]"
+```
+
+## Modules
+
+| Module | Contents | Dependencies |
+|--------|----------|-------------|
+| `quantkit.indicators` | ATR, RSI, MACD, BB, VWAP, ADX, Aroon, StochRSI, Volume Profile, Minervini, composite scores | `pandas`, `numpy` |
+| `quantkit.patterns` | 16 chart patterns + 11 candlesticks + VCP + S/R levels | `pandas`, `numpy` |
+| `quantkit.fib` | Fibonacci retracement bounce scoring (0–100) | `pandas`, `numpy` |
+| `quantkit.regime` | Market regime detection (bull/bear/mixed) | `pandas` |
+| `quantkit.sentiment` | FinBERT sentiment + Finnhub buzz ratio | `transformers`, `torch` (optional) |
+| `quantkit.portfolio` | Exit evaluation + portfolio health advisory | `pandas`, `numpy` |
+
+## Quick Examples
+
+### Technical Indicators
+
+```python
+import quantkit.indicators as ind
+
+# DataFrame must have lowercase OHLCV columns: open, high, low, close, volume
+df = ind.calculate_all_indicators(df, trend_type='EMA', trend_period=21, timeframe='1d')
+
+print(df[['RSI', 'MACD', 'ATR', 'Momentum_Score']].tail())
+```
+
+### Chart Patterns
+
+```python
+from quantkit.patterns import detect_patterns_from_df, get_pattern_score
+
+patterns = detect_patterns_from_df(df, ticker='AAPL')
+has_bullish, has_bearish, target, names, vol_conf, vcp_q, vcp_data = get_pattern_score(df)
+```
+
+### Fibonacci Bounce Scoring
+
+```python
+from quantkit.fib import detect_swing, score_bounce
+
+swing = detect_swing(df)          # finds swing high + preceding swing low
+if swing:
+    result = score_bounce(df, swing)
+    print(result['bounce_score'], result['nearest_fib'])
+    # 75  '61.8%'
+```
+
+### Regime Detection
+
+```python
+from quantkit.regime import detect_regime, suggest_params
+
+regime, metrics = detect_regime(spy_df)   # 'bull' | 'bear' | 'mixed'
+params = suggest_params('swing', regime)
+print(params['quality_filter'], params['tp_mult'])
+```
+
+### FinBERT Sentiment
+
+```python
+from quantkit.sentiment.finbert import analyze_text, get_ticker_sentiment
+
+# From pre-fetched headlines (no network needed):
+result = analyze_text(["NVDA beats earnings estimates", "record revenue guidance"])
+print(result['label'], result['score'])        # 'bullish'  0.93
+
+# Full pipeline (requires yfinance for headline fetch):
+result = get_ticker_sentiment('COIN')
+print(result['emoji'], result['label'])        # 🟢 bullish
+```
+
+### Portfolio Exit Evaluation
+
+```python
+from quantkit.portfolio import ExitEvaluator, DEFAULT_EXIT_CONFIG
+
+ev = ExitEvaluator()
+result = ev.evaluate(
+    df, symbol='AAPL',
+    mode_cfg=DEFAULT_EXIT_CONFIG,
+    entry_price=175.0,
+    stop_price=165.0,
+    target_price=210.0,
+    timeframe='1d',
+)
+print(result['Action'], result['Reason'])     # HOLD | TRAIL | EXIT_FULL | EXIT_PARTIAL
+```
+
+### Portfolio Health
+
+```python
+from quantkit.portfolio import assess_portfolio_health
+
+report = assess_portfolio_health(positions, cash=5000, total_equity=50000)
+print(report['alerts'])
+print(f"Diversity: {report['diversity_score']:.2f}, ETF%: {report['etf_pct']:.1%}")
+```
+
+## Column Convention
+
+All modules expect **lowercase OHLCV columns**: `open`, `high`, `low`, `close`, `volume`.
+
+To convert from yfinance (uppercase):
+```python
+df = df.rename(columns={'Open':'open','High':'high','Low':'low',
+                        'Close':'close','Volume':'volume'})
+```
+
+## Key Algorithms
+
+### Wilder Smoothing (ATR & RSI)
+Both indicators use Wilder's EMA to exactly match TradingView:
+- ATR: `ewm(com=period-1, adjust=False)` — matches `ta.atr(14)` in Pine Script
+- RSI: `ewm(alpha=1/period, adjust=False)` — matches `ta.rsi(close, 14)` in Pine Script
+
+### Pattern Return Schema
+All chart pattern detectors return `Optional[Dict]` with:
+```python
+{
+    'name': str, 'type': str,
+    'bullish': bool | None, 'bearish': bool | None,
+    'confidence': float,      # 0.50–0.95, capped at 0.95
+    'volume_confirmed': bool,
+    'current_price': float,
+    'risk_level': str,        # 'low' | 'medium' | 'high'
+    # + pattern-specific keys
+}
+```
+
+### Fibonacci Score Breakdown
+| Component | Points | Condition |
+|-----------|--------|-----------|
+| Classic level | +30 | Within 2% of 38.2%, 50%, or 61.8% |
+| SMA confluence | +25 | SMA50/150/200 within 1.5% of that level |
+| Stage 2 | +15 | SMA50 > SMA150 > SMA200 AND price > SMA200 |
+| RSI reset | +15 | RSI 35–50 |
+| Volume expansion | +10 | 3-day avg ≥ 1.2× 20-day avg |
+| Golden pocket | +5 | Level is 50% or 61.8% |

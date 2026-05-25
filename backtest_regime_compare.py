@@ -1383,6 +1383,8 @@ def parse_args():
     p.add_argument('--seed',    type=int, default=42,
                    help='Random seed for --shuffle (default: 42). '
                         'Same seed always produces the same 200 symbols.')
+    p.add_argument('--no-aroon', action='store_true',
+                   help='Disable Aroon oscillator gate (sets threshold=999) for ablation.')
     return p.parse_args()
 
 
@@ -1394,6 +1396,11 @@ def main():
         import config as _cfg
         _cfg.TREND_CONFIRM['enabled'] = False
         print("⚠  --no-tc: TREND_CONFIRM disabled for this run (reproducing NEW-no-TC baseline)")
+
+    if args.no_aroon:
+        import config as _cfg
+        _cfg.AROON_CONFIRM_THRESHOLD = 999  # always-False → removes +5pt bonus
+        print("⚠  --no-aroon: Aroon oscillator gate disabled (ablation)")
 
     print("=" * 80)
     print("REGIME-AWARE BACKTEST: OLD CONFIG (V9-C) vs NEW CONFIG")

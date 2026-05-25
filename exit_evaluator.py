@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 
 from config import MODES, MAX_HOLD_BARS
-from indicators import calculate_all_indicators
+from quantkit.indicators import calculate_all_indicators
 
 logger = logging.getLogger(__name__)
 

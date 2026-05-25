@@ -40,83 +40,27 @@ Usage:
 """
 
 import logging
-import threading
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from typing import Dict, List, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
-class SentimentResult(TypedDict):
-    label: str          # 'bullish' | 'bearish' | 'neutral'
-    score: float        # FinBERT avg confidence for dominant label (0–1)
-    net_score: float    # bullish_pct − bearish_pct (−1 to +1)
-    breakdown: dict     # {'bullish': int, 'bearish': int, 'neutral': int}
-    headlines: int      # number of headlines analysed
-    top_headline: str   # most recent headline text
-    emoji: str          # 🟢 / 🔴 / ⚪
-
-
-_NEUTRAL_RESULT: SentimentResult = {
-    'label': 'neutral',
-    'score': 0.5,
-    'net_score': 0.0,
-    'breakdown': {'bullish': 0, 'bearish': 0, 'neutral': 0},
-    'headlines': 0,
-    'top_headline': '',
-    'emoji': '⚪',
-}
-
+# Core inference (model loading, analyze_text, batch_sentiment) lives in quantkit.
+# This file adds the project's 3-tier headline pipeline (Alpaca → yfinance → AV).
+from quantkit.sentiment.finbert import (  # noqa: F401
+    SentimentResult,
+    analyze_text,
+    batch_sentiment as _quantkit_batch_sentiment,
+    _NEUTRAL_RESULT,
+    _load_finbert,
+    _LABEL_MAP,
+    _EMOJI_MAP,
+)
 
 # ---------------------------------------------------------------------------
-# Model loading (lazy, thread-safe singleton)
-# ---------------------------------------------------------------------------
-
-_model_lock = threading.Lock()
-_finbert_pipeline = None
-_model_available: Optional[bool] = None   # None = not yet checked
-
-
-def _load_finbert():
-    """Load FinBERT pipeline once, return it (or None if unavailable)."""
-    global _finbert_pipeline, _model_available
-    if _model_available is False:
-        return None
-    if _finbert_pipeline is not None:
-        return _finbert_pipeline
-
-    with _model_lock:
-        if _finbert_pipeline is not None:
-            return _finbert_pipeline
-        try:
-            import logging as _logging
-            _logging.getLogger('transformers').setLevel(_logging.ERROR)
-            _logging.getLogger('huggingface_hub').setLevel(_logging.ERROR)
-            from transformers import pipeline, logging as _hf_logging
-            _hf_logging.set_verbosity_error()   # suppresses LOAD REPORT table
-            logger.info("Loading FinBERT (ProsusAI/finbert) — first run downloads ~420 MB …")
-            _finbert_pipeline = pipeline(
-                task='text-classification',
-                model='ProsusAI/finbert',
-                tokenizer='ProsusAI/finbert',
-                device=-1,          # CPU; set to 0 for GPU
-                truncation=True,
-                max_length=512,
-            )
-            _model_available = True
-            logger.info("FinBERT ready.")
-        except Exception as exc:
-            logger.warning(f"FinBERT unavailable (install transformers + torch): {exc}")
-            _model_available = False
-        return _finbert_pipeline
-
-
-# ---------------------------------------------------------------------------
-# News headline fetching
+# News headline fetching  (3-tier: Alpaca → yfinance → Alpha Vantage)
+# quantkit.sentiment.finbert.fetch_headlines uses yfinance only; this
+# project version adds Alpaca (Benzinga) as primary source and AV as fallback.
 # ---------------------------------------------------------------------------
 
 def fetch_headlines(symbol: str, max_count: int = 8,
@@ -224,69 +168,8 @@ def fetch_headlines(symbol: str, max_count: int = 8,
 
 
 # ---------------------------------------------------------------------------
-# Core inference
-# ---------------------------------------------------------------------------
-
-_LABEL_MAP = {'positive': 'bullish', 'negative': 'bearish', 'neutral': 'neutral'}
-_EMOJI_MAP = {'bullish': '🟢', 'bearish': '🔴', 'neutral': '⚪'}
-
-
-def analyze_text(text_or_list) -> SentimentResult:
-    """Run FinBERT on a string or list of strings and return aggregated sentiment.
-
-    Each input string is treated as one inference unit (headline + summary snippet).
-    The aggregate is:
-      - dominant label = label with highest total weighted score
-      - score          = mean FinBERT confidence for the dominant label's items
-      - net_score      = (bullish_count − bearish_count) / total
-    """
-    if isinstance(text_or_list, str):
-        texts = [text_or_list]
-    else:
-        texts = list(text_or_list)
-
-    texts = [t for t in texts if t and len(t.strip()) > 5]
-    if not texts:
-        return dict(_NEUTRAL_RESULT)
-
-    finbert = _load_finbert()
-    if finbert is None:
-        return dict(_NEUTRAL_RESULT)
-
-    try:
-        outputs = finbert(texts)
-    except Exception as exc:
-        logger.warning(f"FinBERT inference error: {exc}")
-        return dict(_NEUTRAL_RESULT)
-
-    scores_sum = {'bullish': 0.0, 'bearish': 0.0, 'neutral': 0.0}
-    counts     = {'bullish': 0,   'bearish': 0,   'neutral': 0}
-
-    for out in outputs:
-        lbl = _LABEL_MAP.get(out['label'].lower(), 'neutral')
-        scores_sum[lbl] += out['score']
-        counts[lbl] += 1
-
-    total = len(outputs)
-    dominant = max(counts, key=lambda k: (counts[k], scores_sum[k]))
-    avg_score = scores_sum[dominant] / counts[dominant] if counts[dominant] else 0.5
-
-    n_bull, n_bear = counts['bullish'], counts['bearish']
-    net = round((n_bull - n_bear) / total, 3) if total else 0.0
-
-    return SentimentResult(
-        label=dominant,
-        score=round(avg_score, 3),
-        net_score=net,
-        breakdown=dict(counts),
-        headlines=total,
-        top_headline=texts[0],
-        emoji=_EMOJI_MAP[dominant],
-    )
-
-
-# ---------------------------------------------------------------------------
 # Public convenience functions
+# (analyze_text is re-exported from quantkit.sentiment.finbert)
 # ---------------------------------------------------------------------------
 
 def get_ticker_sentiment(
@@ -313,76 +196,17 @@ def batch_sentiment(
     max_headlines: int = 8,
     max_age_hours: int = 48,
 ) -> Dict[str, SentimentResult]:
-    """Run FinBERT on multiple symbols and return a dict of results.
+    """Run FinBERT on multiple symbols via a single batched inference call.
 
-    Headlines are fetched per-symbol (yfinance) and all batched into a single
-    FinBERT call for efficiency, then results are split back per-symbol.
+    Uses the project's 3-tier headline pipeline (Alpaca → yfinance → AV)
+    then delegates to quantkit's batched inference for efficiency.
 
     Example:
         results = batch_sentiment(['COIN', 'MSTR', 'IBIT'])
     """
-    # Collect headlines per symbol
-    symbol_headlines: Dict[str, List[str]] = {}
-    for sym in symbols:
-        symbol_headlines[sym] = fetch_headlines(sym, max_headlines, max_age_hours)
-
-    # Flatten into one list for a single batched inference
-    finbert = _load_finbert()
-    if finbert is None:
-        return {sym: dict(_NEUTRAL_RESULT) for sym in symbols}
-
-    # Build flat list with symbol tags for re-association
-    flat_texts: List[str] = []
-    sym_spans: Dict[str, tuple] = {}   # sym → (start_idx, end_idx)
-    for sym, headlines in symbol_headlines.items():
-        start = len(flat_texts)
-        flat_texts.extend(headlines)
-        sym_spans[sym] = (start, len(flat_texts))
-
-    if not flat_texts:
-        return {sym: dict(_NEUTRAL_RESULT) for sym in symbols}
-
-    try:
-        all_outputs = finbert(flat_texts)
-    except Exception as exc:
-        logger.warning(f"FinBERT batch inference error: {exc}")
-        return {sym: dict(_NEUTRAL_RESULT) for sym in symbols}
-
-    # Split results back per symbol
-    results: Dict[str, SentimentResult] = {}
-    for sym in symbols:
-        start, end = sym_spans[sym]
-        chunk = all_outputs[start:end]
-        headlines = symbol_headlines[sym]
-
-        if not chunk:
-            results[sym] = dict(_NEUTRAL_RESULT)
-            continue
-
-        scores_sum = {'bullish': 0.0, 'bearish': 0.0, 'neutral': 0.0}
-        counts     = {'bullish': 0,   'bearish': 0,   'neutral': 0}
-        for out in chunk:
-            lbl = _LABEL_MAP.get(out['label'].lower(), 'neutral')
-            scores_sum[lbl] += out['score']
-            counts[lbl] += 1
-
-        total = len(chunk)
-        dominant = max(counts, key=lambda k: (counts[k], scores_sum[k]))
-        avg_score = scores_sum[dominant] / counts[dominant] if counts[dominant] else 0.5
-        n_bull, n_bear = counts['bullish'], counts['bearish']
-        net = round((n_bull - n_bear) / total, 3) if total else 0.0
-
-        results[sym] = SentimentResult(
-            label=dominant,
-            score=round(avg_score, 3),
-            net_score=net,
-            breakdown=dict(counts),
-            headlines=total,
-            top_headline=headlines[0] if headlines else '',
-            emoji=_EMOJI_MAP[dominant],
-        )
-
-    return results
+    headlines_map = {sym: fetch_headlines(sym, max_headlines, max_age_hours)
+                     for sym in symbols}
+    return _quantkit_batch_sentiment(symbols, headlines_map=headlines_map)
 
 
 # ---------------------------------------------------------------------------
