@@ -1,0 +1,36 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name        = "trading-api-kit"
+version     = "1.0.0"
+description = "Reusable FastAPI auth + push layer for trading mobile apps"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.0",
+    "python-jose[cryptography]>=3.3",
+    "bcrypt>=4.0",
+    "PyJWT>=2.8",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+# ── Package discovery ────────────────────────────────────────────────────────
+# pyproject.toml lives inside trading_api_kit/  (the package folder itself).
+# When pip runs `pip install .` from inside trading_api_kit/, the package root
+# is one level up (..), so we tell setuptools to look there.
+[tool.setuptools.packages.find]
+where   = [".."]
+include = ["trading_api_kit*"]

@@ -1,120 +1,60 @@
 /**
- * API client for StocksBreakout Portfolio API.
- * Handles JWT auth and all fetch calls.
+ * StocksBreakout mobile API client.
+ *
+ * Generic auth/push is provided by trading-api-kit (trading_api_kit/ts_client/).
+ * This file re-exports the kit and adds StocksBreakout-specific endpoints.
+ *
+ * To adapt for another scanner: copy trading_api_kit/ts_client/src/ into
+ * your project, configure it, and replace the scanner-specific calls below.
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
+// ── Re-export everything from the reusable kit ────────────────────────────────
+export {
+  configure,
+  authFetch,
+  getToken,
+  saveToken,
+  clearToken,
+  getEmailFromToken,
+  isLoggedIn,
+  loginWithEmail,
+  loginWithPassword,
+  logout,
+  getCurrentUser,
+  getGoogleAuthUrl,
+  registerForPushNotifications,
+  registerPushToken,
+  SessionExpiredError,
+} from '../../../trading_api_kit/ts_client/src/index';
 
-const TOKEN_KEY = 'jwt_token';
-const API_URL_KEY = 'api_url';
-
-// Permanent API URL via Cloudflare named tunnel — never changes
-const API_BASE_URL = 'https://gilhadas-stocks.com';
-
-let _baseUrl = API_BASE_URL;
-
-export async function getBaseUrl(): Promise<string> {
-  return API_BASE_URL;
+// Legacy alias — kept for screens that used the old `login()` single-arg function
+import { loginWithPassword } from '../../../trading_api_kit/ts_client/src/index';
+export async function login(password: string, _apiUrl?: string) {
+  return loginWithPassword(password);
 }
 
-export async function setBaseUrl(url: string) {
-  _baseUrl = url.replace(/\/+$/, '');
-  await AsyncStorage.setItem(API_URL_KEY, _baseUrl);
-}
-
-export async function getToken(): Promise<string | null> {
-  return AsyncStorage.getItem(TOKEN_KEY);
-}
-
-export async function saveToken(token: string) {
-  await AsyncStorage.setItem(TOKEN_KEY, token);
-}
-
-export async function clearToken() {
-  await AsyncStorage.removeItem(TOKEN_KEY);
-}
-
-export async function getEmailFromToken(): Promise<string> {
-  const token = await getToken();
-  if (!token) return '';
-  try {
-    const payload = token.split('.')[1];
-    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const json = JSON.parse(atob(base64));
-    return (json.email as string) || '';
-  } catch {
-    return '';
-  }
-}
-
-async function authFetch(path: string, opts: RequestInit = {}) {
-  const base = await getBaseUrl();
-  const token = await getToken();
-  const res = await fetch(`${base}${path}`, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...opts.headers,
-    },
-  });
-  if (res.status === 401) {
-    await clearToken();
-    throw new Error('Session expired');
-  }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-export async function login(password: string, apiUrl?: string) {
-  if (apiUrl) await setBaseUrl(apiUrl);
-  const base = await getBaseUrl();
-  const res = await fetch(`${base}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password }),
-  });
-  if (!res.ok) throw new Error('Wrong password');
-  const data = await res.json();
-  await saveToken(data.token);
-  return data.token;
-}
-
-export async function loginWithEmail(email: string, password: string) {
-  const base = await getBaseUrl();
-  const res = await fetch(`${base}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) throw new Error('Invalid credentials');
-  const data = await res.json();
-  await saveToken(data.token);
-  return data.token;
-}
-
-export async function getGoogleAuthUrl(): Promise<string> {
-  const base = await getBaseUrl();
-  // Platform import is from react-native — 'web' when running as Expo web export
-  const { Platform } = require('react-native');
-  const client = Platform.OS === 'web' ? 'web' : 'mobile';
-  return `${base}/auth/google?client=${client}`;
-}
+// ── StocksBreakout-specific endpoints ─────────────────────────────────────────
+import { authFetch } from '../../../trading_api_kit/ts_client/src/client';
 
 export function resetPortfolio() {
   return authFetch('/portfolio/reset', { method: 'POST' });
 }
 
-export async function recalculatePortfolio(minDate?: string, positionPct?: number): Promise<Record<string, unknown>> {
-  const { job_id } = await authFetch('/portfolio/recalculate', {
+export async function recalculatePortfolio(
+  minDate?: string,
+  positionPct?: number,
+): Promise<Record<string, unknown>> {
+  const { job_id } = await authFetch<{ job_id: string }>('/portfolio/recalculate', {
     method: 'POST',
     body: JSON.stringify({ min_date: minDate ?? null, position_pct: positionPct ?? null }),
-  }) as { job_id: string };
+  });
 
   // Poll until done (max 5 minutes, 3s interval)
   for (let i = 0; i < 100; i++) {
-    await new Promise(r => setTimeout(r, 3000));
-    const status = await authFetch(`/portfolio/recalculate/status/${job_id}`) as Record<string, unknown>;
+    await new Promise((r) => setTimeout(r, 3000));
+    const status = await authFetch<Record<string, unknown>>(
+      `/portfolio/recalculate/status/${job_id}`,
+    );
     if (status.status === 'done') return status.result as Record<string, unknown>;
     if (status.status === 'error') throw new Error((status.error as string) || 'Recalculate failed');
   }
@@ -158,10 +98,7 @@ export function buyPosition(data: {
   broker?: string;
   mode?: string;
 }) {
-  return authFetch('/manual-portfolio/buy', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  });
+  return authFetch('/manual-portfolio/buy', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export function fetchSwapSuggestions() {
@@ -183,13 +120,6 @@ export function undoSwap() {
   return authFetch('/portfolio/undo-swap', { method: 'POST' });
 }
 
-export function registerPushToken(token: string) {
-  return authFetch('/push/register', {
-    method: 'POST',
-    body: JSON.stringify({ token }),
-  });
-}
-
 export function analyzeSymbol(symbol: string, mode: string, timeframe: string) {
   return authFetch('/analyze', {
     method: 'POST',
@@ -197,7 +127,7 @@ export function analyzeSymbol(symbol: string, mode: string, timeframe: string) {
   });
 }
 
-export function analyzeChat(report: any, history: any[], question: string) {
+export function analyzeChat(report: unknown, history: unknown[], question: string) {
   return authFetch('/analyze/chat', {
     method: 'POST',
     body: JSON.stringify({ report, history, question }),

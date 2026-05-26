@@ -1,27 +1,30 @@
 """
-FastAPI server — thin wrapper around auto_portfolio.py.
+FastAPI server — StocksBreakout-specific portfolio API.
+Auth, admin, and push are provided by trading_api_kit (see trading_api_kit/README.md).
 Run: uvicorn api.server:app --host 0.0.0.0 --port 8000
 """
 
 import math
-import os
 import sys
-from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from api.admin_routes import router as admin_router
-from api.auth_routes import router as auth_router
-from api.database import create_tables
-from api.deps import get_current_user
-from api.models import User
-from api.push_registry import register_token
+# ── trading_api_kit provides: auth, admin, push, user management ──────────────
+from trading_api_kit import create_app, get_current_user
+from trading_api_kit.models import User
+from trading_api_kit.push_registry import register_token
+
+# Build the app via the reusable factory (mounts /auth/* and /admin/* automatically)
+app = create_app(
+    title="StocksBreakout Portfolio API",
+    version="2.0",
+    static_dir=Path(__file__).resolve().parent / "static",
+)
 
 
 def _clean(obj):
@@ -41,50 +44,6 @@ def _clean(obj):
     if isinstance(obj, list):
         return [_clean(v) for v in obj]
     return obj
-
-
-def _ensure_default_user():
-    """Create the default user row on first startup so legacy JWT tokens resolve correctly."""
-    from api.database import SessionLocal
-    email = os.getenv('DEFAULT_USER_EMAIL', '')
-    user_id = os.getenv('DEFAULT_USER_ID', '')
-    if not email or not user_id:
-        return
-    db = SessionLocal()
-    try:
-        existing = db.query(User).filter(User.email == email).first()
-        if existing is None:
-            from datetime import datetime, timezone
-            db.add(User(
-                id=user_id,
-                email=email,
-                name=email.split('@')[0],
-                created_at=datetime.now(timezone.utc),
-            ))
-            db.commit()
-    finally:
-        db.close()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    create_tables()
-    _ensure_default_user()
-    yield
-
-
-app = FastAPI(title="StocksBreakout Portfolio API", version="2.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(auth_router)
-app.include_router(admin_router)
 
 
 # ── Manual portfolio helpers (user-scoped) ───────────────────────────────────

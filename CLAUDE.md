@@ -28,6 +28,7 @@ When adding features to `indicators.py` or `scanner.py`, adhere to these default
 - `indicators.py`: Technical indicators (ATR, VWAP, BB, RSI, MACD, ADX).
 - `config.py`: Single source of truth for MODES, PORTFOLIO, and REGIME_CONFIG.
 - `market_data.py`: IB data fetching, caching, and `_normalize_timeframe()`.
+- **`CONFIG.md`**: Comprehensive parameter reference for all 70+ tunable settings (see this for detailed docs on TREND_CONFIRM, BOUNCE_BEAR_GATE, REGIME_CONFIG, SCORING_WEIGHTS, etc.)
 
 ## 5. Critical Patterns & Conventions
 ### Async/Concurrency

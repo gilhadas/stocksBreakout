@@ -901,7 +901,8 @@ def section_header():
 # ─── Run one year period ───────────────────────────────────────────────────────
 def run_year(year, symbols, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
-             bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False):
+             bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False,
+             skip_old=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -923,23 +924,27 @@ def run_year(year, symbols, capital,
         print(f"  SPY actual: {spy_info['return']:+.2f}%  Sharpe={spy_info['sharpe']:.2f}  MaxDD={spy_info['drawdown']:+.2f}%")
 
     # ── OLD config signals ─────────────────────────────────────────────────
-    print(f"\n[OLD CONFIG — V9-C baseline]")
-    old_signals = run_scan(historical, start, end, modes, config='old')
-    # V9-C filter: PREMIUM+ with Minervini≥7
-    v9c_signals = [s for s in old_signals
-                   if s.get('quality') in ('GOLD', 'PREMIUM')
-                   and (s.get('minervini_score', 0) >= 7
-                        or s.get('type') in ('SMA20_CROSS', 'BOUNCE', 'CONTINUATION', 'Momentum'))]
-    print(f"  V9-C filter: {len(v9c_signals)} signals (from {len(old_signals)} total)")
+    if skip_old:
+        print(f"\n[OLD CONFIG — skipped via --skip-old]")
+        v9c_signals = []
+    else:
+        print(f"\n[OLD CONFIG — V9-C baseline]")
+        old_signals = run_scan(historical, start, end, modes, config='old')
+        # V9-C filter: PREMIUM+ with Minervini≥7
+        v9c_signals = [s for s in old_signals
+                       if s.get('quality') in ('GOLD', 'PREMIUM')
+                       and (s.get('minervini_score', 0) >= 7
+                            or s.get('type') in ('SMA20_CROSS', 'BOUNCE', 'CONTINUATION', 'Momentum'))]
+        print(f"  V9-C filter: {len(v9c_signals)} signals (from {len(old_signals)} total)")
 
-    # Selective filter: drop SMA20_CROSS/Momentum types (canonical 5-yr data shows
-    # SMA20_CROSS = 10 trades / -30% sum; Momentum = 1 trade). BOUNCE/CONTINUATION/
-    # TREND_CONFIRM kept. Daytrade is already excluded — modes=['swing','longterm'].
-    if selective:
-        keep = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
-        before = len(v9c_signals)
-        v9c_signals = [s for s in v9c_signals if s.get('type') in keep]
-        print(f"  [SELECTIVE] drop SMA20_CROSS/Momentum: {before} → {len(v9c_signals)} signals")
+        # Selective filter: drop SMA20_CROSS/Momentum types (canonical 5-yr data shows
+        # SMA20_CROSS = 10 trades / -30% sum; Momentum = 1 trade). BOUNCE/CONTINUATION/
+        # TREND_CONFIRM kept. Daytrade is already excluded — modes=['swing','longterm'].
+        if selective:
+            keep = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
+            before = len(v9c_signals)
+            v9c_signals = [s for s in v9c_signals if s.get('type') in keep]
+            print(f"  [SELECTIVE] drop SMA20_CROSS/Momentum: {before} → {len(v9c_signals)} signals")
 
     # ── NEW config signals ─────────────────────────────────────────────────
     print(f"\n[NEW CONFIG — Regime-Adaptive]")
@@ -970,15 +975,16 @@ def run_year(year, symbols, capital,
     sim_kw = dict(slippage_pct=slippage_pct, commission=commission, output_dir=output_dir,
                   bounce_bear_gate=bounce_bear_gate)
 
-    # OLD V9-C (best previous)
-    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='OLD V9-C', **sim_kw)
-    print_report(rpt, f'OLD V9-C  PREMIUM+ TP→Trail', len(v9c_signals), spy_info)
+    if not skip_old:
+        # OLD V9-C (best previous)
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='OLD V9-C', **sim_kw)
+        print_report(rpt, f'OLD V9-C  PREMIUM+ TP→Trail', len(v9c_signals), spy_info)
 
-    # OLD V9-C + regime-based position sizing
-    rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
-                   tp_as_trail=True, label='OLD V9-C RegimeSized', regime_sizing=True, **sim_kw)
-    print_report(rpt, f'OLD V9-C  PREMIUM+ TP→Trail + RegimeSizing', len(v9c_signals), spy_info)
+        # OLD V9-C + regime-based position sizing
+        rpt = simulate(v9c_signals, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label='OLD V9-C RegimeSized', regime_sizing=True, **sim_kw)
+        print_report(rpt, f'OLD V9-C  PREMIUM+ TP→Trail + RegimeSizing', len(v9c_signals), spy_info)
 
     # NEW PREMIUM+ (unlimited — legacy baseline)
     rpt = simulate(new_premium, start, end, end_prices, historical, capital,
@@ -1360,31 +1366,84 @@ def run_year(year, symbols, capital,
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 def parse_args():
-    p = argparse.ArgumentParser(description='Regime-Aware Backtest: Old vs New')
-    p.add_argument('--watchlist',   default=None,  help='Watchlist path')
-    p.add_argument('--years',       default='2022,2023,2024,2025,2026', help='Years to test (comma-sep)')
-    p.add_argument('--limit',       type=int,   default=0,     help='Symbol limit (0=all)')
-    p.add_argument('--capital',     type=int,   default=100_000)
-    p.add_argument('--slippage',    type=float, default=0.0,   help='Slippage fraction per side (e.g. 0.001 = 0.1 pct)')
-    p.add_argument('--commission',  type=float, default=0.0,   help='Flat commission $ per trade side')
-    p.add_argument('--trades-log',  action='store_true',       help='Write per-trade CSV logs to scanner_output/backtests/')
-    p.add_argument('--stall-exit',       action='store_true', help='Add stall-exit comparison section (SMA20 crossunder replaces MaxHold)')
-    p.add_argument('--bounce-bear-gate', type=int, default=0, help='Block BOUNCE+RED_MARKET when SPY below SMA200 >= N consecutive days (0=off, suggested 15)')
-    p.add_argument('--selective', action='store_true', help='Enable SELECTIVE_MODE: drop SMA20_CROSS/Momentum + cap at 1 admission/day (~100 trades/yr target)')
+    p = argparse.ArgumentParser(
+        description='Regime-Aware Backtest: Old vs New',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+EXAMPLE USAGE:
+  # Champion config on 50-symbol curated list (5 years)
+  python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --watchlist input/optimizer_watch.txt
+
+  # Champion config on large screener (NEW only, skip OLD to save time)
+  python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --watchlist input/screener.txt --skip-old
+
+  # Ablation: test cap=2 vs cap=10
+  python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --pooled-cap 2
+
+  # Full comparison (slow)
+  python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --full-compare --trades-log
+
+PARAMETER REFERENCE:
+'''
+    )
+    p.add_argument('--watchlist',   default=None,
+                   help='Path to watchlist file (e.g., input/optimizer_watch.txt). One symbol per line. Default: all symbols in config.')
+
+    p.add_argument('--years',       default='2022,2023,2024,2025,2026',
+                   help='Comma-separated list of years to backtest (default: 2022,2023,2024,2025,2026). Example: --years 2023,2024,2025')
+
+    p.add_argument('--limit',       type=int,   default=0,
+                   help='Max symbols to test (0=all, default 0). Use with --shuffle for random sampling. Example: --limit 50 --shuffle')
+
+    p.add_argument('--capital',     type=int,   default=100_000,
+                   help='Starting capital in USD (default: 100000). Used to calculate percentage returns and position sizing.')
+
+    p.add_argument('--slippage',    type=float, default=0.0,
+                   help='Slippage per side as decimal fraction (default: 0.0). Example: 0.001 = 0.1%% slippage per entry/exit.')
+
+    p.add_argument('--commission',  type=float, default=0.0,
+                   help='Flat commission per trade side in USD (default: 0.0). Modern brokers typically $0.')
+
+    p.add_argument('--trades-log',  action='store_true',
+                   help='Write per-trade CSV logs to scanner_output/backtests/ (one file per year/config).')
+
+    p.add_argument('--stall-exit',  action='store_true',
+                   help='Add comparison section: SMA20 crossunder as alternative exit (replaces fixed MaxHold timer).')
+
+    p.add_argument('--bounce-bear-gate', type=int, default=0,
+                   help='Block BOUNCE+RED_MARKET entries when SPY has been below SMA200 for >=N consecutive days (0=off). '
+                        'Recommended: 15 (sustained bear filter). Example: --bounce-bear-gate 15')
+
+    p.add_argument('--selective', action='store_true',
+                   help='Enable SELECTIVE_MODE: drop SMA20_CROSS + Momentum types, keep only BOUNCE/CONTINUATION/TREND_CONFIRM. '
+                        'Caps at ~1 entry per day (~100 trades/yr). For comparing signal-type filtering.')
+
     p.add_argument('--full-compare', action='store_true',
-                   help='Also run retired V9-H / V9-H2 / V9-H3 / V9-D comparison sections (slower)')
-    p.add_argument('--no-tc',      action='store_true', help='Disable TREND_CONFIRM in collect_signals_new (reproduces pre-TC +195%% baseline)')
+                   help='Run retired V9-H / V9-H2 / V9-H3 / V9-D config comparison rows (much slower, for deep analysis only).')
+
+    p.add_argument('--no-tc', action='store_true',
+                   help='Disable TREND_CONFIRM multi-gate check in signal collection. TREND_CONFIRM Path B destroys edge (-24pts); '
+                        'Path A is kept but minimal (+2.7pts). Use --no-tc to reproduce pre-TC +195%% baseline or disable all TREND_CONFIRM logic.')
+
     p.add_argument('--pooled-cap', type=int, default=10,
-                   help='Max signals per day in pooled-cap★ row (default: 10). '
-                        'Use 2 for the selective-cap ablation experiment.')
+                   help='Max NEW signals to admit per calendar day in pooled-cap★ row (default: 10). '
+                        'Ranks signals globally by Quality→WinProb→R:R→Dist≤25%% before capping. '
+                        'Use 2 for tight cap ablation (current best: cap=10 with BBG15). Example: --pooled-cap 2')
+
     p.add_argument('--shuffle', action='store_true',
-                   help='Shuffle the watchlist before applying --limit (random sample vs first-N). '
-                        'Use --seed to fix the sample for reproducibility.')
-    p.add_argument('--seed',    type=int, default=42,
-                   help='Random seed for --shuffle (default: 42). '
-                        'Same seed always produces the same 200 symbols.')
+                   help='Shuffle watchlist before applying --limit (random sample vs first-N). '
+                        'Use --seed to fix reproducibility. Example: --limit 100 --shuffle --seed 42')
+
+    p.add_argument('--seed', type=int, default=42,
+                   help='Random seed for --shuffle (default: 42). Same seed always produces identical symbol set.')
+
     p.add_argument('--no-aroon', action='store_true',
-                   help='Disable Aroon oscillator gate (sets threshold=999) for ablation.')
+                   help='Disable Aroon oscillator confirmation gate (sets threshold=999). For ablation testing of Aroon impact.')
+
+    p.add_argument('--skip-old', action='store_true',
+                   help='Skip OLD V9-C baseline rows; run only NEW champion config (cuts runtime ~50%%). '
+                        'Use when you only care about NEW performance, not side-by-side comparison.')
+
     return p.parse_args()
 
 
@@ -1422,7 +1481,8 @@ def main():
                  bounce_bear_gate=args.bounce_bear_gate,
                  selective=args.selective,
                  pooled_cap=args.pooled_cap,
-                 full_compare=args.full_compare)
+                 full_compare=args.full_compare,
+                 skip_old=args.skip_old)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")
