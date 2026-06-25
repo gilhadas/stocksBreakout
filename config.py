@@ -71,11 +71,37 @@ SCORING_WEIGHTS = {
     # Shared checks
     'not_overextended': 5,      # V4: Not blown off from SMA (swing/longterm only)
     'aroon_confirm': 5,         # V12: Aroon oscillator confirms uptrend (osc > threshold)
+    'tension_index': 10,        # V14: "Coiled spring" composite (compression + volume
+                                #      consensus + market/sector confirmation + fractal
+                                #      alignment) — proportional 0.0-1.0. Modest start to
+                                #      avoid double-counting consolidation/vcp/rs; let the
+                                #      optimizer retune once live data accumulates.
 }
 
 # Aroon indicator settings
 AROON_N                  = 25   # standard lookback period
 AROON_CONFIRM_THRESHOLD  = 50   # oscillator > 50 = strong uptrend confirmation
+
+# V14: Tension Index — the "coiled spring" composite (quantkit/tension.py).
+# Keys mirror quantkit.tension.TensionConfig; only overrides need to be listed.
+# Sector context resolves the ticker's own sector ETF via get_sector_for_ticker
+# + SENTIMENT['sector_etfs'] (XLK/XLE/XLV/…), defaulting to SPY when unknown —
+# fully sector-agnostic.
+TENSION_CONFIG = {
+    'enabled': False,   # V14 dormant: no measured edge in swing (never fires, 100% BOUNCE)
+                        # or daytrade (corr +0.000, 877 trades, 2026-06-22 validation).
+                        # Code/tests/SYSTEM_SPEC kept for future live-data + Optuna retune.
+    # Top-level blend (must sum to 1.0)
+    'w_compression':  0.30,   # volatility "point of silence"
+    'w_volume':       0.30,   # consensus vs the Value Area
+    'w_confirmation': 0.20,   # market/sector rolling correlation + beta + RS
+    'w_fractal':      0.20,   # 5-min structure agrees with the daily trend
+    # Hard-gate multipliers applied to the raw index
+    'gate_fractal':   0.50,   # LTF breakout fights the daily trend
+    'gate_fakeout':   0.60,   # risk-off + high-correlation breakout
+    # Downgrade a signal one quality tier when a fractal contradiction is detected
+    'downgrade_on_contradiction': True,
+}
 
 SCORE_THRESHOLDS = {
     'GOLD': 99,      # was 90 — optimizer tightened GOLD (fewer but higher conviction)

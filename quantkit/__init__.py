@@ -83,6 +83,11 @@ from quantkit.regime import (
     REGIME_PARAMS,
 )
 
+from quantkit.tension import (
+    compute_tension_index,
+    TensionConfig,
+)
+
 __all__ = [
     # indicators
     "calculate_atr",
@@ -112,4 +117,7 @@ __all__ = [
     "detect_regime",
     "suggest_params",
     "REGIME_PARAMS",
+    # tension
+    "compute_tension_index",
+    "TensionConfig",
 ]

@@ -17,7 +17,7 @@ import pandas as pd
 
 from config import (MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR,
                     V9H_REGIME_GATE, SECTOR_EXCEPTION, VIX_CONFIG,
-                    SURGE_DAY_CONFIG, BOUNCE_BEAR_GATE)
+                    SURGE_DAY_CONFIG, BOUNCE_BEAR_GATE, TENSION_CONFIG, SENTIMENT)
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
@@ -356,10 +356,24 @@ class ScannerOrchestrator:
                         return None
                 
                 # V5: Resolve sector for this symbol
-                sector_hot = False
-                if sector_hot_map:
-                    sym_sector = get_sector_for_ticker(symbol)
-                    sector_hot = sector_hot_map.get(sym_sector, False)
+                sym_sector = get_sector_for_ticker(symbol)
+                sector_hot = sector_hot_map.get(sym_sector, False) if sector_hot_map else False
+
+                # V14: Tension Index market/sector/daily context (cached per session).
+                # SPY + the ticker's own sector ETF (sector-agnostic via SENTIMENT
+                # sector→ETF map, SPY fallback). Intraday scans also fetch the
+                # symbol's daily series for the fractal-alignment check.
+                spy_df = sector_df = daily_df = None
+                if TENSION_CONFIG.get('enabled'):
+                    try:
+                        spy_df = await self.market_data.get_market_series('SPY', '1 day')
+                        sector_etf = SENTIMENT.get('sector_etfs', {}).get(
+                            sym_sector, {}).get('etf', 'SPY')
+                        sector_df = await self.market_data.get_market_series(sector_etf, '1 day')
+                        if 'min' in timeframe or 'hour' in timeframe:
+                            daily_df = await self.market_data.get_market_series(symbol, '1 day')
+                    except Exception as e:
+                        logger.debug(f"{symbol}: tension context fetch failed: {e}")
 
                 # Detect breakout
                 signal = self.detector.detect(
@@ -374,6 +388,9 @@ class ScannerOrchestrator:
                     use_v4_overextension=True,
                     sector_hot=sector_hot,
                     is_surge=is_surge,
+                    spy_df=spy_df,
+                    sector_df=sector_df,
+                    daily_df=daily_df,
                 )
                 
                 # V5: Multi-TF confirmation for swing mode
