@@ -76,11 +76,28 @@ SCORING_WEIGHTS = {
                                 #      alignment) — proportional 0.0-1.0. Modest start to
                                 #      avoid double-counting consolidation/vcp/rs; let the
                                 #      optimizer retune once live data accumulates.
+    'supertrend_bull': 15,      # V15: Supertrend (ATR-band) agrees with the long — the
+                                #      canonical scalping whipsaw filter. Scalping/daytrade
+                                #      only (gated by SUPERTREND_CONFIG); heavy weight so a
+                                #      counter-trend scalp is demoted, not just nudged.
 }
 
 # Aroon indicator settings
 AROON_N                  = 25   # standard lookback period
 AROON_CONFIRM_THRESHOLD  = 50   # oscillator > 50 = strong uptrend confirmation
+
+# V15: Supertrend filter — ATR-band trend overlay (quantkit.calculate_supertrend).
+# Applied as the `supertrend_bull` scoring check on scalping/daytrade signals:
+# require the Supertrend direction to be bullish (price above the line). Classic
+# scalping triad = VWAP + Supertrend + StochRSI (the first and third already exist).
+SUPERTREND_CONFIG = {
+    'enabled':     False,  # V15 dormant: no validated edge for scalping (entry filter
+                           # bull−bear −0.001%; trailing-stop worse) — 2026-06 validation.
+                           # Keep indicator/tests/harnesses; flip True only if re-validated.
+    'modes':       ('scalping', 'daytrade'),  # whipsaw control matters most intraday
+    'period':      10,    # ATR lookback (10 = standard; lower = faster/noisier)
+    'multiplier':  2.0,   # band width in ATRs (2.0 = scalping-tight; 3.0 = classic)
+}
 
 # V14: Tension Index — the "coiled spring" composite (quantkit/tension.py).
 # Keys mirror quantkit.tension.TensionConfig; only overrides need to be listed.

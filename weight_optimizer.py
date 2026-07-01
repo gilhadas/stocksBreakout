@@ -55,6 +55,35 @@ FOLDS = [
 DATA_FETCH_START = '2022-01-01'   # extra history so early folds have 150+ bar warmup
 DATA_FETCH_END   = '2024-12-31'
 
+
+def build_rolling_folds(end_date: str, months: int = 6, n_folds: int = 4):
+    """Build contiguous walk-forward folds ending at `end_date` (rolling window).
+
+    The last fold is the held-out validate window (the most recent `months`);
+    the earlier `n_folds-1` are optimize folds. Returns (folds, data_start,
+    data_end) where data_start adds 1y of warmup before the first fold so SMA150
+    and friends are populated.
+
+    This lets the learning loop optimize on RECENT data (e.g. validate on 2026)
+    instead of the fixed 2023-2024 folds — the only way the loop can actually
+    learn rather than re-fit already-tuned history.
+    """
+    import pandas as pd
+    end = pd.Timestamp(end_date)
+    bounds = list(reversed([end - pd.DateOffset(months=months * i) for i in range(n_folds + 1)]))
+    folds = []
+    for i in range(n_folds):
+        stop = bounds[i + 1] if i == n_folds - 1 else bounds[i + 1] - pd.Timedelta(days=1)
+        folds.append({
+            'id': i + 1,
+            'scan_start': bounds[i].strftime('%Y-%m-%d'),
+            'scan_end':   stop.strftime('%Y-%m-%d'),
+            'role':       'validate' if i == n_folds - 1 else 'optimize',
+        })
+    data_start = (bounds[0] - pd.DateOffset(years=1)).strftime('%Y-%m-%d')
+    return folds, data_start, end.strftime('%Y-%m-%d')
+
+
 WEIGHT_KEYS    = list(config.SCORING_WEIGHTS.keys())
 QUALITY_ORDER  = ['GOLD', 'PREMIUM', 'HIGH', 'STANDARD', 'LOW']
 
@@ -234,12 +263,33 @@ def stability_report(study: optuna.Study, fold_candidates: dict,
             'max_dd':   round(result.get('max_drawdown',  0), 2) if result else None,
         }
 
+    # Baseline: evaluate the CURRENT live config (config.SCORING_WEIGHTS etc.) on the
+    # same folds, so callers (e.g. optuna_learning_agent.py) can measure the optimized
+    # config's lift over what is live today — especially on the held-out fold.
+    baseline_per_fold = {}
+    for fold in FOLDS:
+        b_signals = rescore(
+            fold_candidates[fold['id']],
+            config.SCORING_WEIGHTS, config.SCORE_THRESHOLDS, min_quality,
+            rr_grade_scores=config.RR_GRADE_SCORES,
+        )
+        b_result = run_simulation(
+            b_signals, fold['scan_start'], fold['scan_end'],
+            end_prices, historical, initial_capital=100_000,
+        ) if b_signals else None
+        baseline_per_fold[str(fold['id'])] = {
+            'role':   fold['role'],
+            'sharpe': round(b_result.get('sharpe_ratio', 0), 3) if b_result else None,
+            'return': round(b_result.get('total_return', 0), 2) if b_result else None,
+        }
+
     return {
         'weights':    weights,
         'thresholds': thresholds,
         'rr_grade_scores': rr_grade_scores,
         'best_value': round(best.value, 4),
         'per_fold':   per_fold,
+        'baseline_per_fold': baseline_per_fold,
         'generated':  datetime.now().isoformat(),
     }
 
@@ -292,6 +342,9 @@ def parse_args():
                    help='Min quality filter for re-scored signals (default HIGH)')
     p.add_argument('--apply',    action='store_true',
                    help='Print config.py patch after optimization')
+    p.add_argument('--end-date', default=None,
+                   help='Roll the walk-forward folds to end at this date (YYYY-MM-DD), '
+                        'validating on the most recent 6 months. Default: fixed 2023-2024 folds.')
     return p.parse_args()
 
 
@@ -299,6 +352,11 @@ def main():
     args = parse_args()
     output_dir = Path('scanner_output/optimizer')
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Opt-in rolling folds: optimize on recent data, validate on the latest window.
+    if args.end_date:
+        global FOLDS, DATA_FETCH_START, DATA_FETCH_END
+        FOLDS, DATA_FETCH_START, DATA_FETCH_END = build_rolling_folds(args.end_date)
 
     symbols = load_symbols(args.symbols, limit=args.limit)
     if not symbols:

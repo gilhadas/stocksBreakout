@@ -9,7 +9,7 @@ import numpy as np
 
 from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, RR_GRADE_SCORES,
                     BB_TREND_FILTER, WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS,
-                    TREND_CONFIRM, TENSION_CONFIG)
+                    TREND_CONFIRM, TENSION_CONFIG, SUPERTREND_CONFIG)
 from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
@@ -134,7 +134,20 @@ class BreakoutDetector:
         df = calculate_all_indicators(
             df, cfg['trend_type'], cfg.get('trend_period'), timeframe
         )
-        
+
+        # V15: Supertrend (ATR-band trend filter) — computed on-demand only for the
+        # intraday modes that use it (scalping/daytrade), keeping the recursive O(n)
+        # pass off the swing/longterm hot path. Feeds the `supertrend_bull` check below.
+        if (mode_name in SUPERTREND_CONFIG.get('modes', ())
+                and SUPERTREND_CONFIG.get('enabled')):
+            try:
+                from quantkit.indicators import calculate_supertrend
+                df['Supertrend'], df['Supertrend_Dir'] = calculate_supertrend(
+                    df, SUPERTREND_CONFIG['period'], SUPERTREND_CONFIG['multiplier']
+                )
+            except Exception as e:
+                logger.debug(f"{symbol}: supertrend calc failed: {e}")
+
         # Surge day mode: relaxed thresholds for broad market gap-ups
         is_surge = kwargs.get('is_surge', False)
         if is_surge:
@@ -461,6 +474,18 @@ class BreakoutDetector:
             except Exception:
                 pass  # insufficient history or missing columns — skip silently
 
+            # V15: Supertrend filter — require the ATR-band trend to agree with the
+            # long (direction bullish + price above the line). Scalping/daytrade only;
+            # the canonical whipsaw filter for tight-stop intraday entries.
+            if (mode_name in SUPERTREND_CONFIG.get('modes', ())
+                    and SUPERTREND_CONFIG.get('enabled')
+                    and 'Supertrend_Dir' in df.columns):
+                _st_dir = latest.get('Supertrend_Dir', 0)
+                _st_line = latest.get('Supertrend', np.nan)
+                checks['supertrend_bull'] = bool(
+                    _st_dir == 1 and (pd.isna(_st_line) or latest['close'] > _st_line)
+                )
+
             # V14: Tension Index — "coiled spring" composite (compression + volume
             # consensus + market/sector confirmation + fractal alignment). Added as a
             # proportional 0.0-1.0 check; sub-scores surfaced on the signal for transparency.
@@ -655,7 +680,10 @@ class BreakoutDetector:
             signal['EMA21']     = round(float(latest.get('EMA_21', 0)), 2) if not pd.isna(latest.get('EMA_21', np.nan)) else ''
             signal['StochRSI_K'] = round(float(latest.get('StochRSI_K', 0)), 1) if not pd.isna(latest.get('StochRSI_K', np.nan)) else ''
             signal['StochRSI_D'] = round(float(latest.get('StochRSI_D', 0)), 1) if not pd.isna(latest.get('StochRSI_D', np.nan)) else ''
-        
+            # V15: Supertrend transparency (+1 bullish / -1 bearish; line = trailing stop)
+            signal['ST_Dir']  = int(latest.get('Supertrend_Dir', 0)) if not pd.isna(latest.get('Supertrend_Dir', np.nan)) else ''
+            signal['ST_Line'] = round(float(latest.get('Supertrend', 0)), 2) if not pd.isna(latest.get('Supertrend', np.nan)) else ''
+
         logger.info(
             f"🚀 {symbol} {mode_name.upper()} @ ${latest['close']:.2f} | "
             f"SL: ${sl:.2f} | TP: ${tp:.2f} | R:R={rr:.2f} | {quality}"
