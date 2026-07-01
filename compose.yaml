@@ -1,37 +1,74 @@
-# Breakout Scanner — Docker Compose
-# Usage:
-#   docker compose up --build          # run all cron jobs (default)
-#   docker compose run scanner python3 breakout_scanner.py input/ALL.txt --mode swing --mock
-#   docker compose run scanner python3 monitor_watch.py --dry-run
+# stocksBreakout — server deployment (single Linux VM). See deploy/README.md.
+#
+# Three services share one built image:
+#   scanner-cron  — supercronic runs docker/crontab (all scheduled scans + the
+#                   surge monitor, which the crontab starts at 08:00 ET weekdays)
+#   api           — FastAPI mobile server (uvicorn :8000)
+#   cloudflared   — Cloudflare tunnel; serves gilhadas-stocks.com from this box
+#
+# Prerequisites on the VM (see deploy/README.md):
+#   - .env at repo root (copy deploy/.env.example, fill in secrets)
+#   - deploy/cloudflared/config.yml + the tunnel credentials <UUID>.json
+#
+# Bring up:    docker compose up -d --build
+# Logs:        docker compose logs -f scanner-cron
+# Manual scan: docker compose run --rm scanner-cron \
+#                python3 breakout_scanner.py input/ALL.txt --mode swing --cron --no-notify
+
+# Shared config for the two Python services (same image, env, volumes).
+x-app: &app
+  build:
+    context: .
+  image: stocksbreakout:latest
+  env_file: .env
+  restart: unless-stopped
+  environment:
+    TZ: America/New_York          # already set in Dockerfile; explicit here too
+    # Keep the HuggingFace/FinBERT cache inside the appuser-owned scanner_output
+    # volume — avoids the named-volume root-ownership pitfall on ~/.cache.
+    HF_HOME: /app/scanner_output/.hf_cache
+  volumes:
+    - scanner_output:/app/scanner_output
+    - input_data:/app/input
 
 services:
-  scanner:
-    build:
-      context: .
-    image: stocksbreakout:latest
+  # ── Scheduled scans + surge monitor (supercronic) ──────────────────────────
+  scanner-cron:
+    <<: *app
+    container_name: sb-scanner-cron
+    # Default image CMD = supercronic /app/docker/crontab (see Dockerfile).
 
-    # Load secrets from .env (never committed — see config.py for keys needed)
-    env_file:
-      - .env
+  # ── Mobile API server ──────────────────────────────────────────────────────
+  api:
+    <<: *app
+    container_name: sb-api
+    command: ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Bind to loopback only — public traffic arrives via the cloudflared tunnel,
+    # which reaches the container over the compose network as http://api:8000.
+    # 127.0.0.1:8000 on the host is just for local curl/debug on the VM.
+    ports:
+      - "127.0.0.1:8000:8000"
 
-    # Override TZ if needed; already set in Dockerfile.
-    environment:
-      TZ: America/New_York
-
-    # Persist scanner output and input positions across container restarts.
-    volumes:
-      - scanner_output:/app/scanner_output
-      - ./input:/app/input            # live-edit watchlists / positions CSVs
-
-    # Restart automatically if the container crashes (e.g. network error).
+  # ── Cloudflare tunnel (public entrypoint) ──────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: sb-cloudflared
     restart: unless-stopped
-
-    # Only needed when running app.py (Streamlit dashboard) or webhook_server.py.
-    # Remove or comment out when running in cron-only mode.
-    # ports:
-    #   - "8000:8000"
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      # config.yml + <UUID>.json credentials live here (gitignored, provisioned
+      # on the VM). Ingress origin points at http://api:8000.
+      - ./deploy/cloudflared:/etc/cloudflared:ro
+    depends_on:
+      - api
 
 volumes:
-  scanner_output:
-    # Named volume — Docker manages persistence across rebuilds.
-    # To back up: docker run --rm -v stocksbreakout_scanner_output:/data busybox tar czf - /data > backup.tar.gz
+  # Named volumes are initialised from the image's (appuser-owned) directories on
+  # first run, so ownership is correct and data persists across rebuilds.
+  # Back up:  docker run --rm -v stocksbreakout_scanner_output:/data busybox \
+  #             tar czf - /data > backup.tar.gz
+  scanner_output:   # signals, portfolio state, lists, logs, users.db, HF cache
+  input_data:       # watchlists + runtime-exported premium/momentum lists
+    # NOTE: seeded from the image's input/ once. After changing committed
+    # watchlists in git, re-seed the file, e.g.:
+    #   docker compose cp ./input/ALL.txt scanner-cron:/app/input/ALL.txt

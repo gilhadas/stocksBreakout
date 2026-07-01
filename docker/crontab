@@ -92,6 +92,16 @@
 
 
 # ============================================================================
+# REAL-TIME SURGE MONITOR (long-running, market hours only)
+# ============================================================================
+# Started once at 8:00 AM ET on weekdays; the script self-terminates at 4:15 PM
+# ET (see its market-hours gating), so supercronic runs it as a single long job
+# with no overlap or restart-loop. Watches premium/momentum lists for surges.
+
+0 8 * * 1-5 cd /app && python3 signal_surge_monitor.py --notify >> scanner_output/logs/cron_surge_monitor.log 2>&1
+
+
+# ============================================================================
 # SIGNAL VALIDATION & LEARNING
 # ============================================================================
 

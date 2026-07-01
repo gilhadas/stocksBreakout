@@ -1,0 +1,32 @@
+# Cloudflare tunnel config for the SERVER deployment.
+#
+# Copy to deploy/cloudflared/config.yml on the VM (that real file is gitignored),
+# and place the tunnel credentials JSON next to it as deploy/cloudflared/<UUID>.json.
+#
+# IMPORTANT — do NOT reuse the Mac's `stocksbreakout` tunnel wholesale: it also
+# serves expenses.gilhadas-stocks.com -> localhost:3000, which is a DIFFERENT app
+# that is NOT moving to this server. Create a new tunnel for the stock hostnames:
+#     cloudflared tunnel create stocksbreakout-server
+#     cloudflared tunnel route dns stocksbreakout-server server.gilhadas-stocks.com   # temp, for validation
+# then at cutover move the two production hostnames onto it:
+#     cloudflared tunnel route dns stocksbreakout-server gilhadas-stocks.com
+#     cloudflared tunnel route dns stocksbreakout-server api.gilhadas-stocks.com
+# Leave expenses.gilhadas-stocks.com on the Mac's original tunnel.
+
+tunnel: stocksbreakout-server
+credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  # ── Parallel-validation phase: expose the server on a temp hostname first ──
+  # Uncomment while the Mac still serves production; delete after cutover.
+  # - hostname: server.gilhadas-stocks.com
+  #   service: http://api:8000
+
+  # ── Production hostnames (route DNS to this tunnel at cutover) ─────────────
+  - hostname: gilhadas-stocks.com
+    service: http://api:8000
+  - hostname: api.gilhadas-stocks.com
+    service: http://api:8000
+
+  # Catch-all — required last rule.
+  - service: http_status:404

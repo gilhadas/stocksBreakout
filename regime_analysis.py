@@ -16,7 +16,8 @@ from collections import defaultdict
 from datetime import datetime
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-BASE = "/Users/gilhadas/Documents/GitHub/stocksBreakout"
+# Resolve relative to this file so the script is portable across machines/containers.
+BASE = os.path.dirname(os.path.abspath(__file__))
 SIGNALS_DIR = os.path.join(BASE, "scanner_output/signals")
 LOGS_DIR = os.path.join(BASE, "scanner_output/logs")
 MONITOR_LOG = os.path.join(LOGS_DIR, "cron_monitor.log")

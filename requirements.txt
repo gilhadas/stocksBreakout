@@ -19,3 +19,12 @@ anthropic>=0.40.0      # LLM chat for single-ticker analysis (api/llm_chat.py)
 sqlalchemy>=2.0
 bcrypt>=4.0.0
 python-multipart>=0.0.9
+# ── Mobile API server (api/server.py + trading_api_kit) ──────────────────────
+# Declared in trading_api_kit/pyproject.toml but that package is imported from
+# /app rather than pip-installed, so its runtime deps must be pinned here too.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.0
+python-jose[cryptography]>=3.3
+PyJWT>=2.8
+httpx>=0.27
