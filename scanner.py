@@ -9,7 +9,7 @@ import numpy as np
 
 from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, RR_GRADE_SCORES,
                     BB_TREND_FILTER, WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS,
-                    TREND_CONFIRM)
+                    TREND_CONFIRM, TENSION_CONFIG, SUPERTREND_CONFIG)
 from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
@@ -134,7 +134,20 @@ class BreakoutDetector:
         df = calculate_all_indicators(
             df, cfg['trend_type'], cfg.get('trend_period'), timeframe
         )
-        
+
+        # V15: Supertrend (ATR-band trend filter) — computed on-demand only for the
+        # intraday modes that use it (scalping/daytrade), keeping the recursive O(n)
+        # pass off the swing/longterm hot path. Feeds the `supertrend_bull` check below.
+        if (mode_name in SUPERTREND_CONFIG.get('modes', ())
+                and SUPERTREND_CONFIG.get('enabled')):
+            try:
+                from quantkit.indicators import calculate_supertrend
+                df['Supertrend'], df['Supertrend_Dir'] = calculate_supertrend(
+                    df, SUPERTREND_CONFIG['period'], SUPERTREND_CONFIG['multiplier']
+                )
+            except Exception as e:
+                logger.debug(f"{symbol}: supertrend calc failed: {e}")
+
         # Surge day mode: relaxed thresholds for broad market gap-ups
         is_surge = kwargs.get('is_surge', False)
         if is_surge:
@@ -347,6 +360,7 @@ class BreakoutDetector:
         # --- SIGNAL SCORING SYSTEM ---
         use_scoring = kwargs.get('use_scoring', True)
         sr_data: dict = {}   # V11: populated inside use_scoring block
+        tension = None       # V14: populated inside use_scoring block (Tension Index)
 
         if use_scoring:
             # Mandatory gate: price must break above previous high.
@@ -460,6 +474,47 @@ class BreakoutDetector:
             except Exception:
                 pass  # insufficient history or missing columns — skip silently
 
+            # V15: Supertrend filter — require the ATR-band trend to agree with the
+            # long (direction bullish + price above the line). Scalping/daytrade only;
+            # the canonical whipsaw filter for tight-stop intraday entries.
+            if (mode_name in SUPERTREND_CONFIG.get('modes', ())
+                    and SUPERTREND_CONFIG.get('enabled')
+                    and 'Supertrend_Dir' in df.columns):
+                _st_dir = latest.get('Supertrend_Dir', 0)
+                _st_line = latest.get('Supertrend', np.nan)
+                checks['supertrend_bull'] = bool(
+                    _st_dir == 1 and (pd.isna(_st_line) or latest['close'] > _st_line)
+                )
+
+            # V14: Tension Index — "coiled spring" composite (compression + volume
+            # consensus + market/sector confirmation + fractal alignment). Added as a
+            # proportional 0.0-1.0 check; sub-scores surfaced on the signal for transparency.
+            # (`tension` is initialized to None before the use_scoring block.)
+            if mode_name != 'scalping' and TENSION_CONFIG.get('enabled'):
+                try:
+                    from quantkit.tension import compute_tension_index, TensionConfig
+                    _tcfg = TensionConfig(
+                        w_compression=TENSION_CONFIG['w_compression'],
+                        w_volume=TENSION_CONFIG['w_volume'],
+                        w_confirmation=TENSION_CONFIG['w_confirmation'],
+                        w_fractal=TENSION_CONFIG['w_fractal'],
+                        gate_fractal=TENSION_CONFIG['gate_fractal'],
+                        gate_fakeout=TENSION_CONFIG['gate_fakeout'],
+                    )
+                    tension = compute_tension_index(
+                        df,
+                        daily_df=kwargs.get('daily_df'),
+                        spy_df=kwargs.get('spy_df'),
+                        sector_df=kwargs.get('sector_df'),
+                        regime=regime,
+                        spy_perf=spy_perf,
+                        timeframe=timeframe,
+                        cfg=_tcfg,
+                    )
+                    checks['tension_index'] = tension['tension_index']
+                except Exception as e:
+                    logger.debug(f"{symbol}: tension index failed: {e}")
+
             _surge_thresholds = _sc.get('score_thresholds') if is_surge else None
             score, max_score, quality = self._calculate_signal_score(
                 checks, score_thresholds_override=_surge_thresholds
@@ -525,6 +580,16 @@ class BreakoutDetector:
                         if stop_dist_pct < 1.0:
                             quality = 'HIGH'
                             logger.debug(f"{symbol}: PREMIUM→HIGH (stop too tight {stop_dist_pct:.2f}% < 1%)")
+
+            # V14: Tension fractal-contradiction downgrade — a breakout that fights the
+            # daily trend is structurally weaker; drop one quality tier.
+            if (tension and TENSION_CONFIG.get('downgrade_on_contradiction')
+                    and tension.get('fractal_contradiction')):
+                _downgrade = {'GOLD': 'PREMIUM', 'PREMIUM': 'HIGH', 'HIGH': 'STANDARD'}
+                if quality in _downgrade:
+                    old_q = quality
+                    quality = _downgrade[quality]
+                    logger.debug(f"{symbol}: {old_q}→{quality} (tension fractal contradiction)")
         else:
             # Original all-or-nothing logic
             condition_names = ['price_break', 'vol_confirm', 'dist_confirm', 'trend_ok',
@@ -598,6 +663,14 @@ class BreakoutDetector:
             'SR_TL_Break':       sr_data.get('breaking_trendline',     False) if use_scoring else False,
             # V12: Raw check booleans for weight optimizer re-scoring
             'Checks':            {k: bool(v) for k, v in checks.items()} if use_scoring else {},
+            # V14: Tension Index — composite + sub-scores + state
+            'Tension':           round(tension['tension_index'], 3) if tension else '',
+            'Tension_State':     tension['state'] if tension else '',
+            'Tension_C':         round(tension['compression'], 2) if tension else '',
+            'Tension_V':         round(tension['volume_consensus'], 2) if tension else '',
+            'Tension_F':         round(tension['confirmation'], 2) if tension else '',
+            'Tension_A':         round(tension['fractal_alignment'], 2) if tension else '',
+            'Tension_Silence':   tension['point_of_silence'] if tension else False,
         }
         
         if mode_name == 'scalping' and spread_pct is not None:
@@ -607,7 +680,10 @@ class BreakoutDetector:
             signal['EMA21']     = round(float(latest.get('EMA_21', 0)), 2) if not pd.isna(latest.get('EMA_21', np.nan)) else ''
             signal['StochRSI_K'] = round(float(latest.get('StochRSI_K', 0)), 1) if not pd.isna(latest.get('StochRSI_K', np.nan)) else ''
             signal['StochRSI_D'] = round(float(latest.get('StochRSI_D', 0)), 1) if not pd.isna(latest.get('StochRSI_D', np.nan)) else ''
-        
+            # V15: Supertrend transparency (+1 bullish / -1 bearish; line = trailing stop)
+            signal['ST_Dir']  = int(latest.get('Supertrend_Dir', 0)) if not pd.isna(latest.get('Supertrend_Dir', np.nan)) else ''
+            signal['ST_Line'] = round(float(latest.get('Supertrend', 0)), 2) if not pd.isna(latest.get('Supertrend', np.nan)) else ''
+
         logger.info(
             f"🚀 {symbol} {mode_name.upper()} @ ${latest['close']:.2f} | "
             f"SL: ${sl:.2f} | TP: ${tp:.2f} | R:R={rr:.2f} | {quality}"

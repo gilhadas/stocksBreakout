@@ -358,6 +358,60 @@ def detect_rsi_divergence(df: pd.DataFrame, lookback: int = 20) -> tuple:
     return bullish.fillna(False), bearish.fillna(False)
 
 
+def calculate_supertrend(df: pd.DataFrame, period: int = 10,
+                         multiplier: float = 3.0) -> tuple:
+    """Supertrend — an ATR-band trend-following overlay (Olivier Seban).
+
+    The canonical intraday/scalping trend filter: bands are placed `multiplier`
+    ATRs around the median price (HL2) and "stick" via a carry-forward rule so the
+    line only flips when price decisively closes through the opposite band. Widely
+    used to suppress whipsaws — the main failure mode of tight-stop scalping.
+
+    The band carry-forward and flip are inherently recursive, so a single O(n)
+    pass over numpy arrays is used (cannot be vectorized away); everything else is
+    vectorized per the project's performance convention.
+
+    Returns:
+        (supertrend_line: pd.Series, direction: pd.Series[int])
+        direction = +1 when bullish (price above the line), -1 when bearish.
+    """
+    atr = calculate_atr(df, period)
+    hl2 = (df['high'] + df['low']) / 2.0
+    upper_basic = (hl2 + multiplier * atr).values
+    lower_basic = (hl2 - multiplier * atr).values
+    close = df['close'].values
+    n = len(df)
+
+    final_upper = np.full(n, np.nan)
+    final_lower = np.full(n, np.nan)
+    st = np.full(n, np.nan)
+    direction = np.ones(n, dtype=int)
+
+    for i in range(n):
+        if i == 0 or np.isnan(upper_basic[i]):
+            final_upper[i] = upper_basic[i]
+            final_lower[i] = lower_basic[i]
+            continue
+        # "Sticky" bands: tighten toward price, only loosen when price breaks them.
+        final_upper[i] = (upper_basic[i]
+                          if (upper_basic[i] < final_upper[i - 1] or close[i - 1] > final_upper[i - 1])
+                          else final_upper[i - 1])
+        final_lower[i] = (lower_basic[i]
+                          if (lower_basic[i] > final_lower[i - 1] or close[i - 1] < final_lower[i - 1])
+                          else final_lower[i - 1])
+        # Direction flips only on a decisive close beyond the active band.
+        if close[i] > final_upper[i - 1]:
+            direction[i] = 1
+        elif close[i] < final_lower[i - 1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i - 1]
+        st[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
+
+    return (pd.Series(st, index=df.index),
+            pd.Series(direction, index=df.index))
+
+
 def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
                              trend_period: int, timeframe: str) -> pd.DataFrame:
     """
@@ -411,6 +465,9 @@ def calculate_all_indicators(df: pd.DataFrame, trend_type: str,
 
     # Stochastic RSI — momentum oscillator (overbought > 80, oversold < 20)
     df['StochRSI_K'], df['StochRSI_D'] = calculate_stochastic_rsi(df)
+    # NOTE: Supertrend (calculate_supertrend) is computed on-demand in
+    # BreakoutDetector.detect() only for the scalping/daytrade modes that use it,
+    # to keep the recursive O(n) pass off the swing/longterm hot path.
 
     # Composite scores (V2)
     df['ROC'] = calculate_roc(df)

@@ -24,6 +24,7 @@ class MarketDataHandler:
         self.ib_available = ib_connection is not None
         self.yf_fallback = yf_fallback
         self.spy_cache = {}
+        self.series_cache = {}  # (symbol, timeframe) → OHLCV df, per session (Tension Index context)
         self.cached_market_data = None  # Set via set_cached_data() from job_launcher
 
         if yf_fallback:
@@ -89,6 +90,26 @@ class MarketDataHandler:
                 logger.info(f"  ↪ yfinance fallback for {symbol}")
             df = self.yf_adapter.get_historical_data(symbol, ib_timeframe)
 
+        return df
+
+    async def get_market_series(self, symbol: str,
+                                timeframe: str = '1 day') -> Optional[pd.DataFrame]:
+        """Fetch an OHLCV series for market/sector context, cached per session.
+
+        Thin cached wrapper over ``get_historical_data`` used by the Tension
+        Index to obtain SPY / sector-ETF / a symbol's daily series without
+        re-fetching the same ETF for every ticker in a scan. Returns None on
+        failure (callers degrade gracefully).
+        """
+        cache_key = (symbol.upper(), timeframe)
+        if cache_key in self.series_cache:
+            return self.series_cache[cache_key]
+        try:
+            df = await self.get_historical_data(symbol, timeframe)
+        except Exception as e:
+            logger.debug(f"get_market_series failed for {symbol} {timeframe}: {e}")
+            df = None
+        self.series_cache[cache_key] = df  # cache None too, to avoid retry storms
         return df
 
     async def get_current_price(self, symbol: str,
