@@ -66,7 +66,9 @@ def create_app(
         title:         OpenAPI title shown in /docs.
         version:       API version string.
         static_dir:    Path to a directory of static files to serve (e.g., Expo web build).
-                       If None, no static files are served.
+                       If None, or if the directory doesn't exist yet (e.g. the Expo
+                       web build is gitignored and hasn't been run on this checkout),
+                       no static files are served.
         static_path:   URL prefix for static files (default: "/static").
         include_auth:  Mount /auth/* routes (default: True).
         include_admin: Mount /admin/* routes (default: True).
@@ -97,7 +99,7 @@ def create_app(
     if include_admin:
         app.include_router(admin_router)
 
-    if static_dir is not None:
+    if static_dir is not None and Path(static_dir).exists():
         from fastapi.staticfiles import StaticFiles
         app.mount(static_path, StaticFiles(directory=str(static_dir), html=True), name="static")
 
