@@ -31,6 +31,53 @@ class BreakoutDetector:
         # Instance-level copy of weights from config.py (optimizer output)
         self.scoring_weights = dict(SCORING_WEIGHTS)
         self._load_score_adjustments()
+        self.winprob_calibration = self._load_winprob_calibration()
+
+    def _load_winprob_calibration(self):
+        """Load empirical WinProb table (calibrate_winprob.py output).
+
+        Returns the bucket dict {SIGNAL_TYPE|QUALITY: {win_prob, n, ...}} or
+        None — in which case detect() keeps the confluence heuristic and the
+        cascade detectors emit no WinProb (pre-calibration behavior).
+        """
+        import json
+        from pathlib import Path
+        from config import WINPROB_CALIBRATION
+
+        if not WINPROB_CALIBRATION.get('enabled'):
+            return None
+        path = Path(WINPROB_CALIBRATION.get('path', 'scanner_output/winprob_calibration.json'))
+        if not path.exists():
+            return None
+        try:
+            buckets = json.loads(path.read_text()).get('buckets', {})
+            if buckets:
+                logger.info(f"WinProb calibration: {len(buckets)} buckets loaded from {path}")
+                return buckets
+        except Exception as e:
+            logger.debug(f"WinProb calibration load failed: {e}")
+        return None
+
+    def _calibrated_winprob(self, signal_type: str, quality: str):
+        """Empirical (win_prob, grade) for signal_type × quality, or None.
+
+        Buckets are fitted from champion-exit backtest trade logs; a missing
+        bucket means the sample was too thin to publish — caller falls back
+        to its heuristic (or omits WinProb entirely).
+        """
+        if not self.winprob_calibration:
+            return None
+        bucket = self.winprob_calibration.get(f"{signal_type}|{quality}")
+        if not bucket:
+            return None
+        prob = float(bucket['win_prob'])
+        if prob >= WIN_PROBABILITY['high_threshold']:
+            grade = 'HIGH'
+        elif prob >= WIN_PROBABILITY['low_threshold']:
+            grade = 'MEDIUM'
+        else:
+            grade = 'LOW'
+        return round(prob, 3), grade
     
     def _load_score_adjustments(self):
         """Load weight recommendations from learning loop (read-only, conservative)."""
@@ -613,6 +660,11 @@ class BreakoutDetector:
             trend_ok, momentum_strong, vol_confirm, has_bullish_pattern,
             bb_trend, rr_grade, conviction_strong
         )
+        # Calibrated override: empirical WR by type×quality (quality is final
+        # here — hard-gate downgrades already applied above)
+        _cal = self._calibrated_winprob('Momentum' if momentum_surge else 'BREAKOUT', quality)
+        if _cal:
+            win_prob, win_grade = _cal
 
         # V13: Upgrade target using S/R resistance (computed after _calculate_rr)
         if sr_data and sr_data.get('nearest_resistance'):
@@ -1236,6 +1288,9 @@ class BreakoutDetector:
             'Type': 'BOUNCE',
             'RSI': round(rsi, 1),
         }
+        _cal = self._calibrated_winprob('BOUNCE', quality)
+        if _cal:
+            signal['WinProb'], signal['WinGrade'] = _cal
         
         logger.info(
             f"🔄 BOUNCE {symbol} @ ${latest['close']:.2f} (+{daily_gain:.1%}) | "
@@ -1434,6 +1489,9 @@ class BreakoutDetector:
             'VPOC': round(vp['vpoc'], 2),
             'HVN_Ceiling': round(hvn_ceiling, 2) if hvn_ceiling else '',
         }
+        _cal = self._calibrated_winprob('CONTINUATION', quality)
+        if _cal:
+            signal['WinProb'], signal['WinGrade'] = _cal
 
         logger.info(
             f"🚀 CONTINUATION {symbol} @ ${latest['close']:.2f} | "
@@ -1617,6 +1675,9 @@ class BreakoutDetector:
             'TC_Path':     path_label,
             'TC_Score':    last['score'],
         }
+        _cal = self._calibrated_winprob('TREND_CONFIRM', quality)
+        if _cal:
+            signal['WinProb'], signal['WinGrade'] = _cal
 
         logger.info(
             f"📈 TREND_CONFIRM/{path_label} {symbol} @ ${latest['close']:.2f} | "
@@ -1766,6 +1827,9 @@ class BreakoutDetector:
             'Type': 'SMA20_CROSS',
             'RSI': round(rsi, 1) if not pd.isna(rsi) else 0,
         }
+        _cal = self._calibrated_winprob('SMA20_CROSS', quality)
+        if _cal:
+            signal['WinProb'], signal['WinGrade'] = _cal
 
         logger.info(
             f"📈 SMA20 CROSS {symbol} @ ${latest['close']:.2f} | "

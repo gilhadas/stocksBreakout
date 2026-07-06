@@ -161,6 +161,67 @@ Exit code 0, validated on optimizer_watch.txt (50 curated symbols). Avg Sharpe +
 - ATR-always: ≤15d 39 trades WR=53.8%, >15d 9 trades WR=100%
 - Post-TP: ≤15d 32 trades WR=34.4%, >15d 16 trades WR=75%
 
+### ⚠ Harness-Loss Incident + Restoration (2026-07-02)
+**The `--atr-trail-always` backtest branch was never committed.** Commit 240f96c's
+message claims it modified `backtest_regime_compare.py`, but the committed file never
+contained the branch (it also reverted 7910d6e's capital compounding). The +234% table
+above came from a lost, uncommitted working tree; `param_sweep.py`'s ATR sweep crashed
+(`simulate()` lacked its kwargs) from May 7 until the 2026-07-02 restore.
+
+**Restoration validated by exact-match isolation** (worktrees at 240f96c, shared data
+cache; logs in `scanner_output/backtests/atr_trail_restore_20260702/`):
+- R3a: champion commit + post-TP exit reproduces the corrected baselines table above
+  **to the decimal** (2022 -12.94%/72 >15d @73.6%; 2023 +98.17%/3.28; 2024 +29.41%/1.37)
+  → data, watchlist, and signal stream are all stable. Not data drift.
+- R1=R2=R3b=R4: tunnel pattern, quantkit extraction, `score_adjustments.json`, and the
+  WinProb calibration JSON all have **zero effect** on the champion row (99.7% BOUNCE
+  signals; `detect_bounce` uses its own pass-count quality, not SCORING_WEIGHTS).
+- Restored semantics (pinned by `tests/test_backtest_atr_trail.py`): **CLOSE-based**
+  trigger (intraday dips below the trail do NOT exit — lo-based whipsaw gave 2022
+  -24.8%), exit booked at the stop level, trail armed with the entry-day close, fixed
+  stop as floor, monotonic ratchet — mirrors `auto_portfolio._raise_atr_trail` exactly.
+
+**New canonical champion baselines (reproducible, 2026-07-02, optimizer_watch.txt):**
+CLI: `--no-tc --bounce-bear-gate 15 --watchlist input/optimizer_watch.txt --skip-old --atr-trail-always`
+
+| Year | ATR-always (canonical) | Post-TP baseline | recorded-but-lost table |
+|------|------------------------|------------------|-------------------------|
+| 2022 | **-10.75%** (Sharpe -0.24) | -12.94% (-0.33) | -5.26% ⚠ unreprod. |
+| 2023 | **+142.17%** (+3.42) | +98.17% (+3.28) | +102.22% ⚠ |
+| 2024 | **+29.92%** (+1.51) | +29.41% (+1.37) | +30.93% |
+| 2025 | **+19.63%** (+1.09) | +9.78% (+0.57) | +22.93% ⚠ |
+| 2026* | **+6.32%** (+0.90) | -3.37% (-0.51) | +8.37% (May cut) |
+| 5yr compound | **~+257%** | +136.8% | +234.2% ⚠ |
+| Avg Sharpe | **+1.33** | +0.88 | +1.66–1.75 ⚠ |
+
+*2026 through Jul 1. The lost table's exact numbers are unreproducible (its residual
+vs the restore is unknowable without the lost code); the champion's **direction is
+fully confirmed** — ATR-always beats post-TP in every year and by ~+120 pts compound /
++0.45 Sharpe. Live trading was never affected (`_raise_atr_trail` shipped correctly).
+
+### WinProb Calibration (2026-07-02) — wired, structurally inert on current mix
+`calibrate_winprob.py` fits empirical WR by SIGNAL_TYPE|QUALITY from champion-exit
+trade logs (EB shrinkage k=10, train 22-24/holdout 25-26; holdout err 3.5%). Scanner
+loads `scanner_output/winprob_calibration.json` (config `WINPROB_CALIBRATION`,
+backtest ablation flag `--no-winprob-cal`); BOUNCE/CONTINUATION/SMA20_CROSS/
+TREND_CONFIRM now stamp WinProb (previously ranked as 0 in the admission sort).
+**Finding:** 490 champion trades collapse to one bucket (BOUNCE|PREMIUM) and regime is
+constant within a day → a bucket lookup cannot reorder the within-day pooled-cap
+ranking (R4 ≡ R1 confirmed). Becomes active if the signal mix diversifies. Real
+ranking upgrade requires per-signal features (vol, RSI, drawdown depth) logged into
+backtest trades + a continuous model. Calibration JSON deliberately NOT deployed to
+`scanner_output/` (kept in `backtests/atr_trail_restore_20260702/`).
+
+### Daytrade Admission A/B (2026-07-02) — keep current config
+`daytrade_admission_ab.py` replayed the live S3 signal backlog (807 files, Apr 1–Jun 9:
+511 swing / 272 daytrade / 24 longterm) through a copy of the admission pipeline +
+live ATR-trail exit. B(no-daytrade)−A(control) Sharpe = **+0.09** — below the ≥+0.10
+ship rule → no change. Mechanism: the pooled ranking already de-facto excludes
+daytrade (only **2 of 41** control-arm trades were daytrade; −$97). Cross-arm: ≤15d
+holds 0–10% WR everywhere, >15d 68–85% — short-hold drag is signal-side, confirmed on
+live data. Notable: longterm produced ~all control-arm P&L (+$1,156 on 17 trades from
+only 24 files) — the longterm pipeline is under-supplied relative to its edge.
+
 ---
 
 ## 8. Ablation Experiment: Pooled-Cap & Selective-Mode Isolation (2026-05-01)

@@ -343,6 +343,18 @@ WIN_PROBABILITY = {
     'low_size_mult': 0.7,      # LOW prob = 0.7x position size
 }
 
+# --- Empirical WinProb Calibration ---
+# Lookup of win rates by SIGNAL_TYPE|QUALITY fitted from champion-exit backtest
+# trade logs (calibrate_winprob.py → scanner_output/winprob_calibration.json).
+# Where a bucket exists, it replaces the confluence heuristic in detect() and
+# stamps WinProb onto BOUNCE/CONTINUATION/SMA20_CROSS/TREND_CONFIRM signals
+# (which previously had none — they ranked as WinProb=0 in the admission sort).
+# Ranking impact: auto_portfolio + backtest pooled cap sort Quality → WinProb → R:R.
+WINPROB_CALIBRATION = {
+    'enabled': True,
+    'path': 'scanner_output/winprob_calibration.json',
+}
+
 # --- Mode Configurations ---
 MODES = {
     'longterm': {

@@ -53,13 +53,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # --chown ensures appuser can write to scanner_output/ at runtime.
 COPY --chown=appuser:appuser . .
 
-# Create output directories (populated on first run; mount as a volume for persistence).
+# Create output + input directories (populated on first run; mount as a volume for
+# persistence). input/ is created here, not just chowned, because *.txt watchlists
+# are gitignored — a fresh clone has no input/ directory at all.
 RUN mkdir -p \
         scanner_output/logs \
         scanner_output/signals \
         scanner_output/exits \
         scanner_output/rejections \
         scanner_output/backtests \
+        input \
     && chown -R appuser:appuser scanner_output input
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────

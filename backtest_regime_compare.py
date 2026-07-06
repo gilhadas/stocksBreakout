@@ -475,13 +475,20 @@ def simulate(signals, start_date, end_date, end_prices, historical,
              bounce_bear_gate=0,
              selective_max_per_day=0,
              sma150_slope_gate=False, sma150_exit=False,
-             breakeven_r=0.0, breakeven_bear_gate=0):
+             breakeven_r=0.0, breakeven_bear_gate=0,
+             atr_trail_always=False, atr_trail_mult=2.0):
     """
     Simple, self-contained simulation that avoids SimulationMode bugs.
     - Enters at signal price on signal date
     - Checks daily H/L for stop or TP hit each bar
     - tp_as_trail=True: when TP hit, activates 2×ATR trailing stop (V9-C mode)
     - tp_as_trail=False: exits hard at TP price
+    - atr_trail_always=True: ATR×atr_trail_mult trail active from entry day 1,
+      replacing the TP trigger entirely (champion exit, validated 2026-05-07:
+      +234% 5yr vs +137% post-TP on optimizer_watch.txt). Fixed stop_loss is
+      the absolute floor; effective stop only ever moves up. Takes priority
+      over tp_as_trail. Mirrors auto_portfolio._raise_atr_trail().
+    - atr_trail_mult: trail distance in ATRs (default 2.0, sweep winner)
     - stall_exit=False: exits after MAX_HOLD (30d) bars regardless
     - stall_exit=True:  exits when close < SMA(stall_sma_period) for 2 consecutive bars;
                         MaxHold becomes a 60-day safety cap only (stall_sma_period: 20 or 50)
@@ -508,7 +515,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         return None
 
     MAX_HOLD = 60 if stall_exit else 30   # calendar days; stall_exit uses 60d as safety cap
-    ATR_TRAIL_MULT = 2.0
+    ATR_TRAIL_MULT = atr_trail_mult
     MAX_POS_PCT   = 0.10
     MAX_RISK_PCT  = 0.02
     # Only reduce BEARISH (22.2% WR, -3.28% avg P&L, -13.4% P&L share)
@@ -686,7 +693,49 @@ def simulate(signals, start_date, end_date, end_prices, historical,
 
             # Skip same-day exits
             if today_norm == pos['entry_date']:
-                pass  # no exit checks on entry day
+                # No exit checks on entry day, but the always-on trail arms
+                # tonight — live refresh_prices runs the same evening the
+                # position opens ("trail activates from entry bar 1").
+                if atr_trail_always:
+                    df_atr = df[df.index <= today].tail(15)
+                    if len(df_atr) >= 14:
+                        tr = pd.concat([
+                            df_atr['high'] - df_atr['low'],
+                            (df_atr['high'] - df_atr['close'].shift(1)).abs(),
+                            (df_atr['low']  - df_atr['close'].shift(1)).abs(),
+                        ], axis=1).max(axis=1)
+                        pos['_trail_stop'] = cl - ATR_TRAIL_MULT * float(tr.mean())
+
+            elif atr_trail_always:
+                # Champion exit: ATR trail rides up from entry day 1 — no TP
+                # trigger. CLOSE-based, mirroring auto_portfolio.refresh_prices
+                # exactly: the position closes when the daily close crosses the
+                # trailed stop (intraday dips below it do NOT exit — that's the
+                # whipsaw the champion avoids), booked at the stop level. The
+                # trail is then raised with today's close; today's raise can
+                # never trigger today (close − mult×ATR < close), so the
+                # binding level is the ratchet from prior days. Fixed stop is
+                # the absolute floor and the effective stop never moves down.
+                eff_stop = (max(pos['stop'], pos['_trail_stop'])
+                            if pos['_trail_stop'] is not None else pos['stop'])
+                if cl <= eff_stop:
+                    exit_price  = eff_stop
+                    exit_reason = ('TrailStop'
+                                   if (pos['_trail_stop'] is not None
+                                       and pos['_trail_stop'] > pos['stop'])
+                                   else 'StopLoss')
+                else:
+                    df_atr = df[df.index <= today].tail(15)
+                    if len(df_atr) >= 14:
+                        tr = pd.concat([
+                            df_atr['high'] - df_atr['low'],
+                            (df_atr['high'] - df_atr['close'].shift(1)).abs(),
+                            (df_atr['low']  - df_atr['close'].shift(1)).abs(),
+                        ], axis=1).max(axis=1)
+                        atr = tr.mean()
+                        new_trail = cl - ATR_TRAIL_MULT * atr
+                        if pos['_trail_stop'] is None or new_trail > pos['_trail_stop']:
+                            pos['_trail_stop'] = new_trail
 
             elif tp_as_trail:
                 # TP activates trailing stop
@@ -854,6 +903,8 @@ def simulate(signals, start_date, end_date, end_prices, historical,
 
     if output_dir and trades:
         safe_label = label.replace(' ', '_').replace('/', '_').replace('+', 'plus')
+        if atr_trail_always:
+            safe_label += f'_ATRalways-{atr_trail_mult:g}'
         year_str = str(start_date)[:4]
         out_path = Path(output_dir) / f'trades_{year_str}_{safe_label}.csv'
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -929,7 +980,8 @@ def section_header():
 def run_year(year, symbols, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
              bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False,
-             skip_old=False, breakeven_r=0.0, breakeven_bear_gate=0):
+             skip_old=False, breakeven_r=0.0, breakeven_bear_gate=0,
+             atr_trail_always=False, atr_trail_mult=2.0):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -999,9 +1051,13 @@ def run_year(year, symbols, capital,
               f"{spy_info['drawdown']:>+7.2f}%  {'(benchmark)':>8}")
 
     output_dir = 'scanner_output/backtests' if trades_log else None
+    # atr_trail_always applies to every row in the run (one run = one exit
+    # policy) — the always-on branch takes priority over tp_as_trail inside
+    # simulate(), so per-row tp_as_trail=True is overridden when the flag is set.
     sim_kw = dict(slippage_pct=slippage_pct, commission=commission, output_dir=output_dir,
                   bounce_bear_gate=bounce_bear_gate, breakeven_r=breakeven_r,
-                  breakeven_bear_gate=breakeven_bear_gate)
+                  breakeven_bear_gate=breakeven_bear_gate,
+                  atr_trail_always=atr_trail_always, atr_trail_mult=atr_trail_mult)
 
     if not skip_old:
         # OLD V9-C (best previous)
@@ -1478,6 +1534,19 @@ PARAMETER REFERENCE:
                    help='Skip OLD V9-C baseline rows; run only NEW champion config (cuts runtime ~50%%). '
                         'Use when you only care about NEW performance, not side-by-side comparison.')
 
+    p.add_argument('--atr-trail-always', action='store_true',
+                   help='Champion exit (validated 2026-05-07): ATR trailing stop active from entry day 1, '
+                        'replacing the TP-triggered trail. Fixed stop is the floor; stop only moves up. '
+                        'Applies to ALL rows in the run. +234%% 5yr vs +137%% post-TP on optimizer_watch.txt.')
+
+    p.add_argument('--atr-trail-mult', type=float, default=2.0,
+                   help='ATR multiplier for trailing stops (default: 2.0 = sweep winner, matches config.ATR_TRAIL_MULT). '
+                        'Used by both --atr-trail-always and the post-TP trail. Example: --atr-trail-mult 2.5')
+
+    p.add_argument('--no-winprob-cal', action='store_true',
+                   help='Disable the empirical WinProb calibration table (scanner falls back to the confluence '
+                        'heuristic; cascade detectors emit no WinProb). Use for baseline-vs-calibrated ablation.')
+
     return p.parse_args()
 
 
@@ -1494,6 +1563,15 @@ def main():
         import config as _cfg
         _cfg.AROON_CONFIRM_THRESHOLD = 999  # always-False → removes +5pt bonus
         print("⚠  --no-aroon: Aroon oscillator gate disabled (ablation)")
+
+    if args.atr_trail_always:
+        print(f"⚠  --atr-trail-always: ATR×{args.atr_trail_mult:g} trail from entry day 1 "
+              f"(champion exit — replaces post-TP trail on ALL rows)")
+
+    if args.no_winprob_cal:
+        import config as _cfg
+        _cfg.WINPROB_CALIBRATION['enabled'] = False
+        print("⚠  --no-winprob-cal: empirical WinProb table disabled (heuristic-only baseline)")
 
     print("=" * 80)
     print("REGIME-AWARE BACKTEST: OLD CONFIG (V9-C) vs NEW CONFIG")
@@ -1518,7 +1596,9 @@ def main():
                  full_compare=args.full_compare,
                  skip_old=args.skip_old,
                  breakeven_r=args.breakeven_r,
-                 breakeven_bear_gate=args.breakeven_bear_gate)
+                 breakeven_bear_gate=args.breakeven_bear_gate,
+                 atr_trail_always=args.atr_trail_always,
+                 atr_trail_mult=args.atr_trail_mult)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")
