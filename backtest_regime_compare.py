@@ -474,7 +474,8 @@ def simulate(signals, start_date, end_date, end_prices, historical,
              stall_exit=False, stall_sma_period=20,
              bounce_bear_gate=0,
              selective_max_per_day=0,
-             sma150_slope_gate=False, sma150_exit=False):
+             sma150_slope_gate=False, sma150_exit=False,
+             breakeven_r=0.0, breakeven_bear_gate=0):
     """
     Simple, self-contained simulation that avoids SimulationMode bugs.
     - Enters at signal price on signal date
@@ -493,6 +494,14 @@ def simulate(signals, start_date, end_date, end_prices, historical,
     - bear_macro_mult: position size multiplier when signal.bear_macro=True (1.0=full, 0.5=half)
     - sma150_slope_gate: skip entry if symbol's SMA150 is declining (today < 10 bars ago)
     - sma150_exit: exit when close crosses below SMA150 (90d safety cap)
+    - breakeven_r: if > 0, once a position has reached entry + N×(initial risk), raise its
+                   stop to breakeven (entry). Targets the ≤15d giveback where a winner
+                   reverses to a full stop-loss before TP. Uses prior-bar peak only (no
+                   intrabar lookahead). 0 = off.
+    - breakeven_bear_gate: if > 0, SKIP the breakeven move on days where SPY has been below
+                   SMA200 for >= N consecutive days (sustained bear). In a bear year, moving
+                   to BE scratches the few winners before they run; gating it off there kept
+                   the mixed/bull-year gains without the 2022 damage. 0 = always apply.
     """
     if not signals:
         print(f"  [{label}] No signals → skip")
@@ -544,7 +553,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
 
     # Pre-compute SPY consecutive days below SMA200 (for bounce_bear_gate)
     spy_consec_below: dict[pd.Timestamp, int] = {}
-    if bounce_bear_gate > 0 and spy is not None:
+    if (bounce_bear_gate > 0 or breakeven_bear_gate > 0) and spy is not None:
         sma200 = spy['close'].rolling(200).mean()
         count = 0
         for dt, cl, sm in zip(spy.index, spy['close'], sma200):
@@ -639,6 +648,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                 'entry_price': price, 'stop': stop, 'take_profit': tp,
                 'qty': qty, 'cost': cost, 'entry_date': today_norm,
                 '_tp_hit': False, '_trail_stop': None, '_below_sma20': False,
+                'init_risk': risk_per_share, '_peak_high': price, '_be_moved': False,
                 'quality': sig.get('quality', ''), 'regime': sig.get('regime', ''),
                 'signal_type': sig.get('type', ''),
             }
@@ -658,6 +668,18 @@ def simulate(signals, start_date, end_date, end_prices, historical,
             op  = float(bar.iloc[-1]['open'])
 
             days_held = (today_norm - pos['entry_date']).days
+
+            # Breakeven-after-R: once the position has PREVIOUSLY reached
+            # entry + N×(initial risk) (peak from prior bars only — no intrabar
+            # lookahead), lock the stop at breakeven. Bridges the pre-TP giveback gap.
+            # Regime gate: skip during sustained bear (BE scratches rare bear winners).
+            if (breakeven_r > 0 and not pos['_be_moved']
+                    and pos['_peak_high'] >= pos['entry_price'] + breakeven_r * pos['init_risk']
+                    and not (breakeven_bear_gate > 0
+                             and spy_consec_below.get(today_norm, 0) >= breakeven_bear_gate)):
+                if pos['entry_price'] > pos['stop']:
+                    pos['stop'] = pos['entry_price']
+                pos['_be_moved'] = True
 
             exit_price = None
             exit_reason = None
@@ -770,6 +792,11 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                 })
                 cap += exit_net * qty
                 del open_pos[sym]
+            else:
+                # Position stays open — track peak high for breakeven-after-R.
+                # Updated AFTER exit checks so it reflects prior bars only next day.
+                if hi > pos['_peak_high']:
+                    pos['_peak_high'] = hi
 
         # Mark-to-market for equity curve (open positions at close)
         open_val = sum(
@@ -902,7 +929,7 @@ def section_header():
 def run_year(year, symbols, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
              bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False,
-             skip_old=False):
+             skip_old=False, breakeven_r=0.0, breakeven_bear_gate=0):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -973,7 +1000,8 @@ def run_year(year, symbols, capital,
 
     output_dir = 'scanner_output/backtests' if trades_log else None
     sim_kw = dict(slippage_pct=slippage_pct, commission=commission, output_dir=output_dir,
-                  bounce_bear_gate=bounce_bear_gate)
+                  bounce_bear_gate=bounce_bear_gate, breakeven_r=breakeven_r,
+                  breakeven_bear_gate=breakeven_bear_gate)
 
     if not skip_old:
         # OLD V9-C (best previous)
@@ -1413,6 +1441,12 @@ PARAMETER REFERENCE:
     p.add_argument('--bounce-bear-gate', type=int, default=0,
                    help='Block BOUNCE+RED_MARKET entries when SPY has been below SMA200 for >=N consecutive days (0=off). '
                         'Recommended: 15 (sustained bear filter). Example: --bounce-bear-gate 15')
+    p.add_argument('--breakeven-r', type=float, default=0.0,
+                   help='Move stop to breakeven once a position reaches entry + N×(initial risk) (0=off). '
+                        'Targets the ≤15d giveback. Try 1.0 or 2.0. Example: --breakeven-r 2.0')
+    p.add_argument('--breakeven-bear-gate', type=int, default=0,
+                   help='Skip the breakeven move when SPY has been below SMA200 for >=N consecutive days '
+                        '(0=off). Keeps mixed/bull-year gains without bear-year damage. Example: --breakeven-bear-gate 15')
 
     p.add_argument('--selective', action='store_true',
                    help='Enable SELECTIVE_MODE: drop SMA20_CROSS + Momentum types, keep only BOUNCE/CONTINUATION/TREND_CONFIRM. '
@@ -1482,7 +1516,9 @@ def main():
                  selective=args.selective,
                  pooled_cap=args.pooled_cap,
                  full_compare=args.full_compare,
-                 skip_old=args.skip_old)
+                 skip_old=args.skip_old,
+                 breakeven_r=args.breakeven_r,
+                 breakeven_bear_gate=args.breakeven_bear_gate)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")

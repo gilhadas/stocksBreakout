@@ -56,6 +56,7 @@ from quantkit.indicators import (
     calculate_adx,
     calculate_aroon,
     calculate_stochastic_rsi,
+    calculate_supertrend,
     calculate_momentum_score,
     calculate_breakout_conviction,
     calculate_minervini_template,
@@ -83,6 +84,11 @@ from quantkit.regime import (
     REGIME_PARAMS,
 )
 
+from quantkit.tension import (
+    compute_tension_index,
+    TensionConfig,
+)
+
 __all__ = [
     # indicators
     "calculate_atr",
@@ -93,6 +99,7 @@ __all__ = [
     "calculate_adx",
     "calculate_aroon",
     "calculate_stochastic_rsi",
+    "calculate_supertrend",
     "calculate_momentum_score",
     "calculate_breakout_conviction",
     "calculate_minervini_template",
@@ -112,4 +119,7 @@ __all__ = [
     "detect_regime",
     "suggest_params",
     "REGIME_PARAMS",
+    # tension
+    "compute_tension_index",
+    "TensionConfig",
 ]

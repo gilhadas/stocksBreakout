@@ -293,6 +293,12 @@ print(f'Daily longterm candidates: {len(syms)} symbols')
 30 20 * * 1-5 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN validate_signals.py validate-all --min-age-days 3 >> scanner_output/logs/cron_validate_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/signal_reports >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 # Every Sunday at 9:00 PM ET - Generate learning recommendations
 0 21 * * 0 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN validate_signals.py learn >> scanner_output/logs/cron_learn_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1 && $PYTHON_BIN upload_to_s3.py --dirs scanner_output/signal_reports >> scanner_output/logs/cron_upload_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
+# Every Sunday at 10:00 PM ET - Optuna-in-the-loop weight retune (DISABLED by default).
+#   Re-optimizes SCORING_WEIGHTS via walk-forward Optuna and writes targets into
+#   score_adjustments.json ONLY if the optimized config beats the live config on the
+#   held-out fold by >= 0.10 Sharpe. The scanner's ±3 cap throttles application.
+#   Uncomment to enable, then restart cron_agent (it is not hot-reloaded).
+# 0 22 * * 0 TZ=America/New_York cd $PROJECT_ROOT && $PYTHON_BIN optuna_learning_agent.py --trials 300 --symbols input/optimizer_watch.txt --min-improvement 0.10 >> scanner_output/logs/cron_optuna_learn_$(TZ=America/New_York date +\%Y\%m\%d).log 2>&1
 
 # ============================================
 # MAINTENANCE TASKS

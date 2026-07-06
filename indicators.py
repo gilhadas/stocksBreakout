@@ -17,6 +17,7 @@ from quantkit.indicators import (  # noqa: F401, F403
     check_candle_structure,
     calculate_rsi,
     calculate_stochastic_rsi,
+    calculate_supertrend,
     calculate_macd,
     calculate_adx,
     calculate_aroon,
