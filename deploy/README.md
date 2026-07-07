@@ -64,7 +64,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://server.gilhadas-stocks.com/port
 # Data-only scan works and writes a signals CSV (expect the log line
 # "No real IB connection — using Alpaca/yfinance"). --no-notify avoids double alerts:
 docker compose run --rm scanner-cron \
-  python3 breakout_scanner.py input/ALL.txt --mode swing --cron --no-notify
+  python3 breakout_scanner.py input/all.txt --mode swing --cron --no-notify
 docker compose run --rm scanner-cron ls -la scanner_output/signals
 
 # S3 sync fired (portfolio/signals visible under the bucket from this box).
@@ -116,7 +116,7 @@ docker compose logs -f api                   # tail the API
 docker compose restart api                   # restart one service
 docker compose up -d --build                 # rebuild + roll after a code change
 docker compose run --rm scanner-cron \       # ad-hoc scan
-  python3 breakout_scanner.py input/ALL.txt --mode swing --cron --no-notify
+  python3 breakout_scanner.py input/all.txt --mode swing --cron --no-notify
 ```
 Cron/scan logs also land in `scanner_output/logs/` inside the `scanner_output` volume.
 

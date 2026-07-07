@@ -1490,6 +1490,12 @@ Examples:
         help='Enable notifications (requires config.py setup)'
     )
     parser.add_argument(
+        '--no-notify',
+        action='store_true',
+        help='Force notifications off, overriding --cron (which notifies by default). '
+             'For validation/dry-run scans where alerts would be premature or duplicated.'
+    )
+    parser.add_argument(
         '--level2',
         action='store_true',
         help='Enable Level 2 (Market Depth) analysis'
@@ -1759,7 +1765,7 @@ Examples:
         return
     
     # Initialize notifier
-    notifier = Notifier() if args.notify or args.cron else None
+    notifier = Notifier() if (args.notify or args.cron) and not args.no_notify else None
     if not notifier:
         # Create dummy notifier that does nothing
         class DummyNotifier:
@@ -1911,7 +1917,7 @@ Examples:
 
     except Exception as e:
         logger.error(f"Scanner error: {e}", exc_info=True)
-        if args.notify or args.cron:
+        if (args.notify or args.cron) and not args.no_notify:
             _mode_tag = getattr(args, 'mode', 'unknown').upper()
             _input_tag = Path(getattr(args, 'file', '') or '').name or 'unknown'
             # Disabled: only BREAKOUT (buy) and EXIT (sell) notifications are active
