@@ -4,7 +4,7 @@ import { Stack, router } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import 'react-native-reanimated';
-import { saveToken } from '../lib/api';
+import { configure, saveToken } from '../lib/api';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -18,6 +18,17 @@ export default function RootLayout() {
   const [loaded, error] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
   });
+
+  // Required once at app startup before any API call (see trading_api_kit
+  // client.ts) — was never actually wired up, so any browser/device without a
+  // previously-cached api_url in storage failed every auth call with a
+  // generic "baseUrl not configured" error (surfaced to users as e.g.
+  // "Failed to authenticate with Google"). Must be a useEffect, not
+  // module-scope: AsyncStorage's web backend touches `window`, which doesn't
+  // exist during `expo export`'s Node-based static rendering pass.
+  useEffect(() => {
+    configure({ baseUrl: 'https://gilhadas-stocks.com' });
+  }, []);
 
   useEffect(() => {
     if (error) throw error;

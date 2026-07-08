@@ -120,9 +120,14 @@ def change_password(
 
 
 # ── HTML dashboard ────────────────────────────────────────────────────────────
+# No _require_admin dependency here: a plain browser navigation can't send the
+# X-Admin-Secret header, so gating this route would 403 before the page's own
+# JS (which prompts for the secret and attaches it to every /admin/* fetch
+# below) ever gets a chance to load. The page itself is inert without the
+# secret — every data-bearing endpoint it calls is still protected.
 
 @router.get("", response_class=HTMLResponse)
-def admin_dashboard(_=Depends(_require_admin)):
+def admin_dashboard():
     """Minimal HTML admin dashboard for user management."""
     return HTMLResponse(content="""
 <!DOCTYPE html>
