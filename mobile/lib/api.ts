@@ -25,16 +25,16 @@ export {
   registerForPushNotifications,
   registerPushToken,
   SessionExpiredError,
-} from '../../../trading_api_kit/ts_client/src/index';
+} from '../../trading_api_kit/ts_client/src/index';
 
 // Legacy alias — kept for screens that used the old `login()` single-arg function
-import { loginWithPassword } from '../../../trading_api_kit/ts_client/src/index';
+import { loginWithPassword } from '../../trading_api_kit/ts_client/src/index';
 export async function login(password: string, _apiUrl?: string) {
   return loginWithPassword(password);
 }
 
 // ── StocksBreakout-specific endpoints ─────────────────────────────────────────
-import { authFetch } from '../../../trading_api_kit/ts_client/src/client';
+import { authFetch } from '../../trading_api_kit/ts_client/src/client';
 
 export function resetPortfolio() {
   return authFetch('/portfolio/reset', { method: 'POST' });
