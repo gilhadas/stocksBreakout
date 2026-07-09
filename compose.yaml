@@ -37,6 +37,12 @@ services:
     <<: *app
     container_name: sb-scanner-cron
     # Default image CMD = supercronic /app/docker/crontab (see Dockerfile).
+    # init: true runs tini as PID 1 so supercronic isn't — its own zombie-reap
+    # code crashes fatally every ~60s when it IS pid 1 in this environment
+    # ("Failed to fork exec: no such file or directory"), silently killing all
+    # scheduled scans. As a non-pid-1 process it correctly no-ops reaping
+    # instead (tini reaps for it), per its own -no-reap flag semantics.
+    init: true
 
   # ── Mobile API server ──────────────────────────────────────────────────────
   api:
