@@ -169,6 +169,10 @@ docker compose up -d
 1. `docker compose ps` — is `sb-scanner-cron` **Up** (not Restarting)? This exact
    failure happened once: the container crash-looped silently and zero scans ran.
 2. Check today's scan log exists: `docker compose exec api ls -la /app/scanner_output/logs/`
+   Then read it: `docker compose exec api tail -30 /app/scanner_output/logs/cron_swing.log`.
+   Look especially for `Failed to load watchlist ... No such file or directory` — Linux
+   filenames are **case-sensitive** (`all.txt` ≠ `ALL.txt`), unlike the Mac. This exact
+   mistake silently killed every scheduled scan for a week once.
 3. Remember: alerts only fire when a scan actually finds signals. To force a test:
    ```bash
    docker compose run --rm scanner-cron python3 -c \
