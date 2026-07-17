@@ -29,6 +29,12 @@ When adding features to `indicators.py` or `scanner.py`, adhere to these default
 - `config.py`: Single source of truth for MODES, PORTFOLIO, and REGIME_CONFIG.
 - `market_data.py`: IB data fetching, caching, and `_normalize_timeframe()`.
 - **`CONFIG.md`**: Comprehensive parameter reference for all 70+ tunable settings (see this for detailed docs on TREND_CONFIRM, BOUNCE_BEAR_GATE, REGIME_CONFIG, SCORING_WEIGHTS, etc.)
+- **`quantkit/`**: Extracted pip-installable lib (indicators/patterns/fib/regime/sentiment/portfolio); `indicators.py`/`pattern_recognition.py`/etc. are thin shims over it. All modules expect **lowercase OHLCV** columns:
+  ```python
+  df = pd.read_csv('data/AAPL.csv', index_col='Date', parse_dates=True)
+  df.columns = df.columns.str.lower()
+  ```
+  See `quantkit/README.md` for the full data-loading and integration guide.
 
 ## 5. Critical Patterns & Conventions
 ### Async/Concurrency
@@ -318,3 +324,44 @@ Per-year >15d WR (the litmus test):
 - >15d WR holds up for A across all years (67–78%); cap=2 produces same or slightly worse WR at fewer trades
 - **Key structural finding:** cap=2 does NOT reduce ≤15d trade share — type mix is unchanged. Short-hold drag requires signal-side filtering, not cap adjustment.
 - **SELECTIVE is a confirmed no-op** on the NEW config path: new_premium is 99%+ BOUNCE type already.
+
+## 9. Server Deployment Cutover (2026-07-07)
+
+**Production is now live on AWS EC2 (`63.176.155.83`, hostname `ip-172-31-35-253`), not the Mac.**
+SSH: `ubuntu@63.176.155.83` with key `~/.ssh/stocksbreakout-key.pem`. Full `deploy/README.md`
+steps 1–7 completed. `gilhadas-stocks.com` / `api.gilhadas-stocks.com` now serve from this box;
+`expenses.gilhadas-stocks.com` stays on the Mac's original `stocksbreakout` tunnel (trimmed
+config, two stock hostnames removed from `~/.cloudflared/config.yml`).
+
+**There is a second, unrelated Oracle Cloud VM (`82.70.210.194`, key `daytrade_oracle`,
+`il-jerusalem-1`)** — this is NOT part of this deployment. It's a separate, already-live
+production box running the `daytrade` engine/web/IB-Gateway/Caddy stack (created 2026-06-15).
+A stocksBreakout repo clone + `.env` copy were placed there mid-session by mistake before this
+was discovered — harmless (never built/run), but stale; clean up or ignore.
+
+**Key gotchas hit during cutover (useful if redoing this or debugging drift):**
+- **Prior-session work was lost/orphaned on the EC2 box.** A previous, unrecorded session had
+  already done steps 1–5 there via manual `scp` (not git) — repo was stuck at commit `d39feb9`
+  with uncommitted local edits to `Dockerfile`/`compose.yaml`/`docker/crontab`/etc. Diffed every
+  file before touching anything: all substantive changes were byte-identical to what's already
+  on `origin/main` (the containerization feature had since been properly committed elsewhere) —
+  nothing was lost by `git reset --hard origin/main` + `git clean -fd`. Only the gitignored
+  `deploy/cloudflared/config.yml` + `<UUID>.json` (the real tunnel credentials) were irreplaceable;
+  backed those up to the local repo's `deploy/cloudflared/` (gitignored, not committed) before
+  resetting.
+- **`cloudflared tunnel route dns --overwrite-dns` does not overwrite an existing tunnel-owned
+  CNAME**, even pointing at a *different* tunnel — it silently no-ops and reports "already
+  configured." Only works for plain A/AAAA/CNAME records. Had to manually edit the CNAME target
+  in the Cloudflare dashboard (DNS → change target to `<new-tunnel-id>.cfargotunnel.com`) instead.
+- **EC2 disk was undersized** (29GB total, only 3.7GB RAM — below the README's 4GB minimum) and
+  hit "No space left on device" mid-build; `docker builder prune -af` reclaimed 12.2GB of stale
+  build cache, which was enough. Worth resizing the volume/instance if this recurs.
+- **This Mac's system `crontab -l` has a full stocksBreakout schedule installed with
+  `PROJECT_ROOT=/mnt/c/Users/User/Desktop/Develop/stocksBreakout`** — a WSL/Windows path that
+  doesn't exist here. It has never actually fired successfully on this Mac (silent `cd` failure);
+  live scans were always driven by `cron_agent.py` instead. Left in place (inert) but flagged as
+  stale — clean up separately if it's noise.
+- **Verify cutover with a stop/start test, not `cloudflared tunnel route dns` output alone:**
+  briefly `docker compose stop api` on the target box and curl the public hostname — `502` proves
+  traffic is landing there, a normal response means DNS hasn't actually moved yet regardless of
+  what the CLI reports.
