@@ -457,10 +457,10 @@ def _render_manual_portfolio():
             edit_pos = next(p for p in positions if p['symbol'] == edit_sym)
 
             new_stop = st.number_input("New Stop Loss",
-                                        value=float(edit_pos['stop']),
+                                        value=max(0.01, float(edit_pos['stop'])),
                                         min_value=0.01, key="edit_stop")
             new_target = st.number_input("New Target",
-                                          value=float(edit_pos['target']),
+                                          value=max(0.01, float(edit_pos['target'])),
                                           min_value=0.01, key="edit_target")
 
             changes = []
