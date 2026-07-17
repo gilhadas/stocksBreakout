@@ -55,6 +55,23 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
 
+  # ── Streamlit dashboard (SSH-tunnel only, not exposed via cloudflared) ─────
+  dashboard:
+    <<: *app
+    container_name: sb-dashboard
+    command: ["streamlit", "run", "app.py", "--server.port", "8501", "--server.address", "0.0.0.0", "--server.headless", "true"]
+    # NOTE: the `<<` merge key does not deep-merge `environment` — this block
+    # replaces the anchor's entirely, so HF_HOME must be repeated here or the
+    # container falls back to the root-ownership pitfall on ~/.cache.
+    environment:
+      API_BASE_URL: http://api:8000
+      HF_HOME: /app/scanner_output/.hf_cache
+    ports:
+      # Loopback only — reach it with: ssh -L 8501:localhost:8501 <vm>
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      - api
+
   # ── Cloudflare tunnel (public entrypoint) ──────────────────────────────────
   cloudflared:
     image: cloudflare/cloudflared:latest
