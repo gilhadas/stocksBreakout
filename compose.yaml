@@ -5,6 +5,8 @@
 #                   surge monitor, which the crontab starts at 08:00 ET weekdays)
 #   api           — FastAPI mobile server (uvicorn :8000)
 #   cloudflared   — Cloudflare tunnel; serves gilhadas-stocks.com from this box
+# Plus one service built from a sibling repo checkout (../TradeManagment):
+#   journal       — Trade Journal SPA (nginx :80, journal.gilhadas-stocks.com)
 #
 # Prerequisites on the VM (see deploy/README.md):
 #   - .env at repo root (copy deploy/.env.example, fill in secrets)
@@ -71,6 +73,24 @@ services:
       - "127.0.0.1:8501:8501"
     depends_on:
       - api
+
+  # ── Trade Journal (separate repo — static Vite build + nginx) ──────────────
+  # Requires the TradeManagment repo cloned NEXT TO this one on the VM
+  # (../TradeManagment), and VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY in .env
+  # (build-time args — rebuild this service when they change). Public traffic
+  # arrives via cloudflared as journal.gilhadas-stocks.com -> http://journal:80.
+  journal:
+    build:
+      context: ../TradeManagment
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    image: trade-journal:latest
+    container_name: sb-journal
+    restart: unless-stopped
+    ports:
+      # Loopback only, for local curl/debug on the VM.
+      - "127.0.0.1:8081:80"
 
   # ── Cloudflare tunnel (public entrypoint) ──────────────────────────────────
   cloudflared:

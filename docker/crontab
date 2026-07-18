@@ -127,3 +127,15 @@
 # Sundays 11:10 PM — Clean old monitor state files
 10 23 * * 0 find /app/scanner_output -name ".monitor_alerts_*.txt"  -mtime +30 -delete
 10 23 * * 0 find /app/scanner_output -name ".watch_monitor_*.json" -mtime +30 -delete
+
+
+# ============================================================================
+# TRADE JOURNAL — SUPABASE KEEP-ALIVE
+# ============================================================================
+# Free-tier Supabase pauses projects after ~1 week without API activity, which
+# takes journal.gilhadas-stocks.com down until manually restored. One cheap
+# authenticated REST query per day counts as activity and prevents the pause.
+# Skips silently when the VITE_SUPABASE_* vars are not set in .env.
+
+# Daily 6:00 AM — ping the trades endpoint (RLS returns an empty list; that's fine)
+0 6 * * * [ -n "${VITE_SUPABASE_URL}" ] && curl -fsS -m 10 --retry 3 -H "apikey: ${VITE_SUPABASE_ANON_KEY}" -H "Authorization: Bearer ${VITE_SUPABASE_ANON_KEY}" "${VITE_SUPABASE_URL}/rest/v1/trades?select=id&limit=1" > /dev/null 2>&1 || true

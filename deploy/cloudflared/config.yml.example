@@ -28,5 +28,9 @@ ingress:
   - hostname: api.gilhadas-stocks.com
     service: http://api:8000
 
+  # Trade Journal SPA (compose service `journal`, nginx).
+  - hostname: journal.gilhadas-stocks.com
+    service: http://journal:80
+
   # Catch-all — required last rule.
   - service: http_status:404
