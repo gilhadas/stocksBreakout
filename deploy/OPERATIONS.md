@@ -8,7 +8,7 @@ without needing prior server/Docker knowledge. The one-time setup story is in
 
 ## 1. The big picture — what you actually have
 
-- **A cloud computer** (an AWS "EC2 instance") at `63.176.155.83` runs everything,
+- **A cloud computer** (an AWS "EC2 instance") at `3.73.144.233` runs everything,
   24/7. Your Mac no longer runs any part of the stock system.
 - On that computer, **Docker** runs three *containers*. A container is like a
   sealed lunchbox: the app plus everything it needs (Python, libraries, settings)
@@ -37,7 +37,7 @@ Two terms you'll see constantly:
 From the Mac's terminal:
 
 ```bash
-ssh -i ~/.ssh/stocksbreakout-key.pem ubuntu@63.176.155.83
+ssh -i ~/.ssh/stocksbreakout-key.pem ubuntu@3.73.144.233
 cd stocksBreakout
 ```
 
@@ -137,7 +137,7 @@ requires rebuilding it on the Mac and shipping it over:
 cd ~/Documents/GitHub/stocksBreakout/mobile
 npx expo export -p web                       # rebuilds mobile/dist/
 scp -i ~/.ssh/stocksbreakout-key.pem -r dist/. \
-    ubuntu@63.176.155.83:~/stocksBreakout/mobile/dist/
+    ubuntu@3.73.144.233:~/stocksBreakout/mobile/dist/
 
 # (on the server)
 docker compose up -d --build api
@@ -150,7 +150,7 @@ docker compose up -d --build api
 ```bash
 # 1. (on the Mac) edit .env in your editor — never paste secrets into chats/commits
 # 2. (on the Mac) copy it over:
-scp -i ~/.ssh/stocksbreakout-key.pem .env ubuntu@63.176.155.83:~/stocksBreakout/.env
+scp -i ~/.ssh/stocksbreakout-key.pem .env ubuntu@3.73.144.233:~/stocksBreakout/.env
 # 3. (on the server) recreate containers so they pick it up:
 docker compose up -d
 ```
@@ -223,7 +223,7 @@ Backup of the login database (the one thing not in git and not in S3):
 ```bash
 # (on the Mac)
 scp -i ~/.ssh/stocksbreakout-key.pem \
-    ubuntu@63.176.155.83:~/stocksBreakout/users.db ~/Backups/users.db.$(date +%Y%m%d)
+    ubuntu@3.73.144.233:~/stocksBreakout/users.db ~/Backups/users.db.$(date +%Y%m%d)
 ```
 
 ---
@@ -232,7 +232,7 @@ scp -i ~/.ssh/stocksbreakout-key.pem \
 
 ```bash
 # connect
-ssh -i ~/.ssh/stocksbreakout-key.pem ubuntu@63.176.155.83
+ssh -i ~/.ssh/stocksbreakout-key.pem ubuntu@3.73.144.233
 cd stocksBreakout
 
 # health
