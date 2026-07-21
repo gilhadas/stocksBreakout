@@ -981,9 +981,11 @@ def run_year(year, symbols, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
              bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False,
              skip_old=False, breakeven_r=0.0, breakeven_bear_gate=0,
-             atr_trail_always=False, atr_trail_mult=2.0):
+             atr_trail_always=False, atr_trail_mult=2.0, end_date_override=None):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
+    if end_date_override and end_date_override[:4] == str(year):
+        end = end_date_override
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
     spy_expected = SPY_ANNUAL.get(str(year), 0)
     modes = ['swing', 'longterm']
@@ -1546,6 +1548,9 @@ PARAMETER REFERENCE:
     p.add_argument('--no-winprob-cal', action='store_true',
                    help='Disable the empirical WinProb calibration table (scanner falls back to the confluence '
                         'heuristic; cascade detectors emit no WinProb). Use for baseline-vs-calibrated ablation.')
+    p.add_argument('--end-date',    default=None,
+                   help='Override end date (YYYY-MM-DD) for whichever requested year it falls in, e.g. '
+                        'for a true YTD run instead of the default full Jan1-Dec31 window.')
 
     return p.parse_args()
 
@@ -1598,7 +1603,8 @@ def main():
                  breakeven_r=args.breakeven_r,
                  breakeven_bear_gate=args.breakeven_bear_gate,
                  atr_trail_always=args.atr_trail_always,
-                 atr_trail_mult=args.atr_trail_mult)
+                 atr_trail_mult=args.atr_trail_mult,
+                 end_date_override=args.end_date)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")

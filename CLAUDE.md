@@ -365,3 +365,46 @@ was discovered — harmless (never built/run), but stale; clean up or ignore.
   briefly `docker compose stop api` on the target box and curl the public hostname — `502` proves
   traffic is landing there, a normal response means DNS hasn't actually moved yet regardless of
   what the CLI reports.
+
+## 10. 2026 YTD Backtest + NORMAL-Regime Diagnosis (2026-07-21)
+
+### `--end-date` flag added to `backtest_regime_compare.py`
+`run_year()` previously hardcoded `end = f"{year}-12-31"` with no override — a `--years 2026` run
+silently simulated the full calendar year regardless of how much of it had actually happened.
+Added `--end-date YYYY-MM-DD` (applies to whichever requested year it falls in) so partial-year
+runs are explicit instead of accidental. In practice this was a no-op for today's run: yfinance
+has no bars past the real current date, so the untruncated run and the `--end-date 2026-07-21`
+run produced byte-identical results — confirms the underlying data (not a code bug) is what was
+already limiting the simulation, and this table is genuinely YTD.
+
+### 2026 YTD Results (through 2026-07-21, optimizer_watch.txt, 144 trading days)
+CLI: `--no-tc --bounce-bear-gate 15 --atr-trail-always --skip-old --end-date 2026-07-21`
+
+| Strategy | Trades | Return | WR% | Sharpe | MaxDD | vs SPY |
+|---|---|---|---|---|---|---|
+| SPY Buy & Hold | — | +9.20% | — | 1.26 | -8.88% | — |
+| **Champion (pooled-cap=10)** | 65 | **+5.21%** | 12.3% | **0.71** | -8.59% | **-3.99%** |
+| pooled-cap=2 variant | 50 | +5.67% | 14.0% | 0.86 | -7.85% | -3.54% |
+
+By regime: EXPANSION (48 days) +9.82%/Sharpe 1.48, beats SPY by +0.62% — where the edge lives.
+RED_MARKET (26 days) flat, +0.38%. **NORMAL (44 days) -4.43%/Sharpe -0.92**, -13.6% vs SPY — the
+whole year's underperformance is concentrated here. 2026 is currently a losing year vs. SPY for
+the strategy (Sharpe well below the 5yr average of +1.33); NORMAL regime is why.
+
+### NORMAL-regime root cause (trade-level dig, `trades_2026_NEW_PREMIUMplus_pooled-10_ATRalways-2.csv`)
+19 NORMAL trades, 21% WR, -$3,477 total. Two clusters explain nearly all of it:
+- **2026-02-06 cohort — 75% of the loss (-$2,619).** Eight BOUNCE|PREMIUM positions (COIN, HOOD,
+  RBLX, ORCL, SNOW, SOFI, CRWD, MDB) opened the same day, all losers. SPY had dipped -2.5%
+  (Feb 2–5) then bounced +1.92% on Feb 6 itself — the exact day these fired. `classify_day_regime()`
+  only reads SPY breadth, so it read "relief bounce" and the RSI<40 NORMAL-bounce filter (F1,
+  line ~213) waved through 8 correlated high-beta/growth names at once. SPY's bounce held; these
+  names kept falling for 1–3 more weeks — one factor bet (growth/crypto-adjacent beta snapping
+  back with the market) sized like 8 independent positions, because pooled-cap(10/day) has no
+  correlation/sector-concentration dedup.
+- **MSTR (-12.2%, June) + IREN (-17.1%, July) — net -$1,852.** Both crypto-proxy names, both
+  stopped out, same theme: high-beta names diverging from SPY's calmer +9.2%-YTD tape.
+- **Root cause:** the NORMAL bounce filter is single-stock (RSI/R:R/vol only) — no cross-sectional
+  check for correlated names firing together. Not a bug; an unhedged gap in the SPY-only regime
+  gate. **Next ablation to test (not yet implemented):** a same-day sector/theme concentration cap
+  (e.g. max 2 BOUNCE fills per correlated cluster/day) — untested, do not assume it helps without
+  running it.
