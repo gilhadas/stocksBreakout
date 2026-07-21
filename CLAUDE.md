@@ -393,18 +393,42 @@ the strategy (Sharpe well below the 5yr average of +1.33); NORMAL regime is why.
 
 ### NORMAL-regime root cause (trade-level dig, `trades_2026_NEW_PREMIUMplus_pooled-10_ATRalways-2.csv`)
 19 NORMAL trades, 21% WR, -$3,477 total. Two clusters explain nearly all of it:
-- **2026-02-06 cohort — 75% of the loss (-$2,619).** Eight BOUNCE|PREMIUM positions (COIN, HOOD,
-  RBLX, ORCL, SNOW, SOFI, CRWD, MDB) opened the same day, all losers. SPY had dipped -2.5%
-  (Feb 2–5) then bounced +1.92% on Feb 6 itself — the exact day these fired. `classify_day_regime()`
-  only reads SPY breadth, so it read "relief bounce" and the RSI<40 NORMAL-bounce filter (F1,
-  line ~213) waved through 8 correlated high-beta/growth names at once. SPY's bounce held; these
-  names kept falling for 1–3 more weeks — one factor bet (growth/crypto-adjacent beta snapping
-  back with the market) sized like 8 independent positions, because pooled-cap(10/day) has no
-  correlation/sector-concentration dedup.
+- **2026-02-06 cohort — net -$1,495, 1 winner of 10.** ⚠ Correction: this was originally logged as
+  8 positions / -$2,619 (COIN, HOOD, RBLX, ORCL, SNOW, SOFI, CRWD, MDB — that subset's sum is
+  correct at -$2,619). The full trade log shows **all 10 pooled-cap slots** fired that day —
+  MARA (-$87) and PLTR (+$1,211, a big winner) were entered the same day and missed in the
+  original count, netting the full cohort to -$1,495 (43% of the NORMAL total, not 75%). SPY had
+  dipped -2.5% (Feb 2–5) then bounced +1.92% on Feb 6 itself — the exact day these fired.
+  `classify_day_regime()` only reads SPY breadth, so it read "relief bounce" and the RSI<40
+  NORMAL-bounce filter (F1, line ~213) waved through a full day's worth of correlated high-beta/
+  growth names at once. One factor bet (growth/crypto-adjacent beta snapping back with the
+  market) consumed the *entire* pooled-cap(10/day) budget, because the cap has no correlation/
+  sector-concentration dedup — it ranks by Quality→WinProb→R:R→Dist only.
 - **MSTR (-12.2%, June) + IREN (-17.1%, July) — net -$1,852.** Both crypto-proxy names, both
   stopped out, same theme: high-beta names diverging from SPY's calmer +9.2%-YTD tape.
 - **Root cause:** the NORMAL bounce filter is single-stock (RSI/R:R/vol only) — no cross-sectional
   check for correlated names firing together. Not a bug; an unhedged gap in the SPY-only regime
-  gate. **Next ablation to test (not yet implemented):** a same-day sector/theme concentration cap
-  (e.g. max 2 BOUNCE fills per correlated cluster/day) — untested, do not assume it helps without
-  running it.
+  gate.
+
+### Ablation: Same-day NORMAL+BOUNCE concentration cap (tested 2026-07-21)
+`_pooled_cap()` gained a `normal_bounce_cap` param (CLI: `--normal-bounce-cap N`, default 0=off,
+dormant unless passed) that additionally caps same-day BOUNCE signals fired in NORMAL regime to
+at most N within the existing pooled-cap ranking — directly targeting the Feb-6-style cluster
+above. Tested N=2 on `optimizer_watch.txt`, `--no-tc --bounce-bear-gate 15 --atr-trail-always`:
+
+| Year | Champion Sharpe | +NormalBounceCap=2 | Champion >15d WR | +NBC2 >15d WR |
+|------|-----------------|---------------------|-------------------|----------------|
+| 2022 (bear) | -0.24 | -0.23 | 82.2% | 82.2% |
+| 2023 (bull) | +3.42 | +3.42 (identical — cap never fires, cluster was NORMAL-only) | 87.7% | 87.7% |
+| 2024 (bull) | +1.51 | +1.51 (identical) | 80.0% | 80.0% |
+| 2025 (mixed) | +1.09 | +1.11 | 83.8% | 83.8% |
+| 2026 (mixed, YTD Jul 21) | +0.71 | **+1.04** | 68.8% | **73.3%** |
+| **5yr avg Sharpe** | **+1.30** | **+1.37** | — | never shrinks |
+
+2026: return +5.21%→+7.31%, trades 65→57 (cuts exactly 8/68 signals — the excess Feb-6 slots
+beyond N=2), WR 12.3%→14.0%. **Verdict: promising but below this project's own ≥+0.10 aggregate-
+Sharpe ship bar** (+0.07 avg lift) — however unlike every other single-lever ablation logged this
+cycle (Tension Index, Supertrend, Breakeven, WinProb-cal, Daytrade admission A/B — all null), this
+one is weakly dominant: it never makes a single year worse and the >15d WR (the edge) never
+shrinks. Left dormant (`--normal-bounce-cap` unset in production); worth a broader-universe
+confirmation (e.g. `all.txt` 200 symbols) before considering promotion to the live default.

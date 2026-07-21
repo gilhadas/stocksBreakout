@@ -531,6 +531,21 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             if safe_signals:
                 append_signals_to_positions(safe_signals, args.auto_positions, args.mode)
 
+        # Feed the same signal file into every registered user's personal
+        # auto_portfolio.json (mobile app's "virtual portfolio"). Without this,
+        # per-user portfolios only ever get new positions via a manual
+        # /portfolio/recalculate call — which is destructive on any deployment
+        # missing older signal files (see recalculate()'s backup/warning logic).
+        if args.cron:
+            try:
+                import auto_portfolio as _ap
+                _summary = _ap.scan_and_add_all_users()
+                _added = sum(r.get('added', 0) for r in _summary.values() if isinstance(r, dict))
+                if _added:
+                    logger.info(f"scan_and_add_all_users: added {_added} position(s) across {len(_summary)} user(s)")
+            except Exception as e:
+                logger.warning(f"scan_and_add_all_users failed: {e}")
+
         # Export PREMIUM + GOLD tickers to watchlist file for re-evaluation scans
         if getattr(args, 'export_premium', None):
             premium_symbols = [

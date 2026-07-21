@@ -422,9 +422,20 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
 _QUALITY_RANK = {'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2, 'STANDARD': 3}
 
 
-def _pooled_cap(signals, max_per_day: int = 10):
+def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0):
     """Return a new signal list with at most *max_per_day* entries per trading
-    day, selected by the same ranking used in auto_portfolio.py."""
+    day, selected by the same ranking used in auto_portfolio.py.
+
+    normal_bounce_cap: if > 0, additionally cap same-day BOUNCE signals fired
+    in NORMAL regime to at most N within the ranked day (0=off, no change).
+    Tests the cross-sectional-correlation hypothesis from the 2026 YTD
+    NORMAL-regime dig: the NORMAL bounce admission filter is single-stock
+    (RSI/R:R/vol only) with no correlation/sector check, so a single SPY
+    relief-bounce day can fire a full slate of correlated high-beta names at
+    once — e.g. 2026-02-06 admitted all 10/10 pooled slots on
+    COIN/HOOD/RBLX/ORCL/SNOW/SOFI/CRWD/MDB/MARA/PLTR (all BOUNCE|PREMIUM|
+    NORMAL), net -$1,495 with only 1 winner (PLTR).
+    """
     from collections import defaultdict
     by_date: dict = defaultdict(list)
     for s in signals:
@@ -443,7 +454,20 @@ def _pooled_cap(signals, max_per_day: int = 10):
                 float(s.get('sma_dist_pct', 0) or 0),    # closer to trend first
             ),
         )
-        result.extend(day_sigs[:max_per_day])
+        if normal_bounce_cap > 0:
+            day_result = []
+            normal_bounce_seen = 0
+            for s in day_sigs:
+                if len(day_result) >= max_per_day:
+                    break
+                if s.get('regime') == 'NORMAL' and s.get('type') == 'BOUNCE':
+                    if normal_bounce_seen >= normal_bounce_cap:
+                        continue
+                    normal_bounce_seen += 1
+                day_result.append(s)
+            result.extend(day_result)
+        else:
+            result.extend(day_sigs[:max_per_day])
     return result
 
 
@@ -981,7 +1005,8 @@ def run_year(year, symbols, capital,
              slippage_pct=0.0, commission=0.0, trades_log=False, compare_stall=False,
              bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False,
              skip_old=False, breakeven_r=0.0, breakeven_bear_gate=0,
-             atr_trail_always=False, atr_trail_mult=2.0, end_date_override=None):
+             atr_trail_always=False, atr_trail_mult=2.0, end_date_override=None,
+             normal_bounce_cap=0):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     if end_date_override and end_date_override[:4] == str(year):
@@ -1084,6 +1109,15 @@ def run_year(year, symbols, capital,
     rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info, show_hold_split=True)
+
+    # Ablation row — same-day NORMAL+BOUNCE concentration cap (untested hypothesis
+    # from the 2026 YTD NORMAL-regime dig; see _pooled_cap docstring).
+    if normal_bounce_cap > 0:
+        new_premium_nbc = _pooled_cap(new_premium, max_per_day=pooled_cap, normal_bounce_cap=normal_bounce_cap)
+        rpt = simulate(new_premium_nbc, start, end, end_prices, historical, capital,
+                       tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+NBC{normal_bounce_cap}', **sim_kw)
+        print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +NormalBounceCap={normal_bounce_cap}',
+                     len(new_premium_nbc), spy_info, show_hold_split=True)
 
     # Ablation row — always emitted alongside the champion for direct comparison.
     # cap=2: hypothesis that a tighter daily gate keeps only the highest-conviction
@@ -1552,6 +1586,12 @@ PARAMETER REFERENCE:
                    help='Override end date (YYYY-MM-DD) for whichever requested year it falls in, e.g. '
                         'for a true YTD run instead of the default full Jan1-Dec31 window.')
 
+    p.add_argument('--normal-bounce-cap', type=int, default=0,
+                   help='Cap same-day BOUNCE signals in NORMAL regime to at most N within the pooled-cap '
+                        'ranking (0=off). Tests the cross-sectional-correlation hypothesis from the 2026 YTD '
+                        'NORMAL-regime dig (2026-02-06 fired 10/10 pooled slots on one correlated growth/crypto '
+                        'cluster, net -$1,495, 1 winner). Emits an extra comparison row. Example: --normal-bounce-cap 2')
+
     return p.parse_args()
 
 
@@ -1604,7 +1644,8 @@ def main():
                  breakeven_bear_gate=args.breakeven_bear_gate,
                  atr_trail_always=args.atr_trail_always,
                  atr_trail_mult=args.atr_trail_mult,
-                 end_date_override=args.end_date)
+                 end_date_override=args.end_date,
+                 normal_bounce_cap=args.normal_bounce_cap)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")

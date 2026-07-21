@@ -571,6 +571,9 @@ def portfolio_recalculate_endpoint(
             summary = ap.get_summary(result["data"])
             summary["files_scanned"] = result.get("files_scanned", 0)
             summary["added"] = result.get("added", 0)
+            summary["backup_path"] = result.get("backup_path")
+            if result.get("warning"):
+                summary["warning"] = result["warning"]
             _RECALC_JOBS[job_id] = {"status": "done", "result": _clean(summary)}
         except Exception as exc:
             _RECALC_JOBS[job_id] = {"status": "error", "error": str(exc)}

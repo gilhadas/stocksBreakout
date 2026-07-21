@@ -948,7 +948,8 @@ def _build_skipped_entry(
 
 def _safe_float(val) -> float:
     try:
-        return float(val)
+        f = float(val)
+        return f if f == f else 0.0  # NaN != NaN — reject blank/malformed CSV cells
     except (TypeError, ValueError):
         return 0.0
 
@@ -1942,15 +1943,44 @@ def recalculate(position_pct: float = POSITION_SIZE_PCT,
     """
     Reset the portfolio and rescan all signal files from scratch.
 
+    scan_and_add() can only rebuild positions whose signal file is still
+    present in scanner_output/signals/ — older files may have been pruned or
+    never migrated to this deployment. Since the reset is otherwise
+    unrecoverable, the pre-reset state is always backed up first, and the
+    result is flagged with a 'warning' if the rebuild came back thinner than
+    what existed before (see scanner_output/portfolio/{user}/pre_recalculate_*.json
+    incident, 2026-07-17: a recalculate on a box with only Jul7+ signal files
+    silently wiped a portfolio whose oldest positions dated to May).
+
     Args:
         position_pct: Position size fraction (e.g. 0.05 for 5%, 0.10 for 10%).
         min_date: Optional start date 'YYYY-MM-DD'. If set, only process files
                   on or after this date.
-    Returns the scan_and_add result dict.
+    Returns the scan_and_add result dict, plus 'backup_path' and (if positions
+    were lost) 'warning'.
     """
+    from utils import save_json
+
+    pre_reset = load(user_id=user_id)
+    backup_path = _portfolio_path_for(user_id).replace(
+        'auto_portfolio.json',
+        f'pre_recalculate_{datetime.now(_NY_TZ).strftime("%Y%m%dT%H%M%S")}.json',
+    )
+    save_json(pre_reset, backup_path)
+
     reset(user_id=user_id)
     result = scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id, notify=False)
     _save_entry_price_cache()
+
+    result['backup_path'] = backup_path
+    prior_open = len(pre_reset.get('positions', []))
+    new_open   = len(result.get('data', {}).get('positions', []))
+    if prior_open and new_open < prior_open:
+        result['warning'] = (
+            f"Recalculate rebuilt only {new_open}/{prior_open} previously open position(s) — "
+            f"some may have been opened from signal files no longer available on this "
+            f"deployment. Pre-reset state backed up to {backup_path}."
+        )
     return result
 
 
