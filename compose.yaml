@@ -125,7 +125,11 @@ services:
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_HOSTNAME=sb-docker
-    command: sh -c "tailscaled & sleep 2 && tailscale up --authkey=${TS_AUTHKEY} --hostname=sb-docker --accept-routes"
+    # `wait` at the end is load-bearing: without it, the shell's PID 1 exits the
+    # instant `tailscale up` returns, killing the whole container (including the
+    # backgrounded tailscaled) — caused a restart-loop in initial testing even
+    # though auth succeeded every time.
+    command: sh -c "tailscaled & sleep 2 && tailscale up --authkey=${TS_AUTHKEY} --hostname=sb-docker --accept-routes; wait"
 
 volumes:
   # Named volumes are initialised from the image's (appuser-owned) directories on
