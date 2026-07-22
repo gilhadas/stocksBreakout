@@ -311,7 +311,17 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
     cooldowns = {}  # symbol → last signal date
 
     signals = []
-    sim_dates = pd.date_range(start=start_date, end=end_date, freq='B')
+    # Bound the scan to real data (mirrors simulate()'s spy.index-derived trading_days):
+    # a raw business-day range through end_date runs past the last real bar whenever
+    # end_date is in the future (e.g. a YTD request with the default Dec-31 end), padding
+    # the loop with dates no symbol has data for. The per-symbol exact-date match below
+    # already prevents phantom signals on those days, but it repeats the same stale
+    # end-of-data regime classification for every padding day, inflating the printed
+    # "Regime distribution" diagnostic. Cap end_date at SPY's real last bar instead.
+    real_end = pd.Timestamp(end_date)
+    if spy_df is not None and len(spy_df) > 0:
+        real_end = min(real_end, spy_df.index.max())
+    sim_dates = pd.date_range(start=start_date, end=real_end, freq='B')
     regime_counts = {}
 
     print(f"  [{config.upper()}] Scanning {len(symbols)} symbols × {len(sim_dates)} days × {len(modes)} modes...")
@@ -422,7 +432,124 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
 _QUALITY_RANK = {'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2, 'STANDARD': 3}
 
 
-def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0):
+def _apply_bounce_sma200_gate(signals, historical, spy_below_dates=None):
+    """Drop BOUNCE signals fired while the stock traded below its OWN 200-day SMA.
+
+    spy_below_dates: optional set of normalized dates — when given, the gate is
+    conditional: it only applies on days SPY itself was below its SMA200
+    (bear-only variant). Rationale from the 2026-07-22 unconditional A/B: the
+    always-on gate rescued 2022 (+0.83 Sharpe realistic) but destroyed the 2023
+    recovery (−1.27) because post-bottom V-recovery entries are also below
+    their SMA200s; conditioning on SPY's own bear state keeps both.
+
+    Rationale (2026-07-22 research review, CLAUDE.md §12): dip-buying only has an
+    edge in stocks above their own long-term trend — below it, "dips" chain into
+    falling knives (IREN's three consecutive 2022 stop-outs). BBG15 already gates
+    on SPY's SMA200; this is the per-stock analog. Applied BEFORE pooling so gated
+    signals don't consume pooled-cap slots (mirrors live, where detect_bounce would
+    simply not fire). Signals from symbols with <200 bars of history pass through
+    ungated (SMA200 undefined — same permissive default as BBG's warmup).
+
+    Returns (kept_signals, gated_count).
+    """
+    sma_cache: dict = {}
+    kept, gated = [], 0
+    for s in signals:
+        if s.get('type') != 'BOUNCE':
+            kept.append(s)
+            continue
+        if spy_below_dates is not None and \
+                pd.Timestamp(s['date']).normalize() not in spy_below_dates:
+            kept.append(s)          # bear-only variant: SPY healthy → gate off
+            continue
+        sym = s['symbol']
+        ser = sma_cache.get(sym)
+        if ser is None:
+            df = historical.get(sym)
+            ser = df['close'].rolling(200).mean() if df is not None else None
+            sma_cache[sym] = ser if ser is not None else False
+        if ser is None or ser is False:
+            kept.append(s)
+            continue
+        d = pd.Timestamp(s['date']).normalize()
+        upto = ser[ser.index.normalize() <= d]
+        if upto.empty or pd.isna(upto.iloc[-1]):
+            kept.append(s)          # <200 bars — SMA200 undefined, pass
+            continue
+        df = historical[sym]
+        px = df['close'][df.index.normalize() <= d]
+        if not px.empty and float(px.iloc[-1]) < float(upto.iloc[-1]):
+            gated += 1
+        else:
+            kept.append(s)
+    return kept, gated
+
+
+def _compute_panic_days(spy_df, sma_window: int = 200, vol_window: int = 20,
+                        vol_thresh_daily: float = 0.015):
+    """Return the set of normalized dates in a Daniel-Moskowitz 'panic state':
+
+        SPY close < its 200-day SMA  AND  20-day realized daily vol > 1.5%
+        (≈24% annualized — elevated-vol regime)
+
+    D&M: momentum crashes concentrate in panic states — post-decline, high-vol
+    periods — and fire on the market rebounds within them (loser beta > 3).
+    Used by --panic-throttle to halve entry size on those days (their dynamic
+    strategy scales exposure by forecast mean/vol; this is the simplest
+    single-lever version of that idea).
+    """
+    if spy_df is None or len(spy_df) < sma_window:
+        return set()
+    close = spy_df['close']
+    sma = close.rolling(sma_window).mean()
+    vol = close.pct_change().rolling(vol_window).std()
+    mask = (close < sma) & (vol > vol_thresh_daily)
+    return {pd.Timestamp(d).normalize() for d in spy_df.index[mask.fillna(False)]}
+
+
+def _stamp_residual_momentum(signals, historical, ret_window: int = 15,
+                             beta_window: int = 60):
+    """Stamp each signal with 'resid_mom' — Blitz-style residual momentum (%):
+
+        resid = stock 15d return − β₆₀ · SPY 15d return
+
+    β₆₀ is the rolling OLS beta of the stock's daily returns on SPY's over the
+    prior *beta_window* trading days, as of the signal date. Raw prior-return
+    ranking is exactly what admits ten correlated high-beta names on a market
+    rebound day (2022 EXPANSION / Feb-2026 clusters, CLAUDE.md §12); the
+    residual strips the market-beta component so the tiebreak rewards
+    idiosyncratic strength instead. Signals with insufficient history get
+    resid_mom = 0 (neutral).
+    """
+    spy = historical.get('SPY')
+    spy_ret = spy['close'].pct_change() if spy is not None else None
+    for s in signals:
+        s['resid_mom'] = 0.0
+        if spy_ret is None:
+            continue
+        df = historical.get(s['symbol'])
+        if df is None:
+            continue
+        d = pd.Timestamp(s['date']).normalize()
+        px = df['close'][df.index.normalize() <= d]
+        sp = spy['close'][spy.index.normalize() <= d]
+        if len(px) < beta_window + 2 or len(sp) < beta_window + 2:
+            continue
+        r_s = px.pct_change().iloc[-beta_window:]
+        r_m = sp.pct_change().iloc[-beta_window:]
+        joined = pd.concat([r_s, r_m], axis=1, join='inner').dropna()
+        if len(joined) < beta_window // 2:
+            continue
+        var_m = float(joined.iloc[:, 1].var())
+        beta = float(joined.iloc[:, 0].cov(joined.iloc[:, 1])) / var_m if var_m > 0 else 1.0
+        n = min(ret_window, len(px) - 1, len(sp) - 1)
+        stock_ret = float(px.iloc[-1] / px.iloc[-1 - n] - 1) * 100
+        spy_ret_n = float(sp.iloc[-1] / sp.iloc[-1 - n] - 1) * 100
+        s['resid_mom'] = stock_ret - beta * spy_ret_n
+
+
+def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0,
+                residual_dist: bool = False):
     """Return a new signal list with at most *max_per_day* entries per trading
     day, selected by the same ranking used in auto_portfolio.py.
 
@@ -441,6 +568,21 @@ def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0):
     for s in signals:
         by_date[pd.Timestamp(s['date']).normalize()].append(s)
 
+    if residual_dist:
+        # §12 Task 3 ablation: tiebreak on Blitz-style residual momentum
+        # (stamped by _stamp_residual_momentum) instead of raw SMA distance —
+        # higher idiosyncratic strength first, capped at 25 (YPF rationale:
+        # anything more extended than 25% ties, secondary keys decide).
+        def _tiebreak(s):
+            return (-min(float(s.get('resid_mom', 0) or 0), 25.0),)
+    else:
+        def _tiebreak(s):
+            return (
+                # Dist≤25% preferred; beyond 25% sorted last (YPF-style filter)
+                0 if float(s.get('sma_dist_pct', 0) or 0) <= 25 else 1,
+                float(s.get('sma_dist_pct', 0) or 0),    # closer to trend first
+            )
+
     result = []
     for dt in sorted(by_date.keys()):
         day_sigs = sorted(
@@ -449,10 +591,7 @@ def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0):
                 _QUALITY_RANK.get(s.get('quality', 'STANDARD'), 9),
                 -float(s.get('win_prob', 0) or 0),       # higher WinProb first
                 -float(s.get('rr', 0) or 0),             # higher R:R first
-                # Dist≤25% preferred; beyond 25% sorted last (YPF-style filter)
-                0 if float(s.get('sma_dist_pct', 0) or 0) <= 25 else 1,
-                float(s.get('sma_dist_pct', 0) or 0),    # closer to trend first
-            ),
+            ) + _tiebreak(s),
         )
         if normal_bounce_cap > 0:
             day_result = []
@@ -500,7 +639,9 @@ def simulate(signals, start_date, end_date, end_prices, historical,
              selective_max_per_day=0,
              sma150_slope_gate=False, sma150_exit=False,
              breakeven_r=0.0, breakeven_bear_gate=0,
-             atr_trail_always=False, atr_trail_mult=2.0):
+             atr_trail_always=False, atr_trail_mult=2.0,
+             realistic_sizing=False, swap_on_skip=False,
+             panic_throttle=False):
     """
     Simple, self-contained simulation that avoids SimulationMode bugs.
     - Enters at signal price on signal date
@@ -519,6 +660,21 @@ def simulate(signals, start_date, end_date, end_prices, historical,
     - bounce_bear_gate: if > 0, skip BOUNCE+RED_MARKET entries when SPY has been below
                         its SMA200 for >= N consecutive trading days (sustained bear filter)
     - Position size: min(10% capital by value, 2% capital by risk)
+    - realistic_sizing=False (default, preserves all previously documented reproducible
+      baselines): position size is computed off *remaining* cash and shrinks as capital
+      gets tied up — a signal is only skipped if it can't afford even 1 share.
+      realistic_sizing=True: mirrors auto_portfolio.py exactly — size is a fixed % of
+      stable capital (only moves via realized P&L, never shrinks from open positions),
+      and a signal is skipped outright (not downsized) if the full-size cost exceeds
+      available cash. Found 2026-07-21: with realistic_sizing=False and a large
+      universe (1375 symbols), 97.5% of trades ended up sized <50% of target — the
+      backtest was taking near-worthless 1-share fills live would have just skipped.
+    - swap_on_skip=True (requires realistic_sizing=True): when a signal is skipped for
+      insufficient cash, mirrors auto_portfolio.suggest_swaps() — if a currently open
+      position is "weak" (down >=2% or within 4% of its stop) and this signal's
+      priority score beats that position's implied score by >=20pts, close the weak
+      position now (reason='Swap') and open the new signal in its place instead of
+      skipping.
     - regime_sizing=True: scales position size down in weak regimes
     - max_positions: cap on concurrent open positions (0=unlimited)
     - dd_breaker_pct: if portfolio DD exceeds this (e.g. 0.15), cut size to 25%
@@ -555,6 +711,13 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                 sma150_cache[sym] = df['close'].rolling(150).mean()
 
     cap = float(capital)
+    # capital_for_sizing mirrors auto_portfolio.py's data['capital']: only moves via
+    # realized P&L on close, never reduced while a position is open. Used to size new
+    # positions when realistic_sizing=True; `cap` (actual cash on hand) still gates
+    # whether a position can be afforded at all.
+    capital_for_sizing = float(capital)
+    skipped_signals: list = []   # signals rejected for insufficient cash (realistic_sizing)
+    swaps_executed = 0
     max_deployed_pct = 0.0   # peak fraction of starting capital simultaneously in open positions
     trades = []          # closed trades: {pnl, pnl_pct, win, entry, exit}
     open_pos = {}        # symbol → {entry_price, stop, take_profit, qty, entry_date,
@@ -567,6 +730,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
 
     # All unique trading dates in year
     spy = historical.get('SPY')
+    panic_days = _compute_panic_days(spy) if panic_throttle else set()
     if spy is not None:
         trading_days = sorted(spy.index[
             (spy.index >= pd.Timestamp(start_date)) &
@@ -662,19 +826,102 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                 mult *= REGIME_SIZE.get(sig.get('regime', 'NORMAL'), 1.0)
             if bear_macro_mult < 1.0 and sig.get('bear_macro', False):
                 mult *= bear_macro_mult
-            qty_by_val  = int(cap * MAX_POS_PCT * mult / price)
-            qty_by_risk = int(cap * MAX_RISK_PCT * mult / risk_per_share)
-            qty = min(qty_by_val, qty_by_risk)
-            if qty < 1:
-                if cap >= price:
-                    qty = 1
-                else:
-                    continue
-            cost = price * qty + commission  # commission on entry
-            if cost > cap:
-                qty = max(1, int((cap - commission) / price))
+            if panic_throttle and today_norm in panic_days:
+                mult *= 0.5   # D&M panic state: half size (§12 Task 4)
+            if realistic_sizing:
+                qty_by_val  = int(capital_for_sizing * MAX_POS_PCT * mult / price)
+                qty_by_risk = int(capital_for_sizing * MAX_RISK_PCT * mult / risk_per_share)
+                qty = max(1, min(qty_by_val, qty_by_risk))
                 cost = price * qty + commission
-            cap -= cost
+                if cost > cap:
+                    from auto_portfolio import _compute_priority_score
+                    priority = _compute_priority_score(
+                        sig.get('quality', 'PREMIUM'), sig.get('win_prob', 0) or 0,
+                        sig.get('rr', 0) or 0, 1.0,
+                    )
+                    skipped_signals.append({'symbol': sym, 'date': today_norm})
+                    swapped = False
+                    if swap_on_skip and open_pos:
+                        # Find the weakest currently-open position (down >=2% or within
+                        # 4% of its stop) — mirrors auto_portfolio.suggest_swaps().
+                        best_sym, best_weakness, best_implied = None, -1e18, None
+                        for osym, opos in open_pos.items():
+                            odf = historical.get(osym)
+                            obar = (odf[odf.index.normalize() <= today_norm]
+                                    if odf is not None else None)
+                            ocur = (float(obar['close'].iloc[-1])
+                                    if obar is not None and not obar.empty
+                                    else opos['entry_price'])
+                            opnl_pct = (ocur - opos['entry_price']) / opos['entry_price'] * 100
+                            ostop_dist_pct = (ocur - opos['stop']) / ocur * 100 if ocur > 0 else 0
+                            if not (opnl_pct <= -2.0 or ostop_dist_pct <= 4.0):
+                                continue
+                            odays_held = (today_norm - opos['entry_date']).days
+                            oqual_penalty = {'GOLD': 0, 'PREMIUM': 5, 'HIGH': 15}.get(
+                                opos.get('quality', 'PREMIUM'), 10)
+                            oweakness = (-opnl_pct * 2 + max(0, 4 - ostop_dist_pct) * 5
+                                         + max(0, odays_held - 10) * 0.3 + oqual_penalty)
+                            oheld_rr = ((opos['take_profit'] - opos['entry_price'])
+                                        / max(opos['entry_price'] - opos['stop'],
+                                              opos['entry_price'] * 0.01))
+                            oimplied = _compute_priority_score(
+                                opos.get('quality', 'PREMIUM'), 50.0, oheld_rr, 1.0)
+                            if oweakness > best_weakness:
+                                best_weakness, best_sym, best_implied = oweakness, osym, oimplied
+                        if best_sym is not None and (priority - best_implied) >= 20.0:
+                            odf = historical.get(best_sym)
+                            obar = odf[odf.index.normalize() <= today_norm]
+                            ocur = float(obar['close'].iloc[-1])
+                            opos = open_pos[best_sym]
+                            oqty = opos['qty']
+                            oexit_net = ocur * (1 - slippage_pct) - commission / oqty
+                            freed_cash = oexit_net * oqty
+                            # Only actually close the weak position if the replacement
+                            # is guaranteed affordable with the freed cash — otherwise
+                            # we'd liquidate a position for nothing in return.
+                            if cost <= cap + freed_cash:
+                                opnl = (oexit_net - opos['entry_price']) * oqty
+                                trades.append({
+                                    'symbol':      best_sym,
+                                    'entry_date':  opos['entry_date'].strftime('%Y-%m-%d'),
+                                    'exit_date':   today_norm.strftime('%Y-%m-%d'),
+                                    'qty':         oqty,
+                                    'entry':       round(opos['entry_price'], 4),
+                                    'exit':        round(oexit_net, 4),
+                                    'stop':        round(opos['stop'], 4),
+                                    'take_profit': round(opos['take_profit'], 4),
+                                    'pnl':         round(opnl, 2),
+                                    'pnl_pct':     round(opnl / opos['cost'] * 100, 4),
+                                    'win':         opnl > 0,
+                                    'reason':      'Swap',
+                                    'quality':     opos.get('quality', ''),
+                                    'regime':      opos.get('regime', ''),
+                                    'signal_type': opos.get('signal_type', ''),
+                                })
+                                cap += freed_cash
+                                capital_for_sizing += opnl
+                                del open_pos[best_sym]
+                                cap -= cost
+                                swapped = True
+                                swaps_executed += 1
+                    if not swapped:
+                        continue
+                else:
+                    cap -= cost
+            else:
+                qty_by_val  = int(cap * MAX_POS_PCT * mult / price)
+                qty_by_risk = int(cap * MAX_RISK_PCT * mult / risk_per_share)
+                qty = min(qty_by_val, qty_by_risk)
+                if qty < 1:
+                    if cap >= price:
+                        qty = 1
+                    else:
+                        continue
+                cost = price * qty + commission  # commission on entry
+                if cost > cap:
+                    qty = max(1, int((cap - commission) / price))
+                    cost = price * qty + commission
+                cap -= cost
             open_pos[sym] = {
                 'entry_price': price, 'stop': stop, 'take_profit': tp,
                 'qty': qty, 'cost': cost, 'entry_date': today_norm,
@@ -864,6 +1111,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                     'signal_type': pos.get('signal_type', ''),
                 })
                 cap += exit_net * qty
+                capital_for_sizing += pnl
                 del open_pos[sym]
             else:
                 # Position stays open — track peak high for breakeven-after-R.
@@ -947,6 +1195,8 @@ def simulate(signals, start_date, end_date, end_prices, historical,
         'max_deployed_pct': max_deployed_pct,
         'trades':           trades,
         'td_idx':           td_idx,
+        'skipped_signals':  len(skipped_signals),
+        'swaps_executed':   swaps_executed,
     }
 
 
@@ -1006,9 +1256,13 @@ def run_year(year, symbols, capital,
              bounce_bear_gate=0, selective=False, pooled_cap=10, full_compare=False,
              skip_old=False, breakeven_r=0.0, breakeven_bear_gate=0,
              atr_trail_always=False, atr_trail_mult=2.0, end_date_override=None,
-             normal_bounce_cap=0):
+             normal_bounce_cap=0, start_date_override=None, realistic_sizing=False,
+             bounce_sma200_gate=False, residual_dist=False, panic_throttle=False,
+             bounce_sma200_bear_only=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
+    if start_date_override and start_date_override[:4] == str(year):
+        start = start_date_override
     if end_date_override and end_date_override[:4] == str(year):
         end = end_date_override
     year_type = YEAR_TYPE.get(str(year), 'UNKNOWN')
@@ -1109,6 +1363,107 @@ def run_year(year, symbols, capital,
     rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info, show_hold_split=True)
+
+    # Realistic-sizing A/B: fixes the shrink-to-1-share sizing bug found 2026-07-21
+    # (97.5% of trades undersized <50% of target on a 1375-symbol universe) by sizing
+    # off stable capital and skipping outright when cash is short — then tests whether
+    # swapping a skipped signal into a weak open position (mirrors
+    # auto_portfolio.suggest_swaps()) beats just skipping it. Single-lever A/B: same
+    # signal set, same everything else, only swap_on_skip differs.
+    if realistic_sizing:
+        rpt_a = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label='REALISTIC no-swap',
+                          realistic_sizing=True, swap_on_skip=False, **sim_kw)
+        print_report(rpt_a, f'REALISTIC sizing, no swap (A)', len(new_premium_pooled), spy_info, show_hold_split=True)
+        print(f"    {'':42} Skipped for cash: {rpt_a.get('skipped_signals', 0)}")
+
+        rpt_b = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label='REALISTIC swap-on-skip',
+                          realistic_sizing=True, swap_on_skip=True, **sim_kw)
+        print_report(rpt_b, f'REALISTIC sizing, swap-on-skip (B)', len(new_premium_pooled), spy_info, show_hold_split=True)
+        print(f"    {'':42} Skipped for cash: {rpt_b.get('skipped_signals', 0)}  Swaps executed: {rpt_b.get('swaps_executed', 0)}")
+
+        sharpe_delta = rpt_b['sharpe_ratio'] - rpt_a['sharpe_ratio']
+        print(f"\n    A/B verdict: swap-on-skip Sharpe {'beats' if sharpe_delta > 0 else 'trails'} "
+              f"no-swap by {sharpe_delta:+.2f} ({'ship' if sharpe_delta >= 0.10 else 'keep A (no-swap)' if sharpe_delta < 0.05 else 'inconclusive, needs more data'})")
+
+    # Ablation rows — per-stock SMA200 gate on BOUNCE entries (CLAUDE.md §12 Task 2).
+    # Gate applied pre-pooling, so the champion rows above are the ungated A arm and
+    # these are the gated B arm of a single-lever A/B within one run.
+    if bounce_sma200_gate:
+        new_premium_g, n_gated = _apply_bounce_sma200_gate(new_premium, historical)
+        new_premium_g_pooled = _pooled_cap(new_premium_g, max_per_day=pooled_cap)
+        rpt_g = simulate(new_premium_g_pooled, start, end, end_prices, historical, capital,
+                         tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+SMA200gate', **sim_kw)
+        print_report(rpt_g, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +BounceSMA200Gate',
+                     len(new_premium_g_pooled), spy_info, show_hold_split=True)
+        print(f"    {'':42} BOUNCE signals gated below own SMA200: {n_gated}")
+        if realistic_sizing:
+            rpt_gr = simulate(new_premium_g_pooled, start, end, end_prices, historical, capital,
+                              tp_as_trail=True, label='REALISTIC SMA200gate',
+                              realistic_sizing=True, swap_on_skip=False, **sim_kw)
+            print_report(rpt_gr, f'REALISTIC sizing + BounceSMA200Gate', len(new_premium_g_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_gr.get('skipped_signals', 0)}")
+
+    # Ablation rows — bear-only conditional SMA200 gate (§12 Task 2b): per-stock
+    # gate applies ONLY on days SPY itself closed below its SMA200. Motivated by
+    # the unconditional gate's split verdict (2022 +0.83 Sharpe / 2023 −1.27).
+    if bounce_sma200_bear_only:
+        spy_df = historical.get('SPY')
+        spy_below = set()
+        if spy_df is not None and len(spy_df) >= 200:
+            _sma = spy_df['close'].rolling(200).mean()
+            _m = (spy_df['close'] < _sma).fillna(False)
+            spy_below = {pd.Timestamp(d).normalize() for d in spy_df.index[_m]}
+        new_premium_gb, n_gb = _apply_bounce_sma200_gate(new_premium, historical,
+                                                         spy_below_dates=spy_below)
+        new_premium_gb_pooled = _pooled_cap(new_premium_gb, max_per_day=pooled_cap)
+        rpt_gb = simulate(new_premium_gb_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+SMA200bearOnly', **sim_kw)
+        print_report(rpt_gb, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +SMA200GateBearOnly',
+                     len(new_premium_gb_pooled), spy_info, show_hold_split=True)
+        print(f"    {'':42} BOUNCE gated (below own SMA200, SPY-bear days only): {n_gb}")
+        if realistic_sizing:
+            rpt_gbr = simulate(new_premium_gb_pooled, start, end, end_prices, historical, capital,
+                               tp_as_trail=True, label='REALISTIC SMA200bearOnly',
+                               realistic_sizing=True, swap_on_skip=False, **sim_kw)
+            print_report(rpt_gbr, f'REALISTIC sizing + SMA200GateBearOnly', len(new_premium_gb_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_gbr.get('skipped_signals', 0)}")
+
+    # Ablation rows — residual-momentum tiebreak in the pooled cap (§12 Task 3).
+    # Same signal set, same cap, only the tiebreak differs — single-lever A/B
+    # against the champion rows above within one run.
+    if residual_dist:
+        _stamp_residual_momentum(new_premium, historical)
+        new_premium_rd_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap,
+                                            residual_dist=True)
+        rpt_rd = simulate(new_premium_rd_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+ResidDist', **sim_kw)
+        print_report(rpt_rd, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +ResidualDist',
+                     len(new_premium_rd_pooled), spy_info, show_hold_split=True)
+        if realistic_sizing:
+            rpt_rdr = simulate(new_premium_rd_pooled, start, end, end_prices, historical, capital,
+                               tp_as_trail=True, label='REALISTIC ResidDist',
+                               realistic_sizing=True, swap_on_skip=False, **sim_kw)
+            print_report(rpt_rdr, f'REALISTIC sizing + ResidualDist', len(new_premium_rd_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_rdr.get('skipped_signals', 0)}")
+
+    # Ablation rows — Daniel-Moskowitz panic-state sizing throttle (§12 Task 4).
+    # Same signals, same ranking — only entry size halves on panic days
+    # (SPY < SMA200 AND 20d vol > 1.5%/day). Single-lever A/B vs champion rows.
+    if panic_throttle:
+        rpt_pt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+PanicThrottle',
+                          panic_throttle=True, **sim_kw)
+        print_report(rpt_pt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +PanicThrottle',
+                     len(new_premium_pooled), spy_info, show_hold_split=True)
+        if realistic_sizing:
+            rpt_ptr = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
+                               tp_as_trail=True, label='REALISTIC PanicThrottle',
+                               realistic_sizing=True, swap_on_skip=False,
+                               panic_throttle=True, **sim_kw)
+            print_report(rpt_ptr, f'REALISTIC sizing + PanicThrottle', len(new_premium_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_ptr.get('skipped_signals', 0)}")
 
     # Ablation row — same-day NORMAL+BOUNCE concentration cap (untested hypothesis
     # from the 2026 YTD NORMAL-regime dig; see _pooled_cap docstring).
@@ -1586,6 +1941,42 @@ PARAMETER REFERENCE:
                    help='Override end date (YYYY-MM-DD) for whichever requested year it falls in, e.g. '
                         'for a true YTD run instead of the default full Jan1-Dec31 window.')
 
+    p.add_argument('--start-date',  default=None,
+                   help='Override start date (YYYY-MM-DD) for whichever requested year it falls in, e.g. '
+                        'for a recent N-month window instead of the default full Jan1 start. '
+                        'fetch_all_data() always pulls 400 extra days before this for indicator lookback, '
+                        'so SMA150/SMA200 etc. remain valid even with a short window.')
+
+    p.add_argument('--bounce-sma200-gate', action='store_true',
+                   help='Ablation (CLAUDE.md §12 Task 2): drop BOUNCE signals fired while the stock '
+                        'trades below its OWN 200-day SMA (per-stock analog of BBG15, Connors-style '
+                        'dip-buy conditioning). Adds gated pooled-cap and gated REALISTIC rows next to '
+                        'the ungated champion rows — single-lever A/B in one run. Off by default.')
+
+    p.add_argument('--bounce-sma200-bear-only', action='store_true',
+                   help='Ablation (§12 Task 2b): per-stock SMA200 gate on BOUNCE, applied ONLY on days '
+                        'SPY itself is below its SMA200. Fixes the unconditional gate’s recovery-year '
+                        'give-back (2023 −1.27 Sharpe) while keeping the 2022 bear rescue (+0.83).')
+
+    p.add_argument('--panic-throttle', action='store_true',
+                   help='Ablation (CLAUDE.md §12 Task 4): halve entry size on Daniel-Moskowitz panic '
+                        'days (SPY < SMA200 AND 20d realized vol > 1.5%%/day). Momentum crashes '
+                        'concentrate in these states. Adds PanicThrottle pooled + REALISTIC rows. '
+                        'Off by default.')
+
+    p.add_argument('--residual-dist', action='store_true',
+                   help='Ablation (CLAUDE.md §12 Task 3): pooled-cap tiebreak on Blitz-style residual '
+                        'momentum (stock 15d return − β₆₀·SPY 15d return, capped at 25) instead of raw '
+                        'SMA distance. Targets the correlated high-beta rebound-day clusters. Adds '
+                        'ResidualDist pooled + REALISTIC rows next to champion rows. Off by default.')
+
+    p.add_argument('--realistic-sizing', action='store_true',
+                   help='Fix the position-sizing bug found 2026-07-21: size positions off stable capital '
+                        '(not shrinking cash) and skip outright — never downsize to 1 share — when the full '
+                        'target size cannot be afforded. Adds a REALISTIC no-swap vs swap-on-skip A/B row '
+                        '(mirrors auto_portfolio.suggest_swaps() for the swap variant). Off by default to '
+                        'preserve all previously documented reproducible baselines.')
+
     p.add_argument('--normal-bounce-cap', type=int, default=0,
                    help='Cap same-day BOUNCE signals in NORMAL regime to at most N within the pooled-cap '
                         'ranking (0=off). Tests the cross-sectional-correlation hypothesis from the 2026 YTD '
@@ -1645,7 +2036,13 @@ def main():
                  atr_trail_always=args.atr_trail_always,
                  atr_trail_mult=args.atr_trail_mult,
                  end_date_override=args.end_date,
-                 normal_bounce_cap=args.normal_bounce_cap)
+                 normal_bounce_cap=args.normal_bounce_cap,
+                 start_date_override=args.start_date,
+                 realistic_sizing=args.realistic_sizing,
+                 bounce_sma200_gate=args.bounce_sma200_gate,
+                 residual_dist=args.residual_dist,
+                 panic_throttle=args.panic_throttle,
+                 bounce_sma200_bear_only=args.bounce_sma200_bear_only)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")
