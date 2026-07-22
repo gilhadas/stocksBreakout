@@ -105,6 +105,28 @@ services:
     depends_on:
       - api
 
+  # ── Tailscale (redundant connectivity — separate device from the host) ─────
+  # Own named volume (tailscale_state), NOT the host's /var/lib/tailscale — the
+  # container gets its own tailnet identity (TS_HOSTNAME=sb-docker) rather than
+  # racing the host's own tailscaled over shared state, which risks the exact
+  # kind of hang that took the host's Tailscale offline for ~18h on 2026-07-22.
+  # Registers as a second, independent device — reach it if the host's own
+  # tailscaled/network stack wedges again. Requires TS_AUTHKEY in .env.
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: sb-tailscale
+    restart: unless-stopped
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=sb-docker
+    command: sh -c "tailscaled & sleep 2 && tailscale up --authkey=${TS_AUTHKEY} --hostname=sb-docker --accept-routes"
+
 volumes:
   # Named volumes are initialised from the image's (appuser-owned) directories on
   # first run, so ownership is correct and data persists across rebuilds.
@@ -115,3 +137,5 @@ volumes:
     # NOTE: seeded from the image's input/ once. After changing committed
     # watchlists in git, re-seed the file, e.g.:
     #   docker compose cp ./input/ALL.txt scanner-cron:/app/input/ALL.txt
+  tailscale_state:  # this container's own tailnet identity — do NOT share
+                    # the host's /var/lib/tailscale (see tailscale service note)
