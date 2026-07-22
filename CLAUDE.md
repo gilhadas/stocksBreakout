@@ -205,6 +205,10 @@ vs the restore is unknowable without the lost code); the champion's **direction 
 fully confirmed** — ATR-always beats post-TP in every year and by ~+120 pts compound /
 +0.45 Sharpe. Live trading was never affected (`_raise_atr_trail` shipped correctly).
 
+⚠ **Sizing caveat (2026-07-22):** these baselines (and every table above) use the
+simulator's idealized sizing, which ignores the real capital limit — see §11. Judge
+config changes on the `--realistic-sizing` arm, not these headline numbers.
+
 ### WinProb Calibration (2026-07-02) — wired, structurally inert on current mix
 `calibrate_winprob.py` fits empirical WR by SIGNAL_TYPE|QUALITY from champion-exit
 trade logs (EB shrinkage k=10, train 22-24/holdout 25-26; holdout err 3.5%). Scanner
@@ -432,3 +436,284 @@ cycle (Tension Index, Supertrend, Breakeven, WinProb-cal, Daytrade admission A/B
 one is weakly dominant: it never makes a single year worse and the >15d WR (the edge) never
 shrinks. Left dormant (`--normal-bounce-cap` unset in production); worth a broader-universe
 confirmation (e.g. `all.txt` 200 symbols) before considering promotion to the live default.
+(Rerun 2026-07-21 on optimizer_watch reproduced this table to the decimal; the broader-universe
+NBC confirmation is still open.)
+
+## 11. Realistic Capital Sizing — Methodology Correction (2026-07-21/22)
+
+### The finding: all headline baselines are theoretical, not achievable P&L
+Every backtest table above runs `simulate()` with its default sizing, which **ignores the
+real capital limit**: position size is computed off *remaining* cash (so it shrinks as capital
+gets tied up), and when even the shrunken size is unaffordable it downsizes to as little as
+**1 share** rather than skipping. Live (`auto_portfolio.py`) does the opposite: sizes off
+stable `data['capital']` (moves only via realized P&L) and **skips outright** when
+`cost > available_cash`. Found 2026-07-21 on a 1375-symbol `all.txt` run: **97.5% of trades
+ended up sized <50% of target** — the backtest was booking near-worthless fills live would
+have skipped. Consequence: theoretical trade counts run **1.5–2.4× what $100k can fund**
+(spy_plus 2022: 291 vs 123 real; 2025: 219 vs 112). Capital is a hard constraint and must
+not be ignored — **standing rule: every future ablation/config decision must run and be
+judged on the `--realistic-sizing` arm (Sharpe + MaxDD), with idealized numbers shown only
+as reference.**
+
+### New flags (uncommitted as of 2026-07-22, in `backtest_regime_compare.py`)
+- `--realistic-sizing` — adds a REALISTIC A/B pair to the report: (A) live-mirror sizing,
+  skip-for-cash, no swaps; (B) same + swap-on-skip mirroring `auto_portfolio.suggest_swaps()`.
+  Off by default so all documented reproducible baselines are preserved.
+- `--start-date YYYY-MM-DD` — start-of-window override (mirror of `--end-date`); data fetch
+  keeps 400 lookback days so SMA150/200 stay valid on short windows.
+
+### Logic validation (2026-07-22) — verified line-by-line vs `auto_portfolio.py`
+- **Exact mirrors confirmed:** capital basis (`capital_for_sizing` ≡ `data['capital']`,
+  updated `+= pnl` on every close path incl. swaps); skip-not-downsize (`cost > cap` ⇒ skip,
+  ≡ `available_cash()` = capital − Σ open costs); `qty = max(1, …)` floor ≡ live
+  `shares = max(1, int(...))`; 10%/2% val/risk caps ≡ `max_single_position_pct`; swap gates
+  (weak = down ≥2% OR ≤4% from stop; score delta ≥20) ≡ `_SWAP_WEAK_PNL_PCT/_SWAP_STOP_PROXIMITY/
+  _SWAP_MIN_SCORE_DELTA`; weakness formula term-for-term ≡ `_position_weakness_score`; implied
+  score `(quality, 50.0, held_rr, 1.0)` ≡ `suggest_swaps`; swap exits use the same
+  slippage/commission formula as regular closes. Signal dicts carry real `rr`/`win_prob`/`quality`
+  keys into `_compute_priority_score` (not silent defaults).
+- **Known intentional deviations (fine, documented):** backtest swaps fire same-day (live's
+  ≤5-day freshness + positive-momentum filters trivially satisfied; target-sanity checks not
+  replicated); backtest auto-executes every qualifying swap (live only *suggests* ≤3, human
+  confirms) — that's the point of the A/B; backtest adds an affordability guard (won't liquidate
+  a weak position unless the replacement is then affordable). Backtest sizing omits live's
+  quality/ATR/event/balance multiplier stack — it mirrors the capital basis + skip policy,
+  not the full live formula ("mirrors exactly" in the docstring overclaims slightly).
+- **Cosmetic quirk:** a successfully swapped signal is still counted in "Skipped for cash"
+  (append happens before the swap attempt) — display-only, no logic impact.
+- **Regression:** `tests/test_backtest_pooled_cap.py` + `tests/test_backtest_atr_trail.py`
+  all 20 pass — the default (idealized) path is byte-identical, baselines unaffected.
+
+### Results so far
+**A/B on live-like universe** (`all.txt` 1333 syms, 2026-05-21→07-21, SPY +0.17%): champion
+idealized +11.13%/Sharpe 4.78 (325 trades); REALISTIC no-swap **+15.63%/Sharpe 5.14** on just
+32 trades (304 skipped for cash); swap-on-skip +0.96%/Sharpe 0.45 (5 swaps) — **swaps −4.68
+Sharpe, keep no-swap**. (An earlier same-evening run showing −1.33 had a swap-accounting bug;
+the fix strengthened the verdict.)
+
+**5-year realistic vs theoretical** (`spy_plus.txt` 500 syms, `--no-tc --bounce-bear-gate 15
+--atr-trail-always --skip-old --realistic-sizing`; 2026 row pending — run in flight 2026-07-22.
+**2026 will be YTD-through-today (~Jul 21), not a full year** — no `--end-date` was passed, but
+yfinance has no bars past the real current date so the sim naturally truncates there, same as
+every other 2026 row in this doc (§10 confirmed untruncated vs `--end-date`-truncated runs are
+byte-identical). Don't read the 2026 row against the 2022–2025 full-year rows as like-for-like,
+and don't fold it into a "5yr compound" figure without labeling it partial.):
+
+| Year | Theoretical cap=10: ret/Sharpe/MaxDD | REALISTIC no-swap: ret/Sharpe/MaxDD | Trades T→R (skipped) |
+|------|--------------------------------------|--------------------------------------|----------------------|
+| 2022 (full) | −2.10% / 0.02 / −23.4% | −4.09% / −0.01 / −25.8% | 291→123 (180) |
+| 2023 (full) | +54.13% / 2.90 / −6.9% | **+77.46% / 2.92** / −8.5% | 178→99 (84) |
+| 2024 (full) | +19.61% / 1.58 / −4.2% | +28.02% / 1.52 / −7.9% | 152→108 (45) |
+| 2025 (full) | +23.56% / 1.17 / −12.6% | **+34.81% / 1.28** / −14.6% | 219→112 (110) |
+| 2026 (YTD thru ~Jul21, SPY +10.11%) | +21.43% / **2.49** / −6.2% | +16.74% / 1.53 / −6.4% | 214→86 (132) |
+| Avg Sharpe (4 full yrs) | **1.42** | **1.43** | — |
+
+**2026 YTD note:** unlike the four full years, theoretical *beats* realistic here (Sharpe 2.49 vs
+1.53) and by the widest margin of any year — 132/214 trades (62%) skipped for cash, the highest
+skip rate observed. Don't blend this partial year into a "5yr avg Sharpe" (the script's own
+auto-printed 5yr average — champion 1.63, realistic-A 1.45 — is YTD-tainted for this reason; the
+4-full-year figures above are the fair comparison). Swap-on-skip fired 0 swaps in all 5 spy_plus
+years including 2026 (B≡A) — confirms swaps are rare/universe-dependent, not a 2026-only effect.
+
+**Interpretation:** the edge survives realism on a risk-adjusted basis (Sharpe wash, 1.43 vs
+1.42) — but the shape changes: forced concentration (fewer, larger, top-ranked positions)
+*raises* raw return in every up-year (+8 to +23 pts) at a *deeper MaxDD every single year*,
+and is worse in the 2022 bear. So idealized tables misrepresent the real trade set and risk
+profile rather than uniformly overstating return. Swap-on-skip fired **0 swaps** in all four
+spy_plus years (B ≡ A) — swaps are a rare, universe-dependent event; the only measured
+instance (all.txt 2026) was strongly negative. **Keep no-swap.** Note this A/B measures the
+backtest's swap *policy*; live `suggest_swaps()` remains suggestion-only with human confirm.
+
+### `run_scan()` fictional-day padding bug (found + fixed 2026-07-22)
+While validating a `plus.txt` (82-symbol curated trending-stocks list) YTD run, found `run_scan()`
+(line ~313) built its signal-scan day loop from a raw `pd.date_range(..., freq='B')` through the
+requested `end_date` (default `f"{year}-12-31"`) **regardless of real data availability** — for a
+`--years 2026` run with no `--end-date`, this looped 261 business days when only 144 were real
+(yfinance stops at 2026-07-21). The exact-date-match guard inside the loop prevents any phantom
+*trades* (verified: `simulate()`'s own `trading_days`, derived from `spy.index`, was already
+correctly bounded to 137 real NYSE days — the P&L/Sharpe/trade-count numbers were never wrong).
+But the diagnostic "Regime distribution" summary **was** corrupted: it re-classified the same
+stale end-of-data regime for all 117 fictional days, inflating whichever bucket matched
+conditions as of the last real bar. Proof: before the fix, `plus.txt` 2026 printed
+`NORMAL: 161 days (62%)`; after bounding `sim_dates` to `min(end_date, spy_df.index.max())`,
+it correctly prints `NORMAL: 44 days (31%)` — exactly the predicted 117-day gap, with every
+other number (signals/trades/Return/Sharpe) byte-identical. 20/20 regression tests still pass.
+
+### `plus.txt` results — 82 curated "trending stocks", 2026 YTD (thru Jul 21, SPY +10.11%/Sharpe 1.36)
+CLI: `--no-tc --bounce-bear-gate 15 --atr-trail-always --skip-old --realistic-sizing --years 2026
+--watchlist input/plus.txt`
+
+| Strategy | Trades | Return | Sharpe | MaxDD |
+|---|---|---|---|---|
+| Theoretical (pooled-cap=10) | 98 | +34.62% | 2.32 | −11.56% |
+| **Realistic no-swap** | 69 | **+55.88%** | **2.51** | −17.26% |
+
+Skipped for cash: 33/104 (32%) — much lower than spy_plus.txt's 62% skip rate (fewer same-day
+correlated signals competing for capital on a smaller curated list). Swap-on-skip: 0 swaps (B≡A).
+
+**Notable reversal vs the 500-symbol spy_plus.txt 2026 YTD row above:** there, theoretical beat
+realistic (Sharpe 2.49 vs 1.53) — capital constraints hurt on the broad mechanical universe. Here,
+realistic sizing **improves** risk-adjusted return (2.51 vs 2.32), not just raw return. Suggests
+concentration only helps when what you're forced to concentrate into is itself high-quality —
+`plus.txt` reads as a better-curated signal source than `S&P_500.txt` + `screener.txt` merged.
+
+### `plus.txt` full 5-year confirmation (2026-07-22)
+Full 5yr run (74/82 symbols with sufficient 2022-history; `--no-tc --bounce-bear-gate 15
+--atr-trail-always --skip-old --realistic-sizing --watchlist input/plus.txt`, no `--years`):
+
+| Year | Regime | Theoretical: ret/Sharpe/MaxDD | Realistic no-swap: ret/Sharpe/MaxDD | Skipped |
+|------|--------|-------------------------------|--------------------------------------|---------|
+| 2022 | Bear | −2.60% / −0.02 / −19.1% | −12.27% / **−0.36** / −25.0% | 56/272 |
+| 2023 | Bull | +114.28% / 3.63 / −9.0% | +171.04% / 3.60 / −10.7% | 6/93 |
+| 2024 | Bull | +67.37% / 2.70 / −8.5% | +113.93% / 2.82 / −11.6% | 25/139 |
+| 2025 | Mixed | +46.05% / 1.52 / −17.9% | +60.48% / 1.44 / −21.5% | 30/163 |
+| 2026 | YTD | +34.62% / 2.32 / −11.6% | +55.88% / 2.51 / −17.3% | 33/104 |
+| **Avg Sharpe (4 full yrs)** | | **1.96** | **1.88** | |
+
+Swap-on-skip: 0 swaps fired in all 5 years (B≡A everywhere), same as every other universe tested.
+
+**Headline: this curated list has a materially stronger edge than the mechanical merge.**
+4-full-year avg Sharpe 1.96 (theoretical) / 1.88 (realistic) vs. `spy_plus.txt`'s 1.42 / 1.43 —
+roughly **+0.5 Sharpe** on both bases, same years, same config. Curation (liquid, trending,
+thematically-relevant names) appears to matter more than universe breadth for this strategy.
+
+**Caveat — 2022 is this list's weak point.** Realistic Sharpe −0.36 (vs spy_plus's −0.01) with
+deeper losses (−12.3% vs −4.1%). `plus.txt` is thematically concentrated (crypto/space/nuclear/
+chips baskets) — the same correlated-cluster risk already diagnosed in the Feb-2026 NORMAL-regime
+dig (§10) likely compounds in a genuine sustained bear. Sample sizes are still modest per year
+(72–140 trades) — directionally strong across 4 full years, not yet a basis for a live-config
+decision on its own, but a promising candidate for a production watchlist swap/addition pending
+a root-cause look at the 2022 drawdown.
+
+### 2022 root-cause dig: adding 29 defensive stocks made it *worse*, but not for the reason expected (2026-07-22)
+User added 29 blue-chip/defensive names to `plus.txt` (utilities DUK/NEE/SO, staples KO/PEP/PG/PM,
+REITs EQIX/O/PLD/SPG, healthcare ABT/MDT/TMO, financials AXP/BAC/BLK/GS, industrials CAT/UNP/UPS/GE,
+etc. — 82→111 symbols) hoping to cushion the bear year. Rerunning 2022 alone made both bases worse:
+theoretical Sharpe −0.02→−0.10, **realistic Sharpe −0.36→−0.53** (return −12.27%→−16.56%, MaxDD
+−25.0%→−26.3%). Per-trade CSV (`--trades-log`) attribution overturned the obvious read:
+
+| Cohort | Trades | Total P&L | WR% |
+|---|---|---|---|
+| **NEW-stable (29 added)** | 9 | **+$418** | 55.6% |
+| Original-82 | 105 | −$16,979 | 33.3% |
+
+**The new stocks were net profitable** (BLK +$724, ECL +$988, CAT +$355, only small losses on
+BKNG/HD/one NKE trade) — they are not the cause. The degradation is a **crowding-out artifact**:
+the original-82 cohort performed measurably worse *inside the expanded run* (−$16,979/105 trades)
+than standalone (−$12,270/110 trades) — same symbols/signals, but pooled-cap slot + cash
+competition from the 29 new candidates changed which original-82 trades actually executed. The
+arithmetic reconciles almost exactly (−$4,709 worse reshuffle + $418 new-stock gain ≈ −$4,291 net,
+matching the observed −$16,561 vs −$12,270 delta). **Lesson: in a capital-constrained (realistic-
+sizing) backtest, adding net-positive candidates can still make the aggregate number worse purely
+via ranking/sequencing displacement — always check per-trade attribution before concluding an
+addition "hurt," don't just read the headline delta.**
+
+The real root cause, found by then splitting the original-82 cohort by regime:
+
+| Regime | Trades | P&L | WR% |
+|---|---|---|---|
+| **EXPANSION** | 42 | **−$10,566** | 35.7% |
+| RED_MARKET | 56 | −$5,806 | 30.4% |
+
+EXPANSION (relief-rally: SPY up ≥2% over the lookback) is the *larger* loss bucket, bigger than the
+sustained-bear RED_MARKET regime. Biggest single losers: **IREN (3 separate losing trades)**, COIN
+−$1,735, MSTR −$1,225, HOOD −$1,373, TMC (×2), RDW, RKLB, TSLA, MRVL, VRT, APLD, PL — correlated
+crypto-adjacent/space/speculative-growth names all firing BOUNCE together on a dead-cat relief
+rally within the 2022 downtrend, then getting hit again when the rally failed. **This is the same
+correlated-cluster-fires-together, no-cross-sectional-check mechanism already diagnosed in the
+Feb-2026 NORMAL-regime dig above** — same gap, different regime label (EXPANSION here vs NORMAL
+in 2026), same thematic concentration in `plus.txt` as the trigger. Adding defensive stocks doesn't
+fix this because it doesn't touch the mechanism; the `--normal-bounce-cap` lever (or an
+EXPANSION-regime analog) is the more promising fix to test next, not further universe changes.
+
+## 12. Code-vs-Design Audit + Research Review + Improvement Plan (2026-07-22)
+
+### Audit: all design pillars verified in code, ONE mismatch found
+Verified ✓: V9-H disabled (config.py:485), BBG15=15 (config.py:218) + gate condition
+(orchestrator.py:530-534), TREND_CONFIRM Path A only (config.py:228), Tension/Supertrend dormant,
+ATR_TRAIL_MULT=2.0 + 14-bar floor (config.py:152), live `_raise_atr_trail` ≡ backtest formula
+(simple TR-mean over 15 bars, monotonic, fixed-stop floor), WinProb calibration wired but JSON
+deliberately absent from scanner_output/ (inert as designed), pooled cap 10/day date-grouped with
+Quality→WinProb→R:R→Dist(≤25)→Vol + symbol dedup (auto_portfolio.py:280-330), max position 10%,
+stop-distance guard 30%.
+
+**⚠ MISMATCH — live exits are not close-based.** Champion exit was validated strictly CLOSE-based
+(intraday dips below trail must NOT exit; low-based gave 2022 −24.8%; pinned by
+tests/test_backtest_atr_trail.py). But cron runs `refresh_prices()` at **10:00 AND 15:45 ET**
+(cron_jobs.txt:79,82) and it closes on `current <= stop` using the intraday price at that moment
+(auto_portfolio.py:~1175) — a 10 AM dip below the trail exits live even if the day closes back
+above. The 10 AM run also raises the trail using an intraday price as a pseudo-close. 15:45 run is
+a fair close proxy; the 10:00 run is the deviation. → Task 1 below.
+
+### Research review (sources in git history / session log) mapped to measured weaknesses
+1. **Daniel & Moskowitz "Momentum Crashes"** — momentum crashes happen in panic states (post-
+   decline, high vol, during rebounds) because losers' beta >3 → snap back together. This IS the
+   Feb-2026 NORMAL cluster and 2022 EXPANSION bucket (−$10.6k). Their dynamic vol/mean-forecast
+   sizing ~doubles Sharpe → Task 4 (panic-rebound throttle).
+2. **Moreira & Muir volatility-managed portfolios** — scale exposure by inverse realized variance;
+   +25% Sharpe on market factor. Caveat: 103-strategy replication (Cederburg et al.) finds it does
+   NOT generalize universally → ablate, don't assume. System has per-stock ATR sizing but NO
+   portfolio-level market-vol throttle.
+3. **Blitz residual/idiosyncratic momentum** — rank by return unexplained by market beta; ~2×
+   Sharpe, much lower crash risk/left-skew. Pooled-cap Dist tiebreak currently ranks RAW prior
+   return = exactly what picks 10 correlated high-beta names on a rebound day → Task 3
+   (beta-adjusted Dist).
+4. **Kaminski & Lo stop-loss theory** — stops add value under momentum, destroy value under mean
+   reversion. Our >15d holds (75-95% WR) = momentum → trail helps (matches +97pts measured). BOUNCE
+   entries' first days = mean reversion → close-based trigger (tolerant of intraday noise) is
+   load-bearing; never tighten to intraday. Reinforces Task 1.
+5. **Connors-style dip-buying conditioning** — practitioner consensus: only buy dips in stocks
+   ABOVE their own 200-day SMA; below it, dips chain into falling knives (IREN's 3 consecutive
+   2022 stop-outs). BBG15 gates on SPY's SMA200 only, not the stock's own → Task 2.
+
+### Task plan (execute in order; judge every ablation on realistic-sizing Sharpe+DD per §11 rule;
+>15d WR must never shrink)
+1. **Fix live close-based exit** — refresh_prices: before ~15:30 ET use last COMPLETED daily bar
+   for both exit check and trail raise (catches yesterday's close-breach at the 10 AM run =
+   close-based catch-up); at/after 15:30 keep live price as close proxy (current behavior).
+   Unit tests for the trim helper + semantics.
+2. **`--bounce-sma200-gate`** — backtest flag: skip BOUNCE signals when stock close < its own
+   SMA200 (pass if <200 bars history). Validate 2022 + 5yr plus.txt + optimizer_watch.
+3. **`--residual-dist`** — pooled-cap tiebreak on beta-adjusted Dist (stock return − β×SPY return,
+   rolling β) instead of raw Dist. Validate same.
+4. **`--panic-throttle`** — halve size / tighten BOUNCE admission when SPY realized vol high AND
+   market rebounding off a decline (panic-state definition per D&M). Validate same.
+
+### §12 Task results log
+**Task 1 — live close-based exit: SHIPPED (2026-07-22, uncommitted).** `_close_basis_history()`
+in auto_portfolio.py: before 15:30 ET, exit checks + trail raises use the last COMPLETED daily
+bar (10 AM cron now only catches yesterday's close-breach, never an intraday dip); ≥15:30 keeps
+the near-close proxy (15:45 cron unchanged); ≥16:00 bar is final. UI `current_price` still live.
+6 tests (tests/test_close_basis_history.py). Local API server restarted; EC2 needs commit+deploy.
+
+**Task 2 — unconditional `--bounce-sma200-gate`: REJECTED (2026-07-22).** 5yr plus.txt (111
+symbols) realistic A/B: avg Sharpe 1.87→1.64 (−0.23), >15d WR shrinks in 4/5 years → both §12
+halt criteria hit. BUT the split is structural, not noise: 2022 bear +0.83 Sharpe (−16.56%→
++3.14%, MaxDD −26.3%→−11.2%, 270/296 signals gated) and 2026 +0.27 (DD −17.5%→−10.6%); all of
+2023/24/25 negative because post-bottom V-recovery entries are ALSO below their SMA200s (2023:
++173%→+42% realistic, only 47 signals gated did that damage — they were the year's best trades).
+→ spawned Task 2b: `--bounce-sma200-bear-only` (gate active only on SPY<SMA200 days), in the
+combined validation run with Tasks 3+4.
+
+**Task 2b — `--bounce-sma200-bear-only`: REJECTED (2026-07-22).** Conditioning the per-stock gate
+on SPY<SMA200 kept most of the 2022 rescue (realistic −3.47%/−0.20 vs champion −16.56%/−0.53) but
+STILL gave back 2023 (−0.69 Sharpe: +95.5% vs +173.1%) — SPY itself sat below its SMA200 through
+much of H1-2023, so the "recovery entries fire while everything is below trend" problem survives
+the conditioning. Avg realistic Sharpe 1.75 vs champion 1.87 (−0.12). Dormant.
+
+**Task 3 — `--residual-dist`: NULL (2026-07-22).** Avg realistic Sharpe 1.88 vs 1.87 (+0.01);
+2023/2025 picks literally identical, 2024 −0.04, 2026 +0.06 (DD −17.5→−14.2), 2022 ≈unchanged.
+Same structural reason as the WinProb-cal no-op: within-day pooled-cap ties are rarely decided by
+the tiebreak on this signal mix. Dormant; joins the null-lever list (Tension, Supertrend,
+Breakeven, WinProb-cal, Daytrade A/B).
+
+**Task 4 — `--panic-throttle`: BEST LEVER OF THE CYCLE, narrowly below ship bar (2026-07-22).**
+Avg realistic Sharpe **1.95 vs 1.87 (+0.08 < +0.10 bar)**. Profile is the strongest seen since the
+ATR trail: 2022 **+0.51 Sharpe** (−16.56%→−3.72%, MaxDD −26.3→−20.1; half-sizing freed cash → 137
+trades vs 114, so it also diversified); 2023/2024/2026 **byte-identical** (panic days don't occur
+in healthy years — zero cost); only 2025 −0.12 (April tariff dip briefly put SPY<SMA200+high vol,
+throttled entries that worked). **>15d WR never shrinks** (2022 76.7→76.7 on more trades, 2025
+75.0→75.4, rest identical). Dormant for now. **Obvious 4b variant if pursued: require SUSTAINED
+bear (SPY<SMA200 ≥15 consec days, mirroring BBG15's validated distinction) in the panic
+definition — the April-2025 dip was 9–14d and would be excluded, likely erasing the only negative
+year while keeping 2022.** Note: 2026 rows in all §12 runs are YTD (thru ~Jul 21), not full-year.
