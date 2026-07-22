@@ -1133,10 +1133,35 @@ def scan_and_add_all_users(min_date: str | None = None,
 
 # ── Refresh prices & auto-close stops ────────────────────────────────────────
 
+def _close_basis_history(hist: 'pd.DataFrame', now_et: 'datetime') -> 'pd.DataFrame':
+    """
+    Return the history to use for close-based exit/trail decisions.
+
+    The champion exit is CLOSE-based (an intraday dip below the trail must NOT
+    exit — low-based triggering gave 2022 −24.8% in the restore isolation).
+    yfinance history fetched during market hours includes today's *partial* bar,
+    whose Close is really the live price; deciding exits on it makes the live
+    system low-based whenever refresh runs intraday (the 10:00 ET cron).
+
+    Rule: drop today's partial bar unless we're in the late window (>= 15:30 ET,
+    where the near-close price is a fair proxy for today's close — the 15:45
+    cron) or the session is over (>= 16:00 ET, bar is final).
+    """
+    if hist is None or hist.empty:
+        return hist
+    last_ts = hist.index[-1]
+    last_date = last_ts.date() if hasattr(last_ts, 'date') else last_ts
+    in_late_window = (now_et.hour, now_et.minute) >= (15, 30)
+    if last_date == now_et.date() and now_et.hour < 16 and not in_late_window:
+        return hist.iloc[:-1]
+    return hist
+
+
 def refresh_prices(user_id: str | None = None) -> dict:
     """
     Fetch current prices for all open positions.
-    Auto-close any position where current_price <= stop.
+    Auto-close any position where the close-basis price <= stop (close-based —
+    mirrors the backtest champion exit; intraday dips do not trigger).
     Returns {'closed': [symbols], 'data': data}
     """
     import yfinance as yf
@@ -1158,7 +1183,8 @@ def refresh_prices(user_id: str | None = None) -> dict:
         except Exception:
             pass
 
-    now_str    = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
+    now_et     = datetime.now(_NY_TZ)
+    now_str    = now_et.strftime('%Y-%m-%d')
     closed_now = []
     still_open = []
 
@@ -1167,12 +1193,21 @@ def refresh_prices(user_id: str | None = None) -> dict:
         hist    = hists.get(sym)
         current = float(hist['Close'].dropna().iloc[-1]) if hist is not None and not hist.empty \
                   else p.get('current_price', p['entry_price'])
-        p['current_price'] = round(current, 4)
+        p['current_price'] = round(current, 4)   # live price — display only
+
+        # Close-based basis: outside the late window, decisions use the last
+        # COMPLETED daily bar, so a morning run only catches yesterday's
+        # close-breach (and raises the trail from completed closes), never an
+        # intraday dip.
+        basis = _close_basis_history(hist, now_et)
+        basis_close = (float(basis['Close'].dropna().iloc[-1])
+                       if basis is not None and not basis.empty and not basis['Close'].dropna().empty
+                       else current)
 
         # Raise stop using ATR×2.0 always-on trail before checking exit
-        _raise_atr_trail(p, hist)
+        _raise_atr_trail(p, basis)
 
-        if current <= p['stop']:
+        if basis_close <= p['stop']:
             # Stop hit — find the ACTUAL day the low first crossed the stop
             exit_px   = p['stop']
             close_date = _find_stop_hit_date(
