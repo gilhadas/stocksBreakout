@@ -53,21 +53,43 @@ When adding features to `indicators.py` or `scanner.py`, adhere to these default
 - **Config Access:** `from config import MODES, PORTFOLIO`.
 - **Regime Multipliers:** `val = cfg['x'] * REGIME_CONFIG[regime]['x_mult']`.
 
-## 5a. Mobile API Server (uvicorn)
-The mobile app hits the local FastAPI server at `api/server.py` via the Cloudflare tunnel (`gilhadas-stocks.com`). The service is launchd-managed (`~/Library/LaunchAgents/com.stocksbreakout.api.plist`, `KeepAlive=true`) and is **not** started with `--reload`, so any edit to `api/server.py`, `auto_portfolio.py`, or anything they import requires a manual restart — otherwise new endpoints return 404 and new functions raise AttributeError on the running process.
+## 5a. Mobile API Server (uvicorn) — now on EC2, not the Mac (updated 2026-07-23)
+Since the section 9 cutover (2026-07-07), the mobile app hits `api/server.py` running as
+the `sb-api` Docker container on the EC2 box, reached via the Cloudflare tunnel
+(`gilhadas-stocks.com` / `api.gilhadas-stocks.com`) that runs as the `sb-cloudflared`
+container on the **same** box — not the Mac's tunnel. SSH: `ssh -i
+~/.ssh/stocksbreakout-key.pem ubuntu@100.68.142.94` (Tailscale; the security group has
+zero inbound rules, so this is the only direct path — SSM Run Command and the EC2 Serial
+Console are the two independent fallbacks, see section 9).
 
-Restart procedure (launchd auto-respawns within ~5s):
+**Code is baked into the image at build time, not volume-mounted** — a plain restart
+reloads the *old* code. Any edit to `api/server.py`, `auto_portfolio.py`, or anything
+they import needs a rebuild:
 ```bash
-# 1. Kill the running uvicorn — launchd restarts it automatically
-kill $(lsof -ti:8000)
+cd ~/stocksBreakout && git pull --ff-only && docker compose up -d --build api
+```
+A restart with no code change (e.g. after an `.env` edit) is `docker compose restart api`.
 
-# 2. Verify the new process is up — expect 401 (not 404) on an auth-gated endpoint
-sleep 3
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8000/portfolio/execute-swap \
+Verify: expect 401/422 (not 404 or connection refused) on an auth-gated endpoint:
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://api.gilhadas-stocks.com/portfolio/execute-swap \
   -H "Content-Type: application/json" -d '{"close_symbol":"X","open_symbol":"Y"}'
 ```
 
-Diagnose "mobile action does nothing" by comparing server start time to file mtime: `ps -o lstart= -p $(lsof -ti:8000)` vs `stat -f %Sm api/server.py auto_portfolio.py` — if the files are newer than the process, the server is stale. Logs: `scanner_output/api_server.log` and `scanner_output/api_server.err`.
+Diagnose "mobile action does nothing" the same way as before, just on the box instead of
+the Mac: `docker inspect sb-api --format '{{.State.StartedAt}}'` vs `git log -1
+--format=%cI -- api/server.py auto_portfolio.py` — if the file changed after the
+container started, it's stale (needs the rebuild above, not just a restart). Logs:
+`docker compose logs -f api`, or `scanner_output/logs/` inside the `scanner_output`
+volume for cron-side issues.
+
+**The Mac's local copy of this service is retired.** `com.stocksbreakout.api.plist`
+(launchd, port 8000) was already vestigial — nothing in `~/.cloudflared/config.yml`
+routed to it since the section 9 cutover trimmed the stock hostnames out — and was
+spawn-looping (`EX_CONFIG`) after a reboot rather than actually serving anything. Moved
+to `~/Library/LaunchAgents/disabled/` 2026-07-23. `com.stocksbreakout.tunnel` is a
+**different** case — left running, since it still serves
+`expenses.gilhadas-stocks.com` (a separate app that never moved off the Mac).
 
 ## 6. Interaction Protocols
 - **Logic Critique:** If a proposed strategy change weakens the "edge" or increases risk, point it out immediately.
@@ -705,7 +727,8 @@ a fair close proxy; the 10:00 run is the deviation. → Task 1 below.
    market rebounding off a decline (panic-state definition per D&M). Validate same.
 
 ### §12 Task results log
-**Task 1 — live close-based exit: SHIPPED (2026-07-22, uncommitted).** `_close_basis_history()`
+**Task 1 — live close-based exit: SHIPPED (2026-07-22, commit dc3e252 — confirmed committed
+and live on the EC2 production image as of 2026-07-23).** `_close_basis_history()`
 in auto_portfolio.py: before 15:30 ET, exit checks + trail raises use the last COMPLETED daily
 bar (10 AM cron now only catches yesterday's close-breach, never an intraday dip); ≥15:30 keeps
 the near-close proxy (15:45 cron unchanged); ≥16:00 bar is final. UI `current_price` still live.
