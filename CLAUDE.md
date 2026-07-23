@@ -765,3 +765,63 @@ throttled entries that worked). **>15d WR never shrinks** (2022 76.7→76.7 on m
 bear (SPY<SMA200 ≥15 consec days, mirroring BBG15's validated distinction) in the panic
 definition — the April-2025 dip was 9–14d and would be excluded, likely erasing the only negative
 year while keeping 2022.** Note: 2026 rows in all §12 runs are YTD (thru ~Jul 21), not full-year.
+
+## 13. Repeating Exit Notifications — root cause + docker/crontab drift (2026-07-23)
+
+### Symptom
+Daily Telegram/Discord "Exit evaluation completed — N positions require action" naming the same
+tickers every day. CSWC/ABT/RUSHA/SSB/EXPD/LH/SMG/CLH fired `EXIT_FULL` on Jul 20, 21, 22 **and**
+23 — positions entered Jul 16–17 that had long since stopped out.
+
+### Root cause: append-only mock CSVs, read by the exit evaluator
+`positions_swing_mock.csv` / `positions_daytrade_mock.csv` are the **original (2026-02-11, f962f77)
+exit mechanism**: Phase 1 appends PREMIUM/GOLD signals via `--auto-positions`
+(`utils.append_signals_to_positions`), the exit evaluator reads them back via `--exit-file`.
+"mock" = mock *portfolio* (paper signal notes), **not** test fixtures — README.md:924 documents
+them as a system deliberately independent of `auto_portfolio.json`.
+
+`append_signals_to_positions()` is **append-only with dedup and has no remover anywhere in the
+codebase** — README states it outright: *"Positions are NOT automatically removed from this file
+when an exit signal fires — you must remove them manually."* So a stopped-out position stays in
+the file forever and re-fires `EXIT_FULL` every day. `.exit_history.json` dedups only *within* a
+calendar day (`if hist.get('date') == today`), so every midnight the same corpses re-notify.
+
+### The real defect: docker/crontab was never migrated (Feb wiring still live on EC2)
+| Date | Event |
+|------|-------|
+| 2026-02-11 `f962f77` | `--auto-positions` + mock CSVs introduced as the exit mechanism |
+| 2026-02-19 `d647601` | `docker/crontab` created as a copy of the then-current `cron_jobs.txt` |
+| 2026-03-19 `75a638f` | **`cron_jobs.txt` migrated** to `--exit-from-portfolio` (commit note: *"auto-portfolio positions only"*) |
+| — | `docker/crontab` **never** updated: `git log -S"exit-from-portfolio" -- docker/crontab` is empty |
+| 2026-07-07 | §9 cutover — production moved to EC2, which runs `docker/crontab` = the **pre-migration** wiring |
+
+The March fix was silently reverted in production by the July cutover. `cron_jobs.txt` (Mac,
+retired) and `docker/crontab` (EC2, live) had drifted on both the exit **and** monitor paths.
+
+### Fix applied (2026-07-23)
+- `docker/crontab` exits: `--exit-file input/positions_*_mock.csv` → `--exit-from-portfolio`
+  (3:45 PM swing, 4:30 PM combined, 3:30 PM daytrade). Reads `portfolio.json` +
+  every user's `auto_portfolio.json` (breakout_scanner.py:~1852).
+- `docker/crontab` monitor (9:45 AM, */15 10–15, 4:00 PM): `--monitor input/positions_*_mock.csv`
+  → `--monitor-portfolio --monitor-auto-portfolio`. **This was the second, separate notification
+  stream** (`Notifier.send_monitor_alert`) — fixing only the exit path would have left 15-minute
+  alerts firing on the same corpses.
+- Pruned closed rows on EC2 (backups at `scanner_output/positions_*_mock.bak.csv`):
+  swing 19→8 rows, daytrade 11→0.
+- `breakout_scanner.py` exit-history write is now `fcntl`-locked with merge-on-write, mirroring
+  `Notifier._save_cache()`. **Defensive only** — the 15:30 and 15:45 jobs are 14 min apart and
+  each runs ~10 s, so no race was actually occurring; this was not the bug.
+
+### Consequence: the mock CSVs now have ZERO readers on the live box
+After this change `grep positions_.*_mock docker/crontab` shows **only `--auto-positions` writes
+(7 jobs)** — nothing reads them. Note the watchlist role they hold in `cron_jobs.txt` does **not**
+apply here: `docker/crontab`'s Phase 2/Evening scans use `input/premium_swing.txt` (from
+`--export-premium`), not the mock CSV. Their only remaining consumer is the Streamlit "Watch
+Lists" display (pages/portfolio_page.py:1363). Writes were left in place so that tab stays
+populated. **Open decision:** retire the `--auto-positions` flags entirely, or keep the files as a
+display-only signal log.
+
+### Lesson
+`cron_jobs.txt` and `docker/crontab` are two hand-maintained copies of the same schedule with no
+test or CI check binding them. Only `docker/crontab` runs in production. Any schedule change must
+be applied to both, and drift between them is invisible until it produces a symptom like this.

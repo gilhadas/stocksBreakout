@@ -34,11 +34,11 @@
 # Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + auto-add positions
 35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
 
-# Weekdays 3:45 PM — Swing exit evaluation
-45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode swing --exit-file input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
+# Weekdays 3:45 PM — Swing exit evaluation (from actual portfolio, not mock file)
+45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
 
-# Weekdays 4:30 PM — Phase 2: Re-evaluate PREMIUM + combined exit check
-30 16 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-file input/positions_swing_mock.csv --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING_CLOSE}" > /dev/null 2>&1 || true
+# Weekdays 4:30 PM — Phase 2: Re-evaluate PREMIUM + combined exit check (use actual portfolio for exits)
+30 16 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-from-portfolio --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING_CLOSE}" > /dev/null 2>&1 || true
 
 # Weekdays 7:30 PM — Evening PREMIUM re-evaluation
 30 19 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_evening.log 2>&1
@@ -57,8 +57,8 @@
 # Weekdays 2:00 PM — Phase 2: Afternoon re-evaluation
 0 14 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}" > /dev/null 2>&1 || true
 
-# Weekdays 3:30 PM — Day trade exit check
-30 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode daytrade --exit-file input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
+# Weekdays 3:30 PM — Day trade exit check (from actual portfolio, not mock file)
+30 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode daytrade --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
 
 # Weekdays 8:20 PM — Phase 4: Evening re-evaluate momentum-watch tickers
 20 20 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening.log 2>&1
@@ -84,18 +84,21 @@
 # PORTFOLIO MONITORING (Every 15 minutes during market hours)
 # ============================================================================
 # Price checks on open positions — alerts on drops toward stop loss.
+# Source is portfolio.json + auto_portfolio.json (NOT positions_*_mock.csv).
+# The mock CSVs are append-only and never pruned on exit, so monitoring them
+# re-alerted on long-closed positions every 15 min. See CLAUDE.md section 13.
 
 # Weekdays 9:30 AM — Roll over daily alert log
 30 9 * * 1-5 mv /app/scanner_output/.monitor_alerts.txt /app/scanner_output/.monitor_alerts_$(date +%Y%m%d).txt 2>/dev/null || true
 
 # Weekdays 9:45 AM — First check after open
-45 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+45 9 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
 
 # Weekdays 10:00 AM – 3:45 PM — Continuous monitoring every 15 minutes
-*/15 10-15 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+*/15 10-15 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
 
 # Weekdays 4:00 PM — Final check at close
-0 16 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --monitor input/positions_swing_mock.csv,input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+0 16 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
 
 
 # ============================================================================

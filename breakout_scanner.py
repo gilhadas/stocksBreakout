@@ -871,15 +871,33 @@ async def run_exit_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             notifier.send_exit_notification(exit_results, csv_path=exit_csv_path,
                                             symbol_to_users=symbol_to_users)
 
-            # Record newly notified symbols
+            # Record newly notified symbols. Locked + merge-on-write so a second
+            # exit job (daytrade 15:30 / swing 15:45) can't clobber the other's
+            # entries if the runs ever overlap — mirrors Notifier._save_cache().
             new_symbols = [r['Symbol'] for r in new_exits]
             notified_today.update(new_symbols)
             try:
+                import fcntl
                 exit_history_file.parent.mkdir(parents=True, exist_ok=True)
-                exit_history_file.write_text(json.dumps({
-                    'date': today,
-                    'symbols': list(notified_today),
-                }))
+                lock_path = str(exit_history_file) + '.lock'
+                with open(lock_path, 'w') as lf:
+                    fcntl.flock(lf, fcntl.LOCK_EX)
+                    try:
+                        # Re-read under the lock to merge with concurrent writers
+                        existing = set()
+                        if exit_history_file.exists():
+                            try:
+                                disk = json.loads(exit_history_file.read_text())
+                                if disk.get('date') == today:
+                                    existing = set(disk.get('symbols', []))
+                            except Exception:
+                                pass
+                        exit_history_file.write_text(json.dumps({
+                            'date': today,
+                            'symbols': sorted(existing | notified_today),
+                        }))
+                    finally:
+                        fcntl.flock(lf, fcntl.LOCK_UN)
             except Exception as e:
                 logger.debug(f"Exit history save failed: {e}")
         elif not hold_exits or len(hold_exits) == len(exit_results):
