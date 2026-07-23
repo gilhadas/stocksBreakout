@@ -3,8 +3,15 @@
 # Times are US Eastern (TZ set in Dockerfile ENV).
 #
 # Secrets are read from environment variables (pass via --env-file .env or compose.yaml):
-#   HC_UUID_LONGTERM, HC_UUID_SWING, HC_UUID_DAYTRADE, HC_UUID_MONITOR, HC_UUID_VALIDATE
+#   HC_UUID_LONGTERM, HC_UUID_SWING, HC_UUID_SWING_CLOSE, HC_UUID_DAYTRADE,
+#   HC_UUID_MONITOR, HC_UUID_VALIDATE, HC_UUID_VALIDATE_LEARN
 # Healthcheck pings are skipped silently when UUIDs are not set.
+# NOTE: SWING and VALIDATE were originally one UUID each covering two differently
+# -timed cron lines (9:35am+4:30pm; weekday 8:30pm+Sunday 9pm). Split into
+# _CLOSE / _LEARN so each Healthchecks.io monitor has ONE unambiguous expected
+# schedule — a shared UUID across two different times can't be expressed without
+# either false "missed ping" alerts or a grace window loose enough to miss a real
+# outage. See CLAUDE.md section 9 (2026-07-23 reliability pass).
 #
 # Format: minute hour day month weekday command
 
@@ -31,7 +38,7 @@
 45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode swing --exit-file input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
 
 # Weekdays 4:30 PM — Phase 2: Re-evaluate PREMIUM + combined exit check
-30 16 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-file input/positions_swing_mock.csv --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
+30 16 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-file input/positions_swing_mock.csv --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING_CLOSE}" > /dev/null 2>&1 || true
 
 # Weekdays 7:30 PM — Evening PREMIUM re-evaluation
 30 19 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_evening.log 2>&1
@@ -109,7 +116,7 @@
 30 20 * * 1-5 cd /app && python3 validate_signals.py validate-all --min-age-days 3 >> scanner_output/logs/cron_validate.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE}" > /dev/null 2>&1 || true
 
 # Sundays 9:00 PM — Generate learning recommendations
-0 21 * * 0 cd /app && python3 validate_signals.py learn >> scanner_output/logs/cron_learn.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE}" > /dev/null 2>&1 || true
+0 21 * * 0 cd /app && python3 validate_signals.py learn >> scanner_output/logs/cron_learn.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE_LEARN}" > /dev/null 2>&1 || true
 
 
 # ============================================================================
