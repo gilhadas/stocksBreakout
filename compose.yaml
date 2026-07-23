@@ -36,8 +36,23 @@
 # These numbers assume the 2 GB t3.small + the 4 GB swapfile from
 # deploy/setup-swap.sh; revisit them if the box is resized or migrated.
 
+# Log rotation (added 2026-07-23) — plain json-file has no rotation by default.
+# Found 9.6GB of stale Docker BUILD CACHE (not container logs) eating the 30GB
+# disk down to 82% used the same day this was written — a repeat of the "No
+# space left on device" incident from the original cutover (section 9). Build
+# cache isn't bounded by this block (only `docker builder prune` clears it;
+# there's no cache-size compose setting), but container log growth is a
+# separate, ongoing risk this DOES close off — cap it now before it compounds.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 # Shared config for the two Python services (same image, env, volumes).
 x-app: &app
+  <<: *logging
   build:
     context: .
   image: stocksbreakout:latest
@@ -105,6 +120,7 @@ services:
   # (build-time args — rebuild this service when they change). Public traffic
   # arrives via cloudflared as journal.gilhadas-stocks.com -> http://journal:80.
   journal:
+    <<: *logging
     build:
       context: ../TradeManagment
       args:
@@ -120,6 +136,7 @@ services:
 
   # ── Cloudflare tunnel (public entrypoint) ──────────────────────────────────
   cloudflared:
+    <<: *logging
     image: cloudflare/cloudflared:latest
     container_name: sb-cloudflared
     restart: unless-stopped
@@ -144,6 +161,7 @@ services:
   # Registers as a second, independent device — reach it if the host's own
   # tailscaled/network stack wedges again. Requires TS_AUTHKEY in .env.
   tailscale:
+    <<: *logging
     image: tailscale/tailscale:latest
     container_name: sb-tailscale
     restart: unless-stopped
