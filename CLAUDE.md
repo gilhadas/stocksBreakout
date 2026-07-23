@@ -331,11 +331,36 @@ Per-year >15d WR (the litmus test):
 
 ## 9. Server Deployment Cutover (2026-07-07)
 
-**Production is now live on AWS EC2 (`63.176.155.83`, hostname `ip-172-31-35-253`), not the Mac.**
-SSH: `ubuntu@63.176.155.83` with key `~/.ssh/stocksbreakout-key.pem`. Full `deploy/README.md`
-steps 1–7 completed. `gilhadas-stocks.com` / `api.gilhadas-stocks.com` now serve from this box;
+**Production is now live on AWS EC2 (instance `i-015657f7d29bb673e`, hostname
+`ip-172-31-35-253`), not the Mac.** Public IP is an Elastic IP, **`3.122.167.124`**
+(allocated 2026-07-23 — stable across stop/start; earlier IPs in this doc's history
+churned on every restart because none was allocated until then). SSH is via Tailscale
+only: `ssh -i ~/.ssh/stocksbreakout-key.pem ubuntu@100.68.142.94` — the security group
+has **zero inbound rules**, so the public IP cannot be SSH'd to directly regardless of
+which address it currently is. Full `deploy/README.md` steps 1–7 completed.
+`gilhadas-stocks.com` / `api.gilhadas-stocks.com` now serve from this box;
 `expenses.gilhadas-stocks.com` stays on the Mac's original `stocksbreakout` tunnel (trimmed
 config, two stock hostnames removed from `~/.cloudflared/config.yml`).
+
+**2026-07-23 reliability pass** (after an ~11h outage — I/O-latency stall, not OOM;
+`dmesg`/`journalctl` showed zero oom-kill events and unused swap, but 63% iowait / 0%
+idle / ~0% user CPU while every subsystem touching network or disk degraded in
+lockstep — root cause of the iowait itself not pinpointed, treat as possible
+transient EBS/hypervisor contention): per-container `mem_limit` + `oom_score_adj:
+-500` on cloudflared/tailscale in `compose.yaml`, `deploy/setup-swap.sh` (4G
+swapfile), two CloudWatch alarms (`stocksbreakout-instance-check-failed-reboot`,
+`stocksbreakout-system-check-failed-recover`), detailed (1-min) monitoring enabled,
+Elastic IP allocated, and a scoped recovery IAM policy
+(`deploy/iam-recovery-policy.json`, attached to `stocks-breakout-s3-user`) so
+reboot/stop/start/alarms/EIP/SSM no longer require an AWS console session. Six
+healthchecks.io dead-man switches wired into `docker/crontab` (`HC_UUID_*` in
+`.env`) — `SWING`/`VALIDATE` split into `_CLOSE`/`_LEARN` variants because the
+original single UUID per name covered two cron lines at genuinely different times,
+which Healthchecks.io can't express without either nightly false alarms or a grace
+window loose enough to miss a real outage. `HC_UUID_DAYTRADE` deliberately left unconfigured — daytrade is no longer in use
+(didn't deliver good results; retiring its cron jobs is a pending follow-up, not
+yet done as of this writing). Still open: external off-box uptime check, Docker
+log-size caps + disk alert, EC2 Serial Console + SSM verification.
 
 **There is a second, unrelated Oracle Cloud VM (`82.70.210.194`, key `daytrade_oracle`,
 `il-jerusalem-1`)** — this is NOT part of this deployment. It's a separate, already-live
