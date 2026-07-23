@@ -17,6 +17,25 @@
 # Manual scan: docker compose run --rm scanner-cron \
 #                python3 breakout_scanner.py input/ALL.txt --mode swing --cron --no-notify
 
+# Memory limits (added 2026-07-23 after the box wedged for 7h)
+# ---------------------------------------------------------------------------
+# The VM is a t3.small: 2 GB RAM total, no swap, six containers, and until now
+# no per-container limit anywhere. With no cgroup limit the *host* OOM killer
+# picks its victims by badness score — on 2026-07-22 18:00 ET it took out the
+# network daemons rather than the scan that caused the pressure, so the box kept
+# burning CPU while being completely unreachable (Tailscale down, tunnel down,
+# 530s) until a manual reboot. Both the host and containerised Tailscale devices
+# went offline together, so the redundancy added on 2026-07-22 did not help:
+# the failure was host-wide, not a tailscaled hang.
+#
+# With mem_limit set, the offending container's own cgroup OOM killer fires
+# instead, killing only that container — which `restart: unless-stopped` then
+# brings back — while the tunnel and Tailscale survive and the box stays
+# reachable. oom_score_adj tells the host killer to avoid those two lifelines.
+# Caps are ceilings, not reservations, so they may sum above physical RAM.
+# These numbers assume the 2 GB t3.small + the 4 GB swapfile from
+# deploy/setup-swap.sh; revisit them if the box is resized or migrated.
+
 # Shared config for the two Python services (same image, env, volumes).
 x-app: &app
   build:
@@ -45,12 +64,17 @@ services:
     # scheduled scans. As a non-pid-1 process it correctly no-ops reaping
     # instead (tini reaps for it), per its own -no-reap flag semantics.
     init: true
+    # Memory cap — see the "Memory limits" note above. This is the container that
+    # loads FinBERT (~440 MB of weights + torch runtime) on the 16:30 ET swing
+    # scan; it is the one that must die first if anything does.
+    mem_limit: 1024m
 
   # ── Mobile API server ──────────────────────────────────────────────────────
   api:
     <<: *app
     container_name: sb-api
     command: ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    mem_limit: 384m
     # Bind to loopback only — public traffic arrives via the cloudflared tunnel,
     # which reaches the container over the compose network as http://api:8000.
     # 127.0.0.1:8000 on the host is just for local curl/debug on the VM.
@@ -71,6 +95,7 @@ services:
     ports:
       # Loopback only — reach it with: ssh -L 8501:localhost:8501 <vm>
       - "127.0.0.1:8501:8501"
+    mem_limit: 320m
     depends_on:
       - api
 
@@ -91,6 +116,7 @@ services:
     ports:
       # Loopback only, for local curl/debug on the VM.
       - "127.0.0.1:8081:80"
+    mem_limit: 64m
 
   # ── Cloudflare tunnel (public entrypoint) ──────────────────────────────────
   cloudflared:
@@ -102,6 +128,11 @@ services:
       # config.yml + <UUID>.json credentials live here (gitignored, provisioned
       # on the VM). Ingress origin points at http://api:8000.
       - ./deploy/cloudflared:/etc/cloudflared:ro
+    # Lifeline #1 — this is how the box is reachable from the internet. The
+    # negative oom_score_adj tells the host OOM killer to pick almost anything
+    # else first; on 2026-07-22 it picked this and the box went dark for 7h.
+    mem_limit: 128m
+    oom_score_adj: -500
     depends_on:
       - api
 
@@ -130,6 +161,11 @@ services:
     # backgrounded tailscaled) — caused a restart-loop in initial testing even
     # though auth succeeded every time.
     command: sh -c "tailscaled & sleep 2 && tailscale up --authkey=${TS_AUTHKEY} --hostname=sb-docker --accept-routes; wait"
+    # Lifeline #2 — the SSH path when the tunnel is down (the security group has
+    # no inbound rules at all, so this is the only way in). Same protection as
+    # cloudflared: never the OOM victim.
+    mem_limit: 128m
+    oom_score_adj: -500
 
 volumes:
   # Named volumes are initialised from the image's (appuser-owned) directories on
