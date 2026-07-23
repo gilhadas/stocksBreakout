@@ -126,17 +126,24 @@
 # MAINTENANCE
 # ============================================================================
 
-# Sundays 11:00 PM — Clean old logs (keep 30 days)
-0 23 * * 0 find /app/scanner_output/logs -name "*.log" -mtime +30 -delete
+# Sundays 11:00 PM — Prune stale scanner_output files (cleanup_outputs.py)
+#
+# Replaces the previous ad-hoc `find -mtime -delete` lines, which had a hole:
+# the per-job logs (cron_swing.log, cron_monitor.log, …) are APPENDED to on
+# every run, so their mtime is always today and `-mtime +30` never matched them.
+# They grew without bound and were never rotated. cleanup_outputs.py rotates any
+# log over 5 MB (truncate, keep last 500 lines) and applies per-type retention:
+#   logs 7d · rejections 14d · exits/signals/signal_reports 30d · outcomes 60d
+#   scan_feedback 90d · state JSONs + monitor/watch files 7–14d
+# Note this is stricter than the finds it replaces (signals/exits 30d, was 90d).
+# Preview any time with: docker compose exec scanner-cron python3 cleanup_outputs.py --dry-run
+0 23 * * 0 cd /app && python3 cleanup_outputs.py >> scanner_output/logs/cron_cleanup.log 2>&1
 
-# Sundays 11:05 PM — Archive old results (keep 90 days)
-5 23 * * 0 find /app/scanner_output/signals    -name "*.csv" -mtime +90 -delete
-5 23 * * 0 find /app/scanner_output/exits      -name "*.csv" -mtime +90 -delete
-5 23 * * 0 find /app/scanner_output/rejections -name "*.csv" -mtime +90 -delete
-
-# Sundays 11:10 PM — Clean old monitor state files
-10 23 * * 0 find /app/scanner_output -name ".monitor_alerts_*.txt"  -mtime +30 -delete
-10 23 * * 0 find /app/scanner_output -name ".watch_monitor_*.json" -mtime +30 -delete
+# NOTE — Docker build cache is NOT covered here and cannot be: this container has
+# no access to the Docker socket. It is by far the largest consumer on this box
+# (11.89 GB on 2026-07-23, which filled the 29 GB disk and failed a deploy with
+# "no space left on device"). It is pruned by a HOST cron entry running
+# `docker builder prune -af`. See CLAUDE.md section 13.
 
 
 # ============================================================================
