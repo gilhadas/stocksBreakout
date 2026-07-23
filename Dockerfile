@@ -45,6 +45,22 @@ RUN adduser \
 
 # ── Python dependencies ────────────────────────────────────────────────────────
 # Installed globally (no venv needed in Docker).
+#
+# torch FIRST, from PyTorch's CPU-only index. requirements.txt asks for plain
+# `torch>=2.0.0`, and on linux/x86_64 the default PyPI wheel is the CUDA build —
+# nvidia/* 2.7 GB + triton 691 MB + torch 1.2 GB = ~4.6 GB of GPU runtime on a
+# GPU-less t3.small. FinBERT is the only torch consumer and pins device=-1
+# (CPU) in quantkit/sentiment/finbert.py, so none of it is ever used. It filled
+# the 29 GB disk and failed three deploys with "no space left on device"
+# (2026-07-23). CPU build is the same version, ~350 MB.
+#
+# Deliberately a SEPARATE step with a scoped --index-url, not --extra-index-url
+# on requirements.txt: with two indexes both serving `torch`, pip picks by
+# version and the CUDA build can win. Installing it first makes requirements.txt
+# a no-op for torch (>=2.0.0 already satisfied) and the choice deterministic.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=requirements.txt,target=requirements.txt \
     python -m pip install -r requirements.txt
