@@ -118,6 +118,36 @@ def pooled_rank(frames: list) -> pd.DataFrame:
     return v9h.drop_duplicates(subset=['Symbol'], keep='first')
 
 
+def pooled_rank_backtest(frames: list) -> pd.DataFrame:
+    """The VALIDATED backtest semantic (backtest_regime_compare._pooled_cap else-branch),
+    for the live-vs-backtest Dist-tiebreak A/B (CLAUDE.md §12).
+
+    Differs from live pooled_rank() in exactly the 3 audited ways:
+      1. Dist ASCENDING (closest-to-trend first) vs live's descending.
+      2. Dist >25% pushed to a BACK bucket vs live clipping them to tie at the top.
+      3. NO Vol final tiebreak (live has one).
+    Same upstream keys (Quality→WinProb→R:R) and same Dist column, so this isolates
+    the tiebreak semantic as the single variable.
+    """
+    v9h = pd.concat(frames, ignore_index=True)
+    v9h['_q_rank'] = v9h['Quality'].map({'GOLD': 0, 'PREMIUM': 1, 'HIGH': 2}).fillna(3)
+    sort_cols, sort_asc = ['_q_rank'], [True]
+    if 'WinProb' in v9h.columns:
+        v9h['_wp'] = pd.to_numeric(v9h['WinProb'], errors='coerce').fillna(0)
+        sort_cols.append('_wp'); sort_asc.append(False)
+    if 'R:R' in v9h.columns:
+        v9h['_rr'] = pd.to_numeric(v9h['R:R'], errors='coerce').fillna(0)
+        sort_cols.append('_rr'); sort_asc.append(False)
+    if 'Dist' in v9h.columns:
+        d = pd.to_numeric(v9h['Dist'], errors='coerce').fillna(0)
+        v9h['_distbucket'] = (d > TIEBREAK_DIST_CAP).astype(int)  # 0 if <=25 (preferred), 1 if >25
+        v9h['_distasc'] = d                                        # closest-to-trend first
+        sort_cols += ['_distbucket', '_distasc']; sort_asc += [True, True]
+    # NO Vol key — the backtest _pooled_cap has none.
+    v9h = v9h.sort_values(sort_cols, ascending=sort_asc)
+    return v9h.drop_duplicates(subset=['Symbol'], keep='first')
+
+
 def fetch_history(symbols: set, start: str, end: str) -> dict:
     adapter = YFinanceAdapter(use_disk_cache=True)
     fetch_start = (pd.Timestamp(start) - pd.Timedelta(days=45)).strftime('%Y-%m-%d')
@@ -154,7 +184,7 @@ def _trail_level(df: pd.DataFrame, upto) -> float | None:
 
 def run_arm(label: str, by_date: dict, hist: dict, trading_days: list,
             capital: float, cap_per_day: int, exclude_modes: set,
-            end: str) -> dict:
+            end: str, rank_fn=pooled_rank) -> dict:
     cash = capital
     open_pos = {}          # sym → position dict
     trades = []
@@ -201,7 +231,7 @@ def run_arm(label: str, by_date: dict, hist: dict, trading_days: list,
             df_f['_file_mode'] = mode
             frames.append(df_f)
         if frames:
-            ranked = pooled_rank(frames)
+            ranked = rank_fn(frames)
             adds = 0
             for _, row in ranked.iterrows():
                 if adds >= cap_per_day:
@@ -301,12 +331,101 @@ def capital_now(cash: float, open_pos: dict, hist: dict, today) -> float:
     return cash + mv
 
 
+def _admitted_set(ranked: pd.DataFrame, cap: int) -> list:
+    """Top-`cap` distinct admitted symbols from a ranked frame (pure ranking view —
+    ignores cross-day portfolio state, so it isolates the ordering effect)."""
+    out = []
+    for _, row in ranked.iterrows():
+        sym = str(row.get('Symbol', '')).strip().upper()
+        if sym and sym != 'NAN' and sym not in out:
+            out.append(sym)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def compare_tiebreak(by_date: dict, hist: dict, trading_days: list,
+                     capital: float, cap: int, end: str) -> None:
+    """Live (desc/clip/Vol) vs backtest (asc/back-bucket) Dist tiebreak, on the
+    real signal backlog. Reports (1) how often the admitted set even differs and
+    (2) the realized P&L/Sharpe of each ranking through the live exit policy."""
+    # Exclude daytrade: it's de-facto out of the live book (Jul-2026 admission A/B
+    # kept config because pooled ranking already excludes it, 2/41 trades) and is
+    # NOT in the backtest (modes=['swing','longterm']). Pooling it here would be a
+    # confound absent from the Tier-2 arbiter.
+    EXCLUDE = {'daytrade'}
+
+    # ── (1) ranking-divergence diagnostic (portfolio-state-free) ───────────────
+    binding_days = diff_days = 0
+    total_swapped = 0
+    day_strs = {d.strftime('%Y-%m-%d') for d in trading_days}
+    for d, files in sorted(by_date.items()):
+        if d not in day_strs:
+            continue
+        frames = []
+        for _fname, mode, df_raw in files:
+            if mode in EXCLUDE:
+                continue
+            df_f = v9h_filter(df_raw)
+            if not df_f.empty:
+                df_f['_file_mode'] = mode
+                frames.append(df_f)
+        if not frames:
+            continue
+        n_candidates = pooled_rank(frames)['Symbol'].nunique()
+        if n_candidates <= cap:
+            continue  # cap doesn't bind → tiebreak cannot change the admitted set
+        binding_days += 1
+        live_set = set(_admitted_set(pooled_rank(frames), cap))
+        bt_set = set(_admitted_set(pooled_rank_backtest(frames), cap))
+        swapped = len(live_set ^ bt_set) // 2  # symmetric-diff pairs
+        if swapped:
+            diff_days += 1
+            total_swapped += swapped
+
+    print(f"\n{'=' * 100}")
+    print("DIST TIEBREAK A/B — live (desc/clip25/Vol) vs backtest (asc/back-bucket)")
+    print(f"{'=' * 100}")
+    print("\n[1] Ranking divergence on cap-binding days (portfolio-state-free):")
+    print(f"    cap-binding days (>{cap} candidates): {binding_days}")
+    if binding_days:
+        print(f"    days where admitted set DIFFERS: {diff_days} "
+              f"({100 * diff_days / binding_days:.1f}% of binding days)")
+        print(f"    avg symbols swapped / differing day: "
+              f"{total_swapped / diff_days:.2f}" if diff_days else "    (none)")
+    else:
+        print("    NONE — cap never binds on this backlog; tiebreak is inert here")
+        print("    (expected on a thin/curated signal stream; needs broad live volume)")
+
+    # ── (2) realized-P&L A/B through the live exit policy (daytrade excluded) ──
+    live = run_arm('LIVE tiebreak (desc/clip/Vol)', by_date, hist, trading_days,
+                   capital, cap, EXCLUDE, end, rank_fn=pooled_rank)
+    bt = run_arm('BACKTEST tiebreak (asc/back-bucket)', by_date, hist, trading_days,
+                 capital, cap, EXCLUDE, end, rank_fn=pooled_rank_backtest)
+    print("\n[2] Realized P&L through the live exit policy (same signals, only ranking differs):")
+    print(f"  {'Arm':<34} {'Return':>8} {'Sharpe':>7} {'MaxDD':>8} {'Trades':>7} "
+          f"{'WR%':>6} {'≤15d n/WR':>12} {'>15d n/WR':>12}")
+    print("  " + "-" * 98)
+    for r in (live, bt):
+        print(f"  {r['label']:<34} {r['return_pct']:>+7.2f}% {r['sharpe']:>7.2f} "
+              f"{r['max_dd']:>+7.2f}% {r['n_trades']:>7} {r['wr']:>5.1f}% "
+              f"{r['short_n']:>5}/{r['short_wr']:>4.1f}% {r['long_n']:>5}/{r['long_wr']:>4.1f}%")
+    delta = bt['sharpe'] - live['sharpe']
+    print(f"\n  VERDICT (backtest − live Sharpe): {delta:+.2f}  —  "
+          f"{'backtest asc wins → fix LIVE to match' if delta >= 0.10 else 'live desc wins → re-validate champion under desc' if delta <= -0.10 else 'immaterial on this backlog → align live→backtest for reproducibility'}")
+    print("  NOTE: recent short window (real signals). The 5yr all.txt backtest A/B is the "
+          "cross-regime arbiter if this is material.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
     ap.add_argument('--capital', type=float, default=10_000)
     ap.add_argument('--cap', type=int, default=10, help='MAX_ADDS_PER_SCAN (default 10)')
     ap.add_argument('--start', default='2026-04-01')
     ap.add_argument('--end', default='2026-06-30')
+    ap.add_argument('--compare-tiebreak', action='store_true',
+                    help='Run the live-vs-backtest Dist-tiebreak A/B instead of the '
+                         'daytrade-admission A/B (CLAUDE.md §12 tiebreak validation).')
     args = ap.parse_args()
 
     print(f"Loading signal files {args.start} → {args.end} (local + S3)...")
@@ -335,6 +454,10 @@ def main():
     trading_days = sorted(spy.index[(spy.index >= args.start) & (spy.index <= args.end)])
     spy_ret = (float(spy.loc[trading_days[-1], 'close']) /
                float(spy.loc[trading_days[0], 'close']) - 1) * 100
+
+    if args.compare_tiebreak:
+        compare_tiebreak(by_date, hist, trading_days, args.capital, args.cap, args.end)
+        return
 
     arms = [
         ('A — CONTROL (all modes)',        set()),

@@ -398,6 +398,7 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
                         'rr':          float(sig.get('R:R', 0) or 0),
                         'win_prob':    float(sig.get('WinProb', 0) or 0),
                         'sma_dist_pct': float(sig.get('SMA_Dist%', 0) or 0),
+                        'vol':         float(sig.get('Vol', 0) or 0),  # live Vol tiebreak
                     })
                     cooldowns[symbol] = sim_date
                     break  # one signal per symbol per day
@@ -549,7 +550,8 @@ def _stamp_residual_momentum(signals, historical, ret_window: int = 15,
 
 
 def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0,
-                residual_dist: bool = False):
+                residual_dist: bool = False, live_tiebreak: bool = False,
+                sleeve_slots: int = 0):
     """Return a new signal list with at most *max_per_day* entries per trading
     day, selected by the same ranking used in auto_portfolio.py.
 
@@ -575,6 +577,16 @@ def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0,
         # anything more extended than 25% ties, secondary keys decide).
         def _tiebreak(s):
             return (-min(float(s.get('resid_mom', 0) or 0), 25.0),)
+    elif live_tiebreak:
+        # §12 tiebreak A/B: reproduce auto_portfolio.py's EXACT live semantic —
+        # Dist DESCENDING clipped at 25 (parabolic names tie at the top), then
+        # Vol descending. The opposite of the validated default below; isolates
+        # the live-vs-backtest divergence as a single lever.
+        def _tiebreak(s):
+            return (
+                -min(float(s.get('sma_dist_pct', 0) or 0), 25.0),  # higher Dist first
+                -float(s.get('vol', 0) or 0),                      # higher Vol first
+            )
     else:
         def _tiebreak(s):
             return (
@@ -605,6 +617,25 @@ def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0,
                     normal_bounce_seen += 1
                 day_result.append(s)
             result.extend(day_result)
+        elif sleeve_slots > 0:
+            # High-conviction sleeve: GUARANTEE up to sleeve_slots of the day's cap
+            # to sleeve-tagged signals (s['sleeve']=True), then fill the remaining
+            # slots from the overall ranking (core + any leftover sleeve). Neither
+            # bucket wastes capacity — if fewer than sleeve_slots sleeve names exist
+            # that day, core fills the rest, and vice-versa. Preserves the validated
+            # ranking WITHIN each bucket; only guarantees representation.
+            admitted, seen = [], set()
+            for s in day_sigs:                       # reserved sleeve seats first
+                if len([x for x in admitted if x.get('sleeve')]) >= sleeve_slots:
+                    break
+                if s.get('sleeve') and s['symbol'] not in seen:
+                    admitted.append(s); seen.add(s['symbol'])
+            for s in day_sigs:                       # fill remainder by overall rank
+                if len(admitted) >= max_per_day:
+                    break
+                if s['symbol'] not in seen:
+                    admitted.append(s); seen.add(s['symbol'])
+            result.extend(admitted[:max_per_day])
         else:
             result.extend(day_sigs[:max_per_day])
     return result
@@ -1258,7 +1289,8 @@ def run_year(year, symbols, capital,
              atr_trail_always=False, atr_trail_mult=2.0, end_date_override=None,
              normal_bounce_cap=0, start_date_override=None, realistic_sizing=False,
              bounce_sma200_gate=False, residual_dist=False, panic_throttle=False,
-             bounce_sma200_bear_only=False):
+             bounce_sma200_bear_only=False, live_tiebreak=False,
+             sleeve_symbols=None, sleeve_slots=0):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     if start_date_override and start_date_override[:4] == str(year):
@@ -1313,6 +1345,15 @@ def run_year(year, symbols, capital,
     new_premium = [s for s in new_signals if s.get('quality') in ('GOLD', 'PREMIUM')]
     new_all     = [s for s in new_signals if s.get('quality') in ('GOLD', 'PREMIUM', 'HIGH')]
     print(f"  New PREMIUM+: {len(new_premium)} signals | HIGH+: {len(new_all)}")
+
+    # High-conviction sleeve: tag signals whose symbol is in the sleeve universe
+    # (union-fetched with the core). Used by --sleeve-slots reserved-slot admission.
+    if sleeve_symbols:
+        _slv = {s.upper() for s in sleeve_symbols}
+        for s in new_premium:
+            s['sleeve'] = s['symbol'].upper() in _slv
+        n_slv = sum(1 for s in new_premium if s.get('sleeve'))
+        print(f"  Sleeve-tagged (in {len(_slv)}-symbol sleeve universe): {n_slv} of {len(new_premium)} PREMIUM+ signals")
 
     if selective:
         _sel_keep = ('BOUNCE', 'CONTINUATION', 'TREND_CONFIRM')
@@ -1429,6 +1470,42 @@ def run_year(year, symbols, capital,
                                realistic_sizing=True, swap_on_skip=False, **sim_kw)
             print_report(rpt_gbr, f'REALISTIC sizing + SMA200GateBearOnly', len(new_premium_gb_pooled), spy_info, show_hold_split=True)
             print(f"    {'':42} Skipped for cash: {rpt_gbr.get('skipped_signals', 0)}")
+
+    # Ablation rows — high-conviction sleeve (reserve N of the daily cap for
+    # sleeve-universe names). Core = --watchlist (e.g. spy_plus), sleeve =
+    # --sleeve-watchlist (e.g. plus.txt); union-fetched, sleeve-tagged above.
+    # A/B vs the champion rows: does guaranteeing the curated sleeve seats help?
+    if sleeve_slots > 0 and sleeve_symbols:
+        new_premium_slv = _pooled_cap(new_premium, max_per_day=pooled_cap,
+                                      sleeve_slots=sleeve_slots)
+        rpt_slv = simulate(new_premium_slv, start, end, end_prices, historical, capital,
+                           tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+Sleeve{sleeve_slots}', **sim_kw)
+        print_report(rpt_slv, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +Sleeve({sleeve_slots}/{pooled_cap})',
+                     len(new_premium_slv), spy_info, show_hold_split=True)
+        if realistic_sizing:
+            rpt_slvr = simulate(new_premium_slv, start, end, end_prices, historical, capital,
+                                tp_as_trail=True, label='REALISTIC Sleeve',
+                                realistic_sizing=True, swap_on_skip=False, **sim_kw)
+            print_report(rpt_slvr, f'REALISTIC sizing + Sleeve({sleeve_slots}/{pooled_cap})', len(new_premium_slv), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_slvr.get('skipped_signals', 0)}")
+
+    # Ablation rows — LIVE Dist-tiebreak semantic (§12 tiebreak validation).
+    # Reproduces auto_portfolio.py's exact ranking (Dist desc/clip25 + Vol) as a
+    # single-lever A/B vs the champion (Dist asc / back-bucket) rows above — tells
+    # us whether live's divergent admission ranking helps or hurts.
+    if live_tiebreak:
+        new_premium_lt_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap,
+                                            live_tiebreak=True)
+        rpt_lt = simulate(new_premium_lt_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+LiveTiebreak', **sim_kw)
+        print_report(rpt_lt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +LiveTiebreak(desc)',
+                     len(new_premium_lt_pooled), spy_info, show_hold_split=True)
+        if realistic_sizing:
+            rpt_ltr = simulate(new_premium_lt_pooled, start, end, end_prices, historical, capital,
+                               tp_as_trail=True, label='REALISTIC LiveTiebreak',
+                               realistic_sizing=True, swap_on_skip=False, **sim_kw)
+            print_report(rpt_ltr, f'REALISTIC sizing + LiveTiebreak(desc)', len(new_premium_lt_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_ltr.get('skipped_signals', 0)}")
 
     # Ablation rows — residual-momentum tiebreak in the pooled cap (§12 Task 3).
     # Same signal set, same cap, only the tiebreak differs — single-lever A/B
@@ -1953,6 +2030,21 @@ PARAMETER REFERENCE:
                         'dip-buy conditioning). Adds gated pooled-cap and gated REALISTIC rows next to '
                         'the ungated champion rows — single-lever A/B in one run. Off by default.')
 
+    p.add_argument('--sleeve-watchlist', default=None,
+                   help='High-conviction sleeve universe (e.g. input/plus.txt) run ALONGSIDE the core '
+                        '--watchlist (e.g. input/spy_plus.txt). Union-fetched; sleeve names get reserved '
+                        'admission slots (--sleeve-slots). Adds a +Sleeve A/B row.')
+    p.add_argument('--sleeve-slots', type=int, default=3,
+                   help='How many of the pooled daily cap to RESERVE for sleeve-universe names '
+                        '(default 3 of 10). Only active with --sleeve-watchlist. Neither bucket wastes '
+                        'capacity — unused sleeve seats fall through to the core pool and vice-versa.')
+
+    p.add_argument('--live-tiebreak', action='store_true',
+                   help='§12 tiebreak A/B: add rows using auto_portfolio.py’s EXACT live pooled-cap '
+                        'Dist tiebreak (descending, clip 25, + Vol key) instead of the validated backtest '
+                        'default (ascending, >25 back-bucket). Isolates the audited live-vs-backtest '
+                        'ranking divergence. Pair with --realistic-sizing; run on all.txt (cap binds).')
+
     p.add_argument('--bounce-sma200-bear-only', action='store_true',
                    help='Ablation (§12 Task 2b): per-stock SMA200 gate on BOUNCE, applied ONLY on days '
                         'SPY itself is below its SMA200. Fixes the unconditional gate’s recovery-year '
@@ -2022,6 +2114,17 @@ def main():
         print("No symbols found.")
         return
 
+    # High-conviction sleeve: union the sleeve universe into the fetch set so both
+    # core and sleeve names are scanned; run_year tags the sleeve names for
+    # reserved-slot admission.
+    sleeve_symbols = None
+    if args.sleeve_watchlist:
+        sleeve_symbols = load_symbols(args.sleeve_watchlist, 0)
+        merged = list(dict.fromkeys(list(symbols) + list(sleeve_symbols)))
+        print(f"⚠  --sleeve-watchlist: core={len(symbols)} + sleeve={len(sleeve_symbols)} "
+              f"→ {len(merged)} union symbols; reserving {args.sleeve_slots}/{args.pooled_cap} daily slots for sleeve")
+        symbols = merged
+
     for year in years:
         run_year(year, symbols, args.capital,
                  slippage_pct=args.slippage, commission=args.commission,
@@ -2042,7 +2145,10 @@ def main():
                  bounce_sma200_gate=args.bounce_sma200_gate,
                  residual_dist=args.residual_dist,
                  panic_throttle=args.panic_throttle,
-                 bounce_sma200_bear_only=args.bounce_sma200_bear_only)
+                 bounce_sma200_bear_only=args.bounce_sma200_bear_only,
+                 live_tiebreak=args.live_tiebreak,
+                 sleeve_symbols=sleeve_symbols,
+                 sleeve_slots=args.sleeve_slots)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")
