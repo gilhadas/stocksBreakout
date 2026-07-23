@@ -672,7 +672,7 @@ def simulate(signals, start_date, end_date, end_prices, historical,
              breakeven_r=0.0, breakeven_bear_gate=0,
              atr_trail_always=False, atr_trail_mult=2.0,
              realistic_sizing=False, swap_on_skip=False,
-             panic_throttle=False):
+             panic_throttle=False, panic_bear_only=False):
     """
     Simple, self-contained simulation that avoids SimulationMode bugs.
     - Enters at signal price on signal date
@@ -690,6 +690,13 @@ def simulate(signals, start_date, end_date, end_prices, historical,
                         MaxHold becomes a 60-day safety cap only (stall_sma_period: 20 or 50)
     - bounce_bear_gate: if > 0, skip BOUNCE+RED_MARKET entries when SPY has been below
                         its SMA200 for >= N consecutive trading days (sustained bear filter)
+    - panic_bear_only: if True (with panic_throttle=True), restrict panic days to those
+                        where SPY has ALSO been below its SMA200 for >= 15 consecutive
+                        days — mirrors BOUNCE_BEAR_GATE's validated sustained-bear
+                        distinction (§12 Task 4b). Excludes brief high-vol dips (e.g. the
+                        April-2025 tariff dip, 9-14 consecutive days) that panic_throttle
+                        alone throttled at a real cost; keeps the 2022 sustained-bear
+                        rescue where the base lever's edge concentrates.
     - Position size: min(10% capital by value, 2% capital by risk)
     - realistic_sizing=False (default, preserves all previously documented reproducible
       baselines): position size is computed off *remaining* cash and shrinks as capital
@@ -777,14 +784,20 @@ def simulate(signals, start_date, end_date, end_prices, historical,
 
     td_idx = {pd.Timestamp(d).normalize(): i for i, d in enumerate(trading_days)}
 
-    # Pre-compute SPY consecutive days below SMA200 (for bounce_bear_gate)
+    # Pre-compute SPY consecutive days below SMA200 (for bounce_bear_gate, and
+    # panic_bear_only below)
     spy_consec_below: dict[pd.Timestamp, int] = {}
-    if (bounce_bear_gate > 0 or breakeven_bear_gate > 0) and spy is not None:
+    if (bounce_bear_gate > 0 or breakeven_bear_gate > 0 or panic_bear_only) and spy is not None:
         sma200 = spy['close'].rolling(200).mean()
         count = 0
         for dt, cl, sm in zip(spy.index, spy['close'], sma200):
             count = count + 1 if (not pd.isna(sm) and cl < sm) else 0
             spy_consec_below[pd.Timestamp(dt).normalize()] = count
+
+    # §12 Task 4b: restrict panic days to a SUSTAINED bear (mirrors BOUNCE_BEAR_GATE's
+    # validated 15-consecutive-day threshold) — see panic_bear_only docstring above.
+    if panic_throttle and panic_bear_only:
+        panic_days = {d for d in panic_days if spy_consec_below.get(d, 0) >= 15}
 
     for today in trading_days:
         today_norm = today.normalize()
@@ -1290,7 +1303,7 @@ def run_year(year, symbols, capital,
              normal_bounce_cap=0, start_date_override=None, realistic_sizing=False,
              bounce_sma200_gate=False, residual_dist=False, panic_throttle=False,
              bounce_sma200_bear_only=False, live_tiebreak=False,
-             sleeve_symbols=None, sleeve_slots=0):
+             sleeve_symbols=None, sleeve_slots=0, panic_bear_only=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     if start_date_override and start_date_override[:4] == str(year):
@@ -1541,6 +1554,26 @@ def run_year(year, symbols, capital,
                                panic_throttle=True, **sim_kw)
             print_report(rpt_ptr, f'REALISTIC sizing + PanicThrottle', len(new_premium_pooled), spy_info, show_hold_split=True)
             print(f"    {'':42} Skipped for cash: {rpt_ptr.get('skipped_signals', 0)}")
+
+    # Ablation rows — panic-throttle 4b: restrict to a SUSTAINED bear (§12 Task 4b).
+    # Same lever as above, but panic days additionally require SPY >= 15 consecutive
+    # days below its own SMA200 (mirrors BOUNCE_BEAR_GATE). Motivated by the base
+    # lever's one real cost: the April-2025 tariff dip (9-14 consecutive days) briefly
+    # qualified as panic and throttled entries that worked. This should exclude that
+    # case while keeping the 2022 sustained-bear rescue (+0.51 Sharpe) intact.
+    if panic_throttle and panic_bear_only:
+        rpt_ptbo = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
+                            tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+PanicThrottleBearOnly',
+                            panic_throttle=True, panic_bear_only=True, **sim_kw)
+        print_report(rpt_ptbo, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +PanicThrottleBearOnly',
+                     len(new_premium_pooled), spy_info, show_hold_split=True)
+        if realistic_sizing:
+            rpt_ptbor = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
+                                 tp_as_trail=True, label='REALISTIC PanicThrottleBearOnly',
+                                 realistic_sizing=True, swap_on_skip=False,
+                                 panic_throttle=True, panic_bear_only=True, **sim_kw)
+            print_report(rpt_ptbor, f'REALISTIC sizing + PanicThrottleBearOnly', len(new_premium_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_ptbor.get('skipped_signals', 0)}")
 
     # Ablation row — same-day NORMAL+BOUNCE concentration cap (untested hypothesis
     # from the 2026 YTD NORMAL-regime dig; see _pooled_cap docstring).
@@ -2056,6 +2089,15 @@ PARAMETER REFERENCE:
                         'concentrate in these states. Adds PanicThrottle pooled + REALISTIC rows. '
                         'Off by default.')
 
+    p.add_argument('--panic-throttle-bear-only', action='store_true',
+                   help='Ablation (§12 Task 4b): restricts --panic-throttle to a SUSTAINED bear '
+                        '(SPY >= 15 consecutive days below its own SMA200, mirroring '
+                        'BOUNCE_BEAR_GATE\'s validated distinction). Fixes the base lever\'s one real '
+                        'cost (the April-2025 tariff dip, 9-14 consecutive days, briefly qualified as '
+                        'panic and throttled entries that worked) while keeping the 2022 sustained-bear '
+                        'rescue (+0.51 Sharpe). Requires --panic-throttle; adds an additional '
+                        'PanicThrottleBearOnly row alongside the base PanicThrottle row.')
+
     p.add_argument('--residual-dist', action='store_true',
                    help='Ablation (CLAUDE.md §12 Task 3): pooled-cap tiebreak on Blitz-style residual '
                         'momentum (stock 15d return − β₆₀·SPY 15d return, capped at 25) instead of raw '
@@ -2148,7 +2190,8 @@ def main():
                  bounce_sma200_bear_only=args.bounce_sma200_bear_only,
                  live_tiebreak=args.live_tiebreak,
                  sleeve_symbols=sleeve_symbols,
-                 sleeve_slots=args.sleeve_slots)
+                 sleeve_slots=args.sleeve_slots,
+                 panic_bear_only=args.panic_throttle_bear_only)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")
