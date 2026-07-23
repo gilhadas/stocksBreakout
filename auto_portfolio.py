@@ -14,6 +14,7 @@ Rules
 - File tracking: each signal file is processed only once (via 'processed_files' set)
 """
 import json
+import math
 import re
 import time
 from datetime import datetime, timedelta
@@ -2100,6 +2101,18 @@ def _position_weakness_score(pos: dict) -> float:
     return round(score, 1)
 
 
+def _clean_nan(v):
+    """Replace a NaN float with None. A signal admitted to skipped_cash from a
+    CSV with a blank calibration cell (e.g. a legacy type never stamped by
+    WinProb calibration) can carry float('nan') straight through a plain dict
+    .get(). NaN is not valid JSON per RFC 8259, but Python's json.dump() writes
+    it anyway (a non-standard extension) — it round-trips silently through the
+    portfolio JSON until a stricter downstream serializer rejects it. This is
+    that boundary: suggest_swaps() feeds the /portfolio/suggest-swaps API
+    response directly."""
+    return None if isinstance(v, float) and math.isnan(v) else v
+
+
 def suggest_swaps(
     max_suggestions: int = 3,
     fresh_days: int = _SWAP_MIN_FRESH_DAYS,
@@ -2210,7 +2223,12 @@ def suggest_swaps(
         current = pos.get('current_price', entry)
         pnl_pct = (current - entry) / entry * 100
 
-        swaps.append({
+        # Sanitize the whole dict in one pass rather than wrapping individual
+        # fields — catches both directly-raw NaN values (e.g. open_win_prob)
+        # and transitively-computed ones (pnl_pct/best_delta would also carry
+        # NaN if an upstream raw field were NaN, since NaN is truthy in
+        # Python — `pos.get('entry_price', 0) or 1` does not catch it).
+        swaps.append({k: _clean_nan(v) for k, v in {
             'close_symbol':    pos['symbol'],
             'close_pnl_pct':   round(pnl_pct, 2),
             'close_current':   current,
@@ -2232,21 +2250,29 @@ def suggest_swaps(
             'score_improvement': round(best_delta, 1),
             'signal_date':     best_skip.get('date_added', '')[:10],
             'skip_reason':     best_skip.get('skip_reason', ''),
-        })
+        }.items()})
 
     if not swaps or not notify:
         return swaps
 
     try:
         from notifier import Notifier
+        # A field cleaned to None by _clean_nan above can't satisfy an explicit
+        # numeric format spec (unlike NaN, which formats fine as "nan") —
+        # without this, one None field would raise inside the loop and the
+        # broad except below would silently drop the WHOLE notification batch,
+        # not just the affected swap.
+        def _fmt(v, spec='.1f'):
+            return format(v, spec) if v is not None else 'N/A'
+
         lines = []
         for sw in swaps:
             lines.append(
-                f"• CLOSE {sw['close_symbol']} ({sw['close_pnl_pct']:+.1f}%) → "
+                f"• CLOSE {sw['close_symbol']} ({_fmt(sw['close_pnl_pct'], '+.1f')}%) → "
                 f"OPEN {sw['open_symbol']} [{sw['open_quality']}]  "
                 f"R:R {sw['open_rr']} | WinProb {sw['open_win_prob']}% | "
-                f"+{sw['open_momentum']:.1f}% since signal  "
-                f"(score +{sw['score_improvement']:.0f}pts)"
+                f"+{_fmt(sw['open_momentum'])}% since signal  "
+                f"(score +{_fmt(sw['score_improvement'], '.0f')}pts)"
             )
         Notifier().send_all(
             subject=f"⚡ Swap Advisor: {len(swaps)} opportunity{'s' if len(swaps) > 1 else ''}",
