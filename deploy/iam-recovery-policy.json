@@ -24,7 +24,7 @@
         "ec2:DescribeVolumes",
         "ec2:DescribeAddresses",
         "ec2:DescribeSecurityGroups",
-        "ec2:DescribeSerialConsoleAccessStatus",
+        "ec2:GetSerialConsoleAccessStatus",
         "cloudwatch:DescribeAlarms",
         "cloudwatch:GetMetricStatistics",
         "cloudwatch:ListMetrics"
@@ -74,6 +74,28 @@
         "ssm:ResumeSession",
         "ssm:DescribeSessions",
         "ssm:GetConnectionStatus"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SsmRunCommandForPluginFreeVerification",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations"
+      ],
+      "Resource": [
+        "arn:aws:ec2:eu-central-1:364544479452:instance/i-015657f7d29bb673e",
+        "arn:aws:ssm:eu-central-1::document/AWS-RunShellScript"
+      ]
+    },
+    {
+      "Sid": "SerialConsoleAccountToggle",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:EnableSerialConsoleAccess",
+        "ec2:DisableSerialConsoleAccess"
       ],
       "Resource": "*"
     }
