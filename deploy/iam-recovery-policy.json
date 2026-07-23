@@ -80,15 +80,21 @@
     {
       "Sid": "SsmRunCommandForPluginFreeVerification",
       "Effect": "Allow",
-      "Action": [
-        "ssm:SendCommand",
-        "ssm:GetCommandInvocation",
-        "ssm:ListCommandInvocations"
-      ],
+      "Action": "ssm:SendCommand",
       "Resource": [
         "arn:aws:ec2:eu-central-1:364544479452:instance/i-015657f7d29bb673e",
         "arn:aws:ssm:eu-central-1::document/AWS-RunShellScript"
       ]
+    },
+    {
+      "Sid": "SsmRunCommandResults",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations",
+        "ssm:ListCommands"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "SerialConsoleAccountToggle",
