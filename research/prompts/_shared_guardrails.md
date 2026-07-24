@@ -18,11 +18,16 @@ measured off real daily bars.
 
 ## Known data hazards — you MUST handle these
 
-1. **Bad prices in the archive.** Part of the signal archive records prices that never traded
-   (ADBE flagged at 93.87 on a day it ranged 227.70–236.30). `Stop`/`Target` are derived from
-   `Price`, so those rows' stop/target/return measurements are all meaningless.
-   → **Filter `price_in_bar_range == True` for any quantitative claim.** Report how many rows
-   you dropped. If a finding only exists in the unfiltered data, it is not a finding.
+1. **The archive's `Price` column is unreliable — but the panel does NOT use it.** ~32% of rows
+   record a price that never traded (PLTR at 197.20 on a day it ranged 131.23–134.68; 100% of
+   2026-07-21). Root cause unresolved (HZ1).
+   → **`entry_used` is the signal-day bar CLOSE**, mirroring what live actually does
+   (`auto_portfolio` fetches its own price; the §7 A/B harness uses `avail['close'].iloc[0]`),
+   and `Stop` is replaced by `entry*0.95` whenever the CSV's stop is at/above entry or >30% away
+   — the same guard production applies. So every row is measurable and you should **not** filter
+   on `price_in_bar_range`; it is a *diagnostic* of archive quality, not a validity gate.
+   → **Do not use the raw `Price`, `Stop`, `Target` columns for anything quantitative.** Use
+   `entry_used` and the measured forward columns. If you need a stop level, derive it.
 
 2. **`mae_pct` can be positive.** A stock that gaps up and never retraces has no adverse
    excursion. `mae_pct_floored` is the conventional clamped-at-0 version. Pick deliberately;

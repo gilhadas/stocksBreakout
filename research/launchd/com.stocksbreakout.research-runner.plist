@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.stocksbreakout.research-runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/gilhadas/Documents/GitHub/stocksBreakout/venv/bin/python</string>
+    <string>/Users/gilhadas/Documents/GitHub/stocksBreakout/research/runner.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout</string>
+  <!-- Single-shot tick every 30 min. NOT KeepAlive: a wedged daemon looks
+       identical to an idle one, whereas a tick either exits 0 or fails loudly. -->
+  <key>StartInterval</key><integer>1800</integer>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout/scanner_output/logs/research_runner.log</string>
+  <key>StandardErrorPath</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout/scanner_output/logs/research_runner.err</string>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>5</integer>
+</dict>
+</plist>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.stocksbreakout.research-lead</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/gilhadas/Documents/GitHub/stocksBreakout/venv/bin/python</string>
+    <string>/Users/gilhadas/Documents/GitHub/stocksBreakout/research/runner.py</string>
+    <string>--role</string><string>lead</string>
+    <string>--force</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout</string>
+  <!-- 18:47 ET-ish daily: after the close, after the day's scans have landed.
+       Off-the-hour on purpose. -->
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>47</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout/scanner_output/logs/research_lead.log</string>
+  <key>StandardErrorPath</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout/scanner_output/logs/research_lead.err</string>
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>5</integer>
+</dict>
+</plist>

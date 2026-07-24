@@ -156,7 +156,7 @@ def _forward_metrics(bar_df: pd.DataFrame, sig_ts: pd.Timestamp,
     measured anyway but flagged via price_in_bar_range so analyses can exclude them.
     """
     out: dict[str, float | int | bool | None] = {
-        'bars_available': 0, 'entry_used': entry,
+        'bars_available': 0, 'entry_used': np.nan,
         'day0_low_pct': np.nan, 'day0_high_pct': np.nan,
         'price_in_bar_range': None, 'price_vs_bar_close_pct': np.nan,
         'mae_pct': np.nan, 'mfe_pct': np.nan, 'mae_pct_floored': np.nan,
@@ -167,24 +167,43 @@ def _forward_metrics(bar_df: pd.DataFrame, sig_ts: pd.Timestamp,
     for h in HORIZONS:
         out[f'ret_{h}d'] = np.nan
 
-    if entry is None or not np.isfinite(entry) or entry <= 0:
-        return out
-
+    sig_price = entry
     idx = bar_df.index
     pos = idx.searchsorted(sig_ts)
-    # Day-0 bar, recorded separately (may contain pre-signal movement)
+
+    # Day-0 bar. ENTRY IS THE BAR CLOSE, not the CSV's Price column — this mirrors
+    # what live actually does (auto_portfolio fetches its own price; the §7 A/B
+    # harness uses `avail['close'].iloc[0]`), and it makes the panel immune to the
+    # archive's bad-price bug (HZ1: ~32% of rows record a price that never traded,
+    # e.g. PLTR at 197.20 on a day it ranged 131.23-134.68). The CSV price is kept
+    # only as a diagnostic via price_in_bar_range / price_vs_bar_close_pct.
     if pos < len(idx) and idx[pos] == sig_ts:
         d0 = bar_df.iloc[pos]
         lo0, hi0, cl0 = float(d0['low']), float(d0['high']), float(d0['close'])
+        if np.isfinite(sig_price) and sig_price > 0:
+            out['price_in_bar_range'] = bool(lo0 * 0.995 <= sig_price <= hi0 * 1.005)
+            out['price_vs_bar_close_pct'] = (sig_price / cl0 - 1) * 100 if cl0 > 0 else np.nan
+        entry = cl0
         out['day0_low_pct'] = (lo0 / entry - 1) * 100
         out['day0_high_pct'] = (hi0 / entry - 1) * 100
-        # 0.5% tolerance absorbs split/adjustment rounding, not real mismatches
-        out['price_in_bar_range'] = bool(lo0 * 0.995 <= entry <= hi0 * 1.005)
-        out['price_vs_bar_close_pct'] = (entry / cl0 - 1) * 100 if cl0 > 0 else np.nan
         fwd = bar_df.iloc[pos + 1: pos + 1 + MAX_FORWARD_BARS]
     else:
-        # Signal date is not a bar (holiday / late file) — start at next available
+        # Signal date is not a bar (holiday / late file) — enter at next available
         fwd = bar_df.iloc[pos: pos + MAX_FORWARD_BARS]
+        if len(fwd):
+            entry = float(fwd['close'].iloc[0])
+
+    if not np.isfinite(entry) or entry <= 0:
+        return out
+    out['entry_used'] = entry
+
+    # Same production guard live applies: a stop at/above entry, or absurdly far,
+    # is replaced by entry*0.95. Without this, HZ1's bogus stops would poison
+    # hit_stop for a third of the panel.
+    if not (np.isfinite(stop) and 0 < stop < entry and (entry - stop) / entry <= 0.30):
+        stop = round(entry * 0.95, 4)
+    if not (np.isfinite(target) and target > entry):
+        target = np.nan
 
     n = len(fwd)
     out['bars_available'] = n

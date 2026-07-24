@@ -76,11 +76,19 @@ aim.
 
 ## Data hazards being tracked (not hypotheses — active risks)
 
-- **HZ1 — bogus signal prices.** ~24% of measured rows in the first build had a `Price` outside
-  the signal-day bar range (ADBE at 93.87 on a 227–236 day). Root cause NOT yet established.
-  Every analysis must filter `price_in_bar_range == True`. **Someone should find the root cause**
-  — if the live scanner wrote these, `auto_portfolio` may have opened real positions at fictional
-  prices. Escalate rather than work around.
+- **HZ1 — bogus signal prices. CONTAINED, root cause still unknown.** ~32% of rows record a
+  `Price` that never traded (PLTR 197.20 on a 131.23–134.68 day; **100% of 2026-07-21**; 80% of
+  May–June; swing 43% vs longterm 11%). Ruled out: CSV misparse (rows are internally consistent),
+  split adjustment (yfinance reports zero splits on affected names), intra-file row shuffle
+  (signal-price multiset ≠ actual-price multiset), and the current yfinance path (returns correct
+  prices today).
+  **Blast radius checked and it is NOT a live-money bug:** `auto_portfolio` fetches its own entry
+  and stop — the 9 positions opened 2026-07-21 all have correct entries (RKLB 69.12 = actual
+  close) and sane stops at −3% to −5%, none above entry. The §7 A/B harness likewise uses
+  `avail['close'].iloc[0]` plus a stop guard. **The panel now mirrors both** (entry = bar close,
+  stop guard applied), so no rows are discarded and `price_in_bar_range` is a diagnostic only.
+  **Still worth fixing at source** — the scanner writes wrong prices into its own output, which
+  corrupts anything that trusts those columns (UI display, ad-hoc analysis). Not urgent.
 - **HZ2 — schema drift.** Signal CSVs vary 31→57 columns across Apr–Jul. Check per-column
   coverage before relying on any feature.
 - **HZ3 — repeated signals.** Same symbol re-flagged daily; `episode_id` exists for dedup. An
