@@ -87,8 +87,15 @@ aim.
   close) and sane stops at −3% to −5%, none above entry. The §7 A/B harness likewise uses
   `avail['close'].iloc[0]` plus a stop guard. **The panel now mirrors both** (entry = bar close,
   stop guard applied), so no rows are discarded and `price_in_bar_range` is a diagnostic only.
-  **Still worth fixing at source** — the scanner writes wrong prices into its own output, which
-  corrupts anything that trusts those columns (UI display, ad-hoc analysis). Not urgent.
+  **ROOT CAUSE FOUND (2026-07-24).** It is documented in the live code itself —
+  auto_portfolio.py:407-427 skips signals whose CSV price diverges >50% from the real entry, with
+  the comment *"BOUNCE detected on a historical weekly bar at \$66 when the real daily price is
+  \$149"* / *"signal is from a completely different price era (stale historical bar)"*. So the
+  scanner sometimes computes a signal on a STALE or WRONG-TIMEFRAME bar, and Price/Stop/Target all
+  inherit that bar. This is why it clusters in specific scan runs, and why live is insulated (the
+  guard skips these before opening a position). **Still worth fixing at the scanner source** so it
+  doesn't emit them at all — corrupts UI display and any analysis trusting those columns. Not
+  urgent, not a trading risk.
 - **HZ2 — schema drift.** Signal CSVs vary 31→57 columns across Apr–Jul. Check per-column
   coverage before relying on any feature.
 - **HZ3 — repeated signals.** Same symbol re-flagged daily; `episode_id` exists for dedup. An

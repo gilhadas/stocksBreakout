@@ -70,9 +70,35 @@ produces. Treat them as **hypotheses to re-test on the panel**, not settled fact
 - **Prefer a clean negative to a weak positive.** This project has 11 logged nulls; that is
   healthy. Do not manufacture a finding.
 
+### Sweep discipline — read this before reporting ANY "optimal parameter"
+
+A parameter sweep that finds an optimum has found nothing until you compare that optimum to the
+**no-op baseline** (the value that disables the mechanism). Three ways a sweep lies, all of which
+have already happened here:
+
+1. **The optimum equals doing nothing.** A stop-distance sweep whose expectancy rises monotonically
+   as the stop widens is converging on *no stop*. If `expectancy(optimum) − expectancy(no-stop
+   baseline)` is within noise (say < a few % of the baseline), the honest finding is **"stops add
+   no measurable expectancy on this data"**, NOT "the optimal stop is 21.5%". Always record the
+   baseline value next to the optimum and lead with the delta, not the optimum. A sweep with
+   `delta ≈ 0` or `delta < 0` is a NULL — report it as one, in those words.
+2. **Truncation bias.** The panel caps forward measurement at 30 bars. A no-stop loser can only
+   bleed for 30 days here; in reality it bleeds until stopped. So "no stop" looks artificially good
+   in every sweep. This means a monotone-to-no-stop curve is *doubly* untrustworthy — say so.
+3. **Sizing non-comparability.** A wider stop implies a smaller position for the same dollar risk
+   (`MAX_PORTFOLIO_ATR_RISK` in auto_portfolio.py sizes by ATR risk). Per-trade %-return expectancy
+   is therefore NOT comparable across stop widths without holding dollar-risk constant. State this
+   whenever you compare returns across stop distances; do not treat raw %-expectancy as the answer.
+
+**Fixed-% stop ≠ trailing stop.** The panel measures a static level; live uses an ATR trail that
+ratchets up. The panel sweep is at best a lower bound on a trail, never the trail's own curve.
+Never propose a specific trail multiplier *from* a fixed-% sweep — the sweep can only justify the
+*direction* of a `confirm_backtest.py` run, which measures the actual trail.
+
 ## Promotion gates — a candidate rule must clear ALL of these
 
-1. Measured on the panel with `price_in_bar_range == True` and episode-deduped `n >= 30`.
+1. Measured on the panel with episode-deduped `n >= 30`, using `entry_used` (never the raw
+   `Price` column), and reported against its no-op baseline per the sweep-discipline rules above.
 2. Confirmed by `research/confirm_backtest.py` against **2022** — the panel window (Apr–Jul 2026)
    contains **no sustained bear**, and stops matter most in one.
 3. Ship bar: **≥ +0.10 Sharpe on the `--realistic-sizing` arm** (CLAUDE.md §11 standing rule).
