@@ -962,3 +962,105 @@ stands; but **wiring NBC into the realistic arm is a prerequisite if it is ever 
    (both), residual-dist, live-tiebreak, sleeve-slots, panic-throttle (+4b), normal-bounce-cap.
    Future effort is better spent on **signal generation** (the ≤15d hold bucket, WR 4–29%, is
    the consistent drag across every universe) than on further admission/ranking tweaks.
+
+## 14. Live Signal Panel + Multi-Day Research Agents (2026-07-24)
+
+Branch `research/auto-agents` (commits `113841c`, `8a12993`). A standing research system whose
+substrate is the **live daily signal archive**, not historical config sweeps.
+
+### Why the substrate changed
+§13 closed 11 consecutive null levers, all measured by re-mining the same 5 years of history —
+with a measured run-to-run noise floor of **0.25 Sharpe** (two identical `spx_plus` runs gave
+4yr avg 1.955 vs 2.20, because yfinance fetch failures vary the loaded universe by ~11 symbols).
+Every lever tested was ±0.01–0.09, i.e. **below that noise**. Repeatedly re-mining a fixed
+history at sub-noise resolution is the most likely explanation for the null streak.
+
+The live scanner emits signal CSVs every trading day (**833 files, 52 dates, Apr 1 → Jul 23**,
+via `utils.list_files('scanner_output/signals', …)`), already carrying `Vol, Dist, SMA_Dist%,
+R:R, Gap%, RSI, TC_Score, Quality, Type, Sector, FinBERT_*`. Joining those to what each stock
+*actually did* is **measurement, not simulation** — no counterfactual, and fresh days are never
+re-mined, so there is no overfitting-by-repetition.
+
+### ⚠ Finding: live and every documented champion baseline trade near-disjoint populations
+Live runs `TREND_CONFIRM['enabled']=True` Path A (config.py:226-228). **Every** champion run in
+§7/§11/§13 used `--no-tc`, which disables it.
+
+| | Live archive (episode-deduped) | Champion backtest |
+|---|---|---|
+| TREND_CONFIRM | **1459 (87%)** | 0 — disabled |
+| BOUNCE | 134 (8%) | ~99.7% |
+| CONTINUATION | 62 | ~0 |
+
+Consequences: §7's *"WinProb calibration is inert — 490 trades collapse to one BOUNCE|PREMIUM
+bucket"* is a **backtest artifact**, not a property of live; and §13's 11 null ranking levers were
+measured on a signal population live barely produces. Treat §7–§13 conclusions as **hypotheses to
+re-test on the panel**, not settled facts. Tracked as H4.
+
+### ⚠ HZ1: the scanner writes prices that never traded (archival bug, NOT a trading bug)
+**~32% of archived signal rows** carry a `Price` outside the signal-day bar range — 100% of
+2026-07-21, ~80% of May–June, 15% of April, ~0 on other July dates (swing 43% vs longterm 11%).
+On unambiguous mega-caps: PLTR 197.20 (traded 131.23–134.68), PANW 163.66 (334.03–352.00),
+MRNA 164.80 (58.61–60.83), OXY 131.80 (55.36–56.50).
+
+**Ruled out:** CSV misparse (rows internally consistent — Stop/Target correctly derived from the
+bogus Price); split adjustment (yfinance reports **zero** splits on affected names since
+2026-01-01); intra-file row shuffle (signal-price multiset ≠ actual-price multiset); the current
+data path (yfinance returns correct prices for all of them today). **Root cause unknown.** The
+concentration in specific runs suggests bad scan *invocations*, not a continuously broken pipeline.
+
+**Blast radius — contained, no live-money impact:**
+- `auto_portfolio` fetches its own entry and stop. The 9 positions opened 2026-07-21 (user
+  cf699841) all have correct entries (RKLB 69.12 = the real close) and sane stops at −3% to −5%;
+  none inverted.
+- `daytrade_admission_ab.py` uses `avail['close'].iloc[0]` and guards the stop
+  (`stop >= entry or >30% away → entry*0.95`), so §7's A/B is unaffected.
+- Only the research panel was affected; it now **mirrors live** (entry = signal-day bar close +
+  the same stop guard) rather than filtering around the bug.
+
+**Still worth fixing at source** — the scanner corrupts its own output, which matters for the UI
+and any analysis trusting `Price`/`Stop`/`Target`. Not urgent, not a trading risk.
+
+### The panel
+`research/panel/build_panel.py` (full build) + `update_panel.py` (idempotent daily increment:
+append new files, advance rows still accruing forward bars; a row **freezes** at 30 forward bars —
+9524 frozen vs 338 open on first increment).
+
+Per row: signal features verbatim + `entry_used` (bar close) + measured `mae_pct`, `mfe_pct`,
+`bars_to_mae`, `ret_1/3/5/10/20/30d`, `hit_stop`, `hit_target`, `episode_id`.
+**9862 rows → 1675 independent episodes with a full 30-bar forward window**, 971 symbols, 41 dates.
+
+Three traps found while building, all now handled and documented in the guardrails:
+- **yfinance returns NOTHING for a fetch window ending in the future** — the first build silently
+  got bars for only 23/994 symbols. Fetch end is clamped to today.
+- **`mae_pct > 0` is legitimate** (gap-up that never retraces); `mfe_pct < 0` likewise. The naive
+  `mae<=0<=mfe` invariant is wrong — the real one is `mae_pct <= mfe_pct`. `mae_pct_floored` is
+  the conventional clamped version.
+- **Tri-state flags must be nullable `boolean`**, not object dtype — `~df['price_in_bar_range']`
+  silently does *bitwise* negation on object columns (True → −2).
+
+### First measured result (TREND_CONFIRM, n=1459, 59% winners at 30d)
+| | MAE |
+|---|---|
+| Winners p50 / p75 / **p90** | −3.09% / −6.04% / **−10.71%** |
+| Losers p50 | **−12.28%** |
+
+Winner-p90 and loser-median nearly coincide — that overlap *is* the difficulty a stop must
+resolve, now measured rather than assumed. Live applies a uniform ATR×2.0 to every position
+regardless of cohort; whether that is right per cohort is H1.
+
+### Agent system
+- `research/runner.py` — **single-shot tick** (launchd `StartInterval` 1800s), not a KeepAlive
+  daemon: a wedged daemon is indistinguishable from an idle one, a tick fails loudly.
+  Detects new signal files → runs `update_panel.py` → invokes a worker via `claude -p`.
+- `research/prompts/` — `_shared_guardrails.md` + `lead.md` + `worker_stops.md` +
+  `worker_picking.md`. Guardrails encode: panel-is-measurement, the §11 realistic-sizing rule,
+  the §13 `>15d` WR halt criterion, `n>=30` after episode dedup, walk-forward, HZ1/HZ2/HZ3.
+- `research/confirm_backtest.py` — **mandatory 2022 gate**: the panel window (Apr–Jul 2026) has
+  **no sustained bear**, and stops matter most in one. Runs candidate vs baseline ATR multiplier
+  in a paired comparison.
+- `research/ledger/` — `hypotheses.md` (H1–H4, HZ1–HZ3), `decisions.md`, `results.jsonl`,
+  `budget.json` (invocation cap + end date; runner refuses past either).
+- **Live config is propose-only by construction.** Agents may commit to `research/auto-agents`;
+  they may never touch `config.py`, `docker/crontab`, `cron_jobs.txt`, or EC2.
+- `research/launchd/install.sh {install|uninstall|status}` — **not installed**; starting the
+  unattended run is a deliberate human decision.
