@@ -825,3 +825,140 @@ display-only signal log.
 `cron_jobs.txt` and `docker/crontab` are two hand-maintained copies of the same schedule with no
 test or CI check binding them. Only `docker/crontab` runs in production. Any schedule change must
 be applied to both, and drift between them is invisible until it produces a symptom like this.
+
+## 13. Tiebreak / Sleeve / Panic-4b / NBC Validation Cycle (2026-07-23/24)
+
+Closes out the four open research items left dangling by the §12 cycle and the infra detour.
+**Outcome: five runs, five negatives — no live config change.** All levers left dormant.
+Logs: `scanner_output/backtests/tiebreak_validation_20260723/`.
+
+Code shipped (all dormant/off by default, tests green):
+- `d1b19ee` — `--live-tiebreak` + `--sleeve-watchlist`/`--sleeve-slots` (9 tests)
+- `0c09540` — `--panic-throttle-bear-only` (§12 Task 4b variant, 5 tests)
+- `179f0e7` — `/portfolio/suggest-swaps` NaN crash fix (6 tests; 46/46 regression green)
+
+### 13.1 `--live-tiebreak` — live Dist ranking vs validated backtest ranking: WASH, no change
+`auto_portfolio.py` ranks the pooled-cap Dist tiebreak **descending** (most-extended first,
+clip-25, +Vol); the validated backtest ranks **ascending** (closest-to-trend, >25 back-bucket).
+§12's audit flagged the divergence qualitatively; this quantifies it.
+
+**⚠ A short-window run is actively misleading here.** `daytrade_admission_ab.py
+--compare-tiebreak` (live S3 backlog, Apr 1–Jun 30 2026, 41–46 trades, ONE regime) reported
+**backtest asc winning by +2.38 Sharpe** (live 2.10 vs backtest 4.48) and printed
+"fix LIVE to match". It also showed the divergence is real and not inert: cap bound on 42 days,
+the admitted set **differed on 31 (73.8%)**, avg **4.48 symbols swapped/day**. The 5yr run
+overturns the P&L verdict completely — including its sign.
+
+5yr `spx_plus.txt` (548 syms), realistic-sizing arm (`4b_live_tiebreak_spx_plus.log`):
+
+| Year | Champion (asc) | LiveTiebreak (desc) | Δ | >15d WR champ → live |
+|------|---------------|---------------------|-----|---------------------|
+| 2022 bear | 0.02 | **0.06** | +0.04 | 80.0% → 78.0% ↓ |
+| 2023 bull | 3.18 | **3.39** | +0.21 | 83.9% → 84.1% ↑ |
+| 2024 bull | **2.60** | 2.30 | −0.30 | 79.1% → 78.5% ↓ |
+| 2025 mixed | **2.02** | 1.90 | −0.12 | 83.6% → 82.4% ↓ |
+| **4 full yrs** | **1.955** | **1.913** | **−0.04** | — |
+| 2026 YTD | 1.34 | **2.03** | +0.69 | 93.3% → 90.3% ↓ |
+
+**Verdict: keep live as-is (descending).** Sign flips year to year — no stable direction.
+The script's own 5yr line (`+1.93` live vs `+1.83` champion) **is YTD-tainted**: the entire
+lead comes from the partial 2026 row, exactly the contamination §11 warns against. On four
+full years it is −0.04, a wash. Secondary: live's >15d WR is *lower* in 4 of 5 years (0.6–3.0
+pts) — mild, but pointing the wrong way on §12's halt metric. **Lesson: a single-regime,
+~40-trade window can invert a 5-year verdict by >2 Sharpe. The `--compare-tiebreak` harness's
+own footer says the 5yr run is the arbiter — believe it, don't act on the short window.**
+
+### 13.2 `--sleeve-slots` — reserve 3/10 daily cap slots for a curated sleeve: WASH, dormant
+Core `spx_plus.txt` (548) + sleeve `plus.txt` (111); 322 of 1078 PREMIUM+ signals sleeve-tagged
+in 2022, so the mechanism had ample opportunity to bite (`4c_sleeve_slots.log`).
+
+| Year | Champion | +Sleeve(3/10) | Δ | MaxDD champ → sleeve |
+|------|----------|---------------|-----|---------------------|
+| 2022 bear | 0.02 | −0.07 | **−0.09** | −24.58 → −25.42 deeper |
+| 2023 bull | 3.18 | **3.34** | +0.16 | −14.69 → −14.69 flat |
+| 2024 bull | 2.60 | **2.61** | +0.01 | −9.08 → −11.72 deeper |
+| 2025 mixed | **2.02** | 1.89 | −0.13 | −20.73 → −18.65 shallower |
+| **4 full yrs** | **1.955** | **1.943** | **−0.01** | mostly deeper |
+| 2026 YTD | 1.22 | **1.57** | +0.35 | −8.70 → −11.87 deeper |
+
+**Verdict: dormant.** Same YTD trap as 13.1 — the script's 5yr line shows sleeve ahead
+(1.87 vs 1.81) but that lead is *entirely* the partial 2026 row; full years are −0.01.
+Buys bull-year gains at the cost of a worse bear (2022 −0.09) and deeper drawdown in 3 of 5
+years — reserving guaranteed seats for thematically-concentrated `plus.txt` imports its 2022
+weakness (§11: −0.36 realistic standalone). >15d WR held flat (80.0%, 40 trades) so it is not
+destructive, just not additive.
+
+### 13.3 §12 Task 4b `--panic-throttle-bear-only` — REJECTED; promotion path closed
+Thesis (from §12): base panic-throttle's only negative year was 2025 (April tariff dip, 9–14
+consecutive days below SMA200); requiring a SUSTAINED bear (≥15 consec, mirroring BBG15) should
+exclude it and push the lever over the +0.10 bar.
+
+**⚠ First run used the wrong universe.** Ran on `optimizer_watch.txt` on the mistaken belief it
+matched §12 Task 4. **It does not — §12 Task 4 was measured on `plus.txt` (111 syms)**; its
+2022 champion return of −16.56% is `plus.txt`'s signature (`optimizer_watch` is −8.59%).
+The `optimizer_watch` run (`4d1_panic_bear_only.log`) is retained as a robustness note: 5yr
+realistic champion 1.32, base panic 1.25, bear-only 1.30 — **both variants net-negative there**,
+because that curated 50-symbol universe has no 2022 correlated-cluster disaster to rescue
+(champion 2022 is a benign −0.03), so throttling merely trims exposure that recovers.
+
+Correct comparison, `plus.txt`, realistic-sizing (`4d1b_panic_bear_only_plus.log`):
+
+| Year | Champion | +PanicThrottle (base) | +PanicBearOnly (4b) |
+|------|----------|----------------------|---------------------|
+| 2022 | −0.46 (−16.5%, DD −31.9) | **−0.17** (−8.6%, DD −26.9) | −0.17 (−8.7%, DD −27.0) |
+| 2023 | 3.55 | 3.55 | 3.55 identical |
+| 2024 | 3.44 | 3.44 | 3.44 identical |
+| 2025 | **1.73** | 1.72 | 1.63 |
+| 2026 YTD | 1.81 | 1.81 | 1.81 identical |
+| **4 full yrs** | **2.065** | **2.135 (+0.07)** | **2.113 (+0.047)** |
+
+**Verdict: 4b variant REJECTED; base panic-throttle stays dormant.** The refinement is *worse*
+than the lever it was meant to improve (+0.047 vs +0.07), **because its premise did not
+reproduce**: on this fresh run base-panic 2025 is 1.72 vs champion 1.73 — essentially flat, not
+the −0.12 §12 logged. With no April-2025 cost to recover, the stricter gate only discarded base
+panic's 2025 cash-freeing diversification (135→125 trades), netting −0.10. Base panic itself
+reproduces its §12 profile directionally (2022 rescue +0.29 here vs +0.51 logged; 2023/24/26
+byte-identical — zero cost in healthy years) at **+0.07, still below the +0.10 bar.**
+**The §12 Task 4b promotion path is now closed — the specific refinement was tested and lost.**
+
+### 13.4 §10 `--normal-bounce-cap 2` broader-universe confirmation — NOT CONFIRMED, dormant
+§10 measured +0.07 (5yr 1.30→1.37) on the 50-symbol `optimizer_watch.txt` and flagged a
+broader-universe run as the missing step before promotion. Run on `spx_plus.txt` (548 syms,
+`4d2_normal_bounce_cap_spx.log`):
+
+| Year | Champion ★ | +NBC=2 | Δ | >15d WR (n) champ → NBC |
+|------|-----------|--------|-----|------------------------|
+| 2022 | −0.11 | **−0.02** | +0.09 | 79.7% (133) → 78.6% (126) ↓ |
+| 2023 | 3.34 | 3.34 | 0.00 | 90.0% (150) → 89.2% (130) ↓ |
+| 2024 | 3.15 | **3.21** | +0.06 | 80.0% (145) → 80.4% (143) ↑ |
+| 2025 | **1.71** | 1.57 | −0.14 | 72.9% (144) → 71.6% (134) ↓ |
+| 2026 YTD | **2.26** | 2.11 | −0.15 | 85.0% (107) → 84.8% (99) ↓ |
+| **4 full yrs** | **2.0225** | **2.025** | **+0.003** | — |
+
+**Verdict: not confirmed → dormant.** (a) Dead wash on full years (+0.003) vs §10's +0.07.
+(b) **The finding reverses in the very year that produced it** — §10's case rested on 2026
+(+0.71→+1.04, the Feb-6 cluster fix); here 2026 is NBC's *worst* year (−0.15). The Feb-2026
+correlated cluster was an `optimizer_watch`-specific event; on a broad universe the cap mostly
+removes trades that were fine. (c) **>15d WR shrinks in 4 of 5 years** — §12's explicit halt
+criterion — by cutting long-hold trade *count* materially (2023: 150→130). It trims the edge,
+not the drag.
+
+**⚠ Known limitation:** `--normal-bounce-cap` only emits an **idealized** pooled-cap row — the
+flag is never wired into the REALISTIC arm, so this table violates §11's judge-on-realistic
+standing rule. Given the result is a wash *and* trips the >15d halt criterion, the verdict
+stands; but **wiring NBC into the realistic arm is a prerequisite if it is ever revisited.**
+
+### 13.5 Cross-cutting lessons
+1. **Never decide on a partial-year-blended average.** Three of the five runs (13.1, 13.2, and
+   the script's own auto-printed 5yr line generally) show the arm winning *only* via the YTD
+   2026 row. Always recompute the 4-full-year average by hand before reading a verdict.
+2. **Short single-regime windows can invert a multi-year verdict by >2 Sharpe** (13.1).
+3. **Universe choice can flip a lever's sign** (13.3, 13.4) — a lever validated on a 50-symbol
+   curated list may be measuring one idiosyncratic event. Always confirm on a broad universe
+   before promotion, and record which watchlist a result came from.
+4. **Meta-finding reconfirmed** (extends §8/§12): the champion (ATR×2.0 always-on close-based
+   trail + pooled-cap=10 + BBG15 + no TREND_CONFIRM) is **well-tuned**. Levers now returning
+   null/negative: Tension Index, Supertrend, Breakeven, WinProb-cal, Daytrade A/B, SMA200 gates
+   (both), residual-dist, live-tiebreak, sleeve-slots, panic-throttle (+4b), normal-bounce-cap.
+   Future effort is better spent on **signal generation** (the ≤15d hold bucket, WR 4–29%, is
+   the consistent drag across every universe) than on further admission/ranking tweaks.
