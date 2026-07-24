@@ -64,3 +64,83 @@ rather than a continuously-broken path.
 **Still open (low urgency):** find why the scanner emitted those prices. It corrupts its own
 output, which matters for the UI and for any future analysis that trusts the `Price`/`Stop`/
 `Target` columns. Not a trading risk.
+
+---
+
+## 2026-07-24 (worker-stops, first tick) — H1 first pass: NULL on this panel
+
+**Panel:** 1675 independent episodes (`is_episode_start & bars_available>=30`), 971 symbols,
+2026-04-01 → 2026-06-08. Types: TREND_CONFIRM 1459 (87%) / BOUNCE 134 / CONTINUATION 62.
+Only TREND_CONFIRM has cohort-level statistical power; BOUNCE is aggregate-only.
+
+### Task 2 — winner MAE by cohort (real finding, informational)
+
+The one clean structural finding: **BOUNCE winners bleed roughly twice as deep as TC winners
+before recovering**, and the gap is visible at every percentile.
+
+| Cohort            |  n_win | winner MAE p50 | p25      | p10 (worst 10%) | % winners cut by −10% stop |
+|-------------------|-------:|----------------|----------|------------------|-----------------------------|
+| TREND_CONFIRM     |    859 | −3.09%         | −6.04%   | −10.71%          |  11.4% |
+| TC \| PREMIUM     |    788 | −3.17%         | −6.25%   | −10.80%          |  12.1% |
+| TC \| GOLD        |     71 | −2.44%         | −4.87%   | −7.63%           |   4.2% |
+| BOUNCE            |     67 | −6.20%         | −10.84%  | −17.14%          |  26.9% |
+| CONTINUATION      |     33 | −5.39%         | −9.24%   | −16.77%          |  21.2% |
+
+Consistent with Kaminski & Lo (CLAUDE.md §12): momentum entries (TC) start close to a fresh
+high; mean-reversion entries (BOUNCE) buy into an already-adverse move, so first-days MAE is
+naturally deeper before the reversal. TC|GOLD winners bleed the least.
+
+Behaviour tertiles WITHIN TREND_CONFIRM (RSI, Gap%, Vol, SMA_Dist%) show winner-MAE p50
+differences of ≤1% across tertiles — well below the cohort's own bootstrap noise. **This is
+already a partial answer to H3: behaviour features add nothing over the Type label at this
+sample size.** Pattern labels would need to show >1% MAE-percentile lift *within TC* to be
+worth computing — no evidence for that here.
+
+### Task 3 — stop-distance sweep: NULL in every cohort
+
+Sweep fixed % stops (3, 4, 5, 6, 8, 10, 12, 15, 20, 25) against `mae_pct`/`ret_30d`. Baseline
+= no-stop mean 30d return; bootstrap 95% CI on the no-stop mean (500 resamples).
+
+| Cohort           |    n | baseline mean_ret | optimum stop | delta_vs_nostop | inside no-stop CI95? |
+|------------------|-----:|-------------------:|--------------:|-----------------:|----------------------|
+| TREND_CONFIRM    | 1459 | **+6.40%**         | **NO-STOP**   | monotone         | — (is baseline)      |
+| TC \| PREMIUM    | 1330 | +6.19%             | **NO-STOP**   | monotone         | —                    |
+| TC \| GOLD       |  129 | +8.55%             | 8%            | +0.69%           | **yes** (NULL)       |
+| BOUNCE           |  134 | +1.38%             | 10%           | +0.10%           | **yes** (NULL)       |
+| BOUNCE \| HIGH   |   41 | +4.16%             | **NO-STOP**   | monotone         | —                    |
+| BOUNCE \| PREMIUM|   78 | +1.71%             | 8%            | +1.76%           | **yes** (NULL, n=78) |
+| CONTINUATION     |   62 | +4.38%             | 20%           | +0.84%           | **yes** (NULL)       |
+
+**Verdict per §sweep-discipline: every cohort is a NULL.** Either expectancy rises
+monotonically to no-stop (which the guardrails explicitly flag as the "converging on no stop"
+false positive), or the apparent optimum sits well inside the no-stop bootstrap CI. There is
+no candidate rule to propose, and therefore nothing meaningful to feed to
+`confirm_backtest.py`.
+
+### What this NULL does and does not say
+
+**It does say:** on this measurement (Apr–Jun 2026 signals, 30-bar forward window, fixed-%
+stops, uniform sizing), no per-cohort stop distance beats no-stop by more than resampling
+noise. The Type-conditional MAE profile is real (BOUNCE ≈ 2× TC) but does not translate into a
+measurable per-cohort expectancy edge at this n.
+
+**It does not say:**
+1. **Remove the live ATR trail.** The panel window has no sustained bear; §7's canonical run
+   showed the trail cuts 2022 bear-year losses materially, and the halt metric (`>15d WR`)
+   held. This measurement is silent on that regime.
+2. **The live trail multiplier is optimal.** Fixed-% ≠ trailing; the panel sweep can only
+   justify the *direction* of a trail change, and there is no direction here.
+3. **BOUNCE needs a wider stop than TC.** Directionally consistent with the MAE gap, but the
+   BOUNCE|PREMIUM optimum delta (+1.76% at 8%) has n=78 and a CI covering ±5% — not evidence.
+
+### Proposal to lead
+
+- **Close H1 (this pass) as `closed-null` on the current panel** with the caveat above.
+- **Close H3 as `closed-null`** on the same data: behaviour tertiles inside TC show no
+  MAE-percentile structure worth explaining, so pattern labelling has nothing to add yet.
+- **Re-open H1 automatically when the panel accumulates its first RED_MARKET stretch of
+  ≥15 SPY-below-SMA200 days** (BBG15 semantics) — the regime where stops matter, and the
+  regime this window has none of.
+- **Live config: no proposal.** Do not touch `ATR_TRAIL_MULT`, `ATR_TRAIL_FLOOR_BARS`, or the
+  pooled-cap ranking. This is the correct answer under the current measurement, not a
+  fallback.
