@@ -165,7 +165,34 @@ def main() -> int:
     _save_json(STATE, state)
     budget['agent_invocations_used'] = budget.get('agent_invocations_used', 0) + 1
     _save_json(BUDGET, budget)
+
+    # Persist the tick's ledger writes. Unattended, an agent that appended to
+    # results.jsonl / decisions.md but didn't commit would lose that work on the
+    # next crash or reset — and a half-written ledger is how the lead ends up
+    # auditing a phantom. Commit the ledger (only) to research/auto-agents. Never
+    # touches tracked live-config files; -- pathspec scopes it to the ledger dir.
+    _commit_ledger(role, state['ticks'])
     return rc
+
+
+def _commit_ledger(role: str, tick: int) -> None:
+    branch = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                            cwd=str(ROOT), capture_output=True, text=True).stdout.strip()
+    if branch != 'research/auto-agents':
+        print(f"  not on research/auto-agents (on {branch!r}) — leaving ledger uncommitted")
+        return
+    rel = 'research/ledger'
+    dirty = subprocess.run(['git', 'status', '--porcelain', '--', rel],
+                           cwd=str(ROOT), capture_output=True, text=True).stdout.strip()
+    if not dirty:
+        return
+    subprocess.run(['git', 'add', '--', rel], cwd=str(ROOT), check=False)
+    msg = (f"research(ledger): tick {tick} — {role} [auto]\n\n"
+           f"Automated ledger commit by research/runner.py.")
+    r = subprocess.run(['git', 'commit', '-m', msg, '--', rel],
+                       cwd=str(ROOT), capture_output=True, text=True)
+    print(f"  ledger committed (tick {tick})" if r.returncode == 0
+          else f"  ledger commit skipped: {r.stdout.strip()[-200:]}")
 
 
 if __name__ == '__main__':
