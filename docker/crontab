@@ -21,7 +21,7 @@
 # ============================================================================
 
 # Monday 9:00 AM — Phase 1: full scan, export PREMIUM tickers
-0 9 * * 1 cd /app && python3 breakout_scanner.py "input/spx_plus.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_LONGTERM}" > /dev/null 2>&1 || true
+0 9 * * 1 cd /app && python3 breakout_scanner.py "input/all.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_LONGTERM}" > /dev/null 2>&1 || true
 
 # Monday 9:15 AM — Long-term exit evaluation
 15 9 * * 1 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
@@ -32,7 +32,7 @@
 # ============================================================================
 
 # Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + auto-add positions
-35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/spx_plus.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
+35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
 
 # Weekdays 3:45 PM — Swing exit evaluation (from actual portfolio, not mock file)
 45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
@@ -49,7 +49,7 @@
 # ============================================================================
 
 # Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + momentum-watch
-35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/spx_plus.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}" > /dev/null 2>&1 || true
+35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}" > /dev/null 2>&1 || true
 
 # Weekdays 10:00 AM — Phase 2: Re-evaluate momentum-watch tickers
 0 10 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
