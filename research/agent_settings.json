@@ -1,0 +1,90 @@
+{
+  "_comment": [
+    "Permission set for the UNATTENDED research agents only. Passed via",
+    "`claude --settings research/agent_settings.json` from research/runner.py, so it never",
+    "affects the human's interactive sessions (.claude/settings.local.json is separate).",
+    "",
+    "Why this file exists: `claude -p` is non-interactive and cannot prompt, so any tool call",
+    "not pre-approved is silently DENIED. Before this file the agents could only act through",
+    "the handful of Bash rules that happened to be in settings.local.json (python, git add,",
+    "git commit) — Write/Edit were unavailable to them entirely.",
+    "",
+    "deny beats allow, so the deny block is the enforcement of CLAUDE.md §14's",
+    "'live config is propose-only'. That claim was previously carried by prompt text alone."
+  ],
+
+  "permissions": {
+    "defaultMode": "acceptEdits",
+
+    "deny": [
+      "Edit(config.py)",
+      "Write(config.py)",
+      "Edit(auto_portfolio.py)",
+      "Write(auto_portfolio.py)",
+      "Edit(orchestrator.py)",
+      "Write(orchestrator.py)",
+      "Edit(scanner.py)",
+      "Write(scanner.py)",
+      "Edit(breakout_scanner.py)",
+      "Write(breakout_scanner.py)",
+      "Edit(cron_jobs.txt)",
+      "Write(cron_jobs.txt)",
+      "Edit(docker/crontab)",
+      "Write(docker/crontab)",
+      "Edit(.env)",
+      "Write(.env)",
+
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(aws:*)",
+      "Bash(docker:*)",
+      "Bash(launchctl:*)",
+      "Bash(crontab:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git merge:*)",
+      "Bash(sed -i:*)"
+    ],
+
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "TodoWrite",
+      "WebFetch",
+      "WebSearch",
+
+      "Edit(research/**)",
+      "Write(research/**)",
+      "Edit(scanner_output/backtests/**)",
+      "Write(scanner_output/backtests/**)",
+
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(./venv/bin/python:*)",
+      "Bash(./venv/bin/python3:*)",
+      "Bash(/Users/gilhadas/Documents/GitHub/stocksBreakout/venv/bin/python:*)",
+      "Bash(venv/bin/pytest:*)",
+      "Bash(./venv/bin/pytest:*)",
+      "Bash(pytest:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

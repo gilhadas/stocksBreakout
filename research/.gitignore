@@ -1,2 +1,10 @@
 panel/panel.parquet
 ledger/runner_state.json
+
+# Transient tick state. runner.py's _commit_ledger does `git add -- research/ledger`,
+# which otherwise sweeps the flock file into a ledger commit (it did, in tick 29).
+ledger/.runner.lock
+
+# Agent scratch space — analysis scripts an agent writes mid-tick. Findings belong in
+# results.jsonl / decisions.md, not in one-off scripts committed to the branch.
+tmp/

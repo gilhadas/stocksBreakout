@@ -48,9 +48,12 @@ The unexplored direction is per-signal features and a continuous model — stay 
 
 ## Traps specific to this question
 
-- **§7's "WinProb is inert, 99.7% one bucket" is a backtest artifact.** Live is ~92%
+- **§7's "WinProb is inert, 99.7% one bucket" is a backtest artifact.** Live is ~87%
   TREND_CONFIRM with a genuinely mixed quality distribution. Re-derive the bucket structure from
   the panel before assuming anything about it.
+  **Already measured (tick 1, `results.jsonl`):** `WinProb` is 99.8% NaN in the archive — the
+  calibration JSON is not deployed to `scanner_output/`, so the column is empty *end-to-end in
+  live*, not merely uninformative. Do not re-derive this; build on it.
 - **Selection effect:** admitted signals were chosen *because* they ranked highly, so comparing
   their outcomes to skipped ones measures the ranking's value — but a null result could also mean
   cash was the binding constraint, not rank quality. Check how often the cap actually bound.

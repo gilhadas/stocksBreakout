@@ -28,11 +28,13 @@ against you), `mfe_pct` (how far it ran), `bars_to_mae`, `ret_1/3/5/10/20/30d`, 
 ## Sequence
 
 1. **Coverage first.** Before any hypothesis, report per-cohort counts after
-   (a) `price_in_bar_range == True`, (b) episode dedup, (c) `bars_available >= 30`.
+   (a) episode dedup, (b) `bars_available >= 30`. Do **not** filter on `price_in_bar_range` —
+   per the guardrails it is a diagnostic of archive quality, not a validity gate, and the panel
+   already mirrors live entry semantics via `entry_used`.
    Cohorts to try: signal `Type`, `Quality`, `Sector`, and behaviour bins (ATR percentile, `RSI`,
    `Gap%`, `Vol`). **Say plainly which cohorts can never be answered at this sample size.**
-   Note: live is ~92% TREND_CONFIRM, so that is where the statistical power is — **not BOUNCE**,
-   despite BOUNCE dominating the historical backtest work in §7–§13.
+   Note: live is ~87% TREND_CONFIRM, so that is where the statistical power is — **not BOUNCE**
+   (~8%), despite BOUNCE dominating the historical backtest work in §7–§13.
 
 2. **Q1 — winner MAE.** Per cohort with n≥30: the MAE distribution of winners (median, p75, p90).
    A stop tighter than p90-of-winner-MAE is provably cutting winners; quantify how many.

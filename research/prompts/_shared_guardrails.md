@@ -49,10 +49,11 @@ measured off real daily bars.
 Live runs `TREND_CONFIRM['enabled'] = True` Path A (config.py:226-228). **Every** documented
 champion baseline in CLAUDE.md was measured with `--no-tc`, which disables it. Result:
 
-| | Live archive | Champion backtest |
+| | Live archive (episode-deduped, n=1675) | Champion backtest |
 |---|---|---|
-| TREND_CONFIRM | ~92% | 0% (disabled) |
-| BOUNCE | ~5% | ~99.7% |
+| TREND_CONFIRM | **87%** (1459) | 0% (disabled) |
+| BOUNCE | **8%** (134) | ~99.7% |
+| CONTINUATION | 4% (62) | ~0% |
 
 So conclusions in §7–§13 drawn from backtest trades describe a signal population live barely
 produces. Treat them as **hypotheses to re-test on the panel**, not settled facts. In particular
@@ -101,6 +102,15 @@ Never propose a specific trail multiplier *from* a fixed-% sweep — the sweep c
    `Price` column), and reported against its no-op baseline per the sweep-discipline rules above.
 2. Confirmed by `research/confirm_backtest.py` against **2022** — the panel window (Apr–Jul 2026)
    contains **no sustained bear**, and stops matter most in one.
+   ⚠ **Known unresolved flaw in this gate — state it whenever you invoke it.** `confirm_backtest.py`
+   hardcodes `--no-tc`, which *disables TREND_CONFIRM* — the 87% of live signals your panel finding
+   is most likely drawn from. So the gate currently confirms candidate rules against a ~99.7%-BOUNCE
+   population. A pass is therefore **not** evidence the rule works on live's stream, and a fail may
+   be for an irrelevant reason. Report the gate result *with this caveat attached*; do not treat it
+   as settled. Fixing the gate is a human decision, not yours to make unilaterally.
+   ⚠ **The gate only accepts an ATR-trail multiplier (`--mult`).** There is no path to confirm a
+   *ranking* candidate (Worker B's continuous model). Until one exists, picking findings are
+   **diagnostic-only** — write them up as such rather than proposing them for live.
 3. Ship bar: **≥ +0.10 Sharpe on the `--realistic-sizing` arm** (CLAUDE.md §11 standing rule).
    Idealized numbers are reference only.
 4. **`>15d` hold win-rate must NOT shrink** (§13 halt criterion). That bucket is the entire edge

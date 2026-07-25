@@ -1064,3 +1064,57 @@ regardless of cohort; whether that is right per cohort is H1.
   they may never touch `config.py`, `docker/crontab`, `cron_jobs.txt`, or EC2.
 - `research/launchd/install.sh {install|uninstall|status}` — **not installed**; starting the
   unattended run is a deliberate human decision.
+
+### §14.1 First unattended run — post-mortem and hardening (2026-07-25)
+
+The overnight run of 2026-07-24 ran **27 ticks and produced 2 pieces of research.** Ticks 3–14
+were consecutive session-limit rejections, each retried on the next 30-minute tick and each
+first paying for a full 131-symbol yfinance panel refresh. Fixes below; `tests/
+test_research_runner.py` (14 tests) pins them.
+
+**"Propose-only by construction" was not, in fact, by construction.** It was prompt text.
+`claude -p` is non-interactive, so anything not pre-approved is silently *denied* — which also
+meant the agents never had `Write`/`Edit` at all and did every ledger write through `python -c`
+one-liners (only `Bash(python:*)`/`git add`/`git commit` happened to be allowlisted in
+`.claude/settings.local.json`). Now `research/agent_settings.json`, passed via
+`claude --settings`, grants the research tools *and* denies `Edit`/`Write` on `config.py`,
+`auto_portfolio.py`, `orchestrator.py`, `scanner.py`, `breakout_scanner.py`, `cron_jobs.txt`,
+`docker/crontab`, `.env`, plus `ssh`/`aws`/`docker`/`git push`/`git checkout`. Deny beats allow.
+Kept separate from `.claude/settings.local.json` so interactive sessions are unaffected.
+⚠ **Verified empirically, and that verification is not optional:** `-p` mode *silently ignores a
+settings file that fails validation*, so a schema slip leaves the deny rules looking present but
+inert. Probe result: `Write(config.py)` blocked, `Write(research/…)` succeeded, hash of
+`config.py` unchanged.
+
+**Other fixes:** geometric backoff 30m→8h on failed invocations (was: retry every tick) and
+self-parking after 8; an `flock` tick lock (`runner`/`lead` are *different launchd labels running
+the same script* — two concurrent `update_panel.py` runs do read→mutate→overwrite and silently
+lose a day's ingest); worker rotation moved to its own `last_worker_role` key (`last_role` also
+records lead runs, so the daily lead reset every following tick to `stops` and starved
+`picking`); the tail of `decisions.md` + the role's own past results are now injected into the
+task prompt (a worker re-read the same `hypotheses.md` "Next tasks" list every tick, and only the
+lead may update it — which had never run); `runner.py --status` for one-command health.
+
+**Prompt contradictions corrected.** `worker_stops.md` instructed filtering on
+`price_in_bar_range == True` and `lead.md`'s audit checklist required it — both **forbidden** by
+the guardrails since the HZ1 fix (`8a12993`), which made it a diagnostic, not a validity gate.
+The lead would have rejected correct work. Stale `~92%/~5%` type-mix figures corrected to the
+measured **87% TREND_CONFIRM / 8% BOUNCE / 4% CONTINUATION** (n=1675 episodes).
+
+**⚠ Two structural gaps left OPEN — decide before the next unattended run:**
+1. **The promotion gate validates the wrong population.** `confirm_backtest.py` hardcodes
+   `--no-tc`, which disables TREND_CONFIRM — the 87% of live signals a panel finding is drawn
+   from. It therefore confirms candidate rules against a ~99.7%-BOUNCE simulation: a pass is not
+   evidence for live, and a fail may be for an irrelevant reason. This is the gate standing
+   between agent output and real money.
+2. **Worker B has no promotion path at all.** The gate accepts only `--mult` (an ATR trail
+   multiplier); there is no way to feed a candidate *ranking* model into
+   `backtest_regime_compare.py`, so picking findings can never clear gate #2.
+   Both are now stated in `_shared_guardrails.md` so agents caveat rather than over-claim.
+
+**Also still open (flagged, not fixed):** panel maintenance is coupled to agent invocation (a
+quiet tick skips `update_panel.py` entirely, so open rows stop accruing forward bars); and
+`new_signal_files()` infers "new" by differencing disk against panel `source_file`s, so any CSV
+that `load_signal_rows` silently drops (empty, or missing `Symbol`) reads as new **forever** —
+the same class of bug as the daytrade CSVs that burned those 12 ticks, fixed then by
+special-casing modes rather than by fixing the mechanism. Zero such files today; latent.

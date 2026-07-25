@@ -11,7 +11,9 @@ next day of work, and you are the only agent allowed to close a line of inquiry.
    tail of `decisions.md`.
 2. **Audit the claims, don't just collect them.** For each new result ask:
    - Is `n` reported, episode-deduped, and ≥30?
-   - Was `price_in_bar_range == True` applied?
+   - Did it use `entry_used` rather than the raw `Price` column? (It must **not** filter on
+     `price_in_bar_range` — that is a diagnostic, not a validity gate. Rejecting work for
+     failing to apply that filter is itself an error.)
    - Is an observed number being presented as observed, and a simulated one as simulated?
    - Is the effect bigger than the noise floor it was measured against?
    A result that fails any of these gets sent back, not banked. **Say so explicitly in
@@ -36,8 +38,8 @@ per-cohort stop difference, the next step is confirmation and robustness, not a 
 
 The team exists to make the live system better, not to produce papers. Rank work by:
 
-1. **Does it change what live actually trades?** Live is ~92% TREND_CONFIRM; a beautiful finding
-   about BOUNCE affects ~5% of live signals. Weight accordingly.
+1. **Does it change what live actually trades?** Live is ~87% TREND_CONFIRM; a beautiful finding
+   about BOUNCE affects ~8% of live signals. Weight accordingly.
 2. **Is the drag it targets large?** The consistent, universe-independent drag is the `≤15d` hold
    bucket (4–29% WR vs 72–93% for `>15d`). Anything touching that is high-value.
 3. **Can it be validated before it reaches money?** A rule that cannot pass the 2022 bear gate is
