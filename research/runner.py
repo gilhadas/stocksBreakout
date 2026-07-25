@@ -10,11 +10,16 @@ Each tick:
   0. Take an exclusive lock — the runner and lead are separate launchd labels running
      this same script, and two concurrent update_panel.py runs would silently lose a
      day's ingest (read -> mutate -> to_parquet overwrite, last writer wins).
-  1. Detect signal CSVs not yet in the panel.
-  2. If any -> run update_panel.py (append + advance open rows).
-  3. If the panel changed -> invoke the next queued worker agent via `claude -p`,
-     under research/agent_settings.json (which is what actually enforces the
-     propose-only rule — deny beats allow, and `-p` cannot prompt).
+  1. Detect signal CSVs update_panel.py has never SEEN (from its explicit
+     ingested_files.json record — NOT by differencing against panel.source_file,
+     which reported an unusable CSV as new forever).
+  2. Refresh the panel if there are new files OR the panel is stale
+     (PANEL_REFRESH_HOURS). These are INDEPENDENT of step 3: update_panel's second
+     job is advancing forward metrics on rows still accruing bars, which must happen
+     on quiet days too.
+  3. If there is genuinely new signal data -> invoke the next queued worker agent via
+     `claude -p`, under research/agent_settings.json (which is what actually enforces
+     the propose-only rule — deny beats allow, and `-p` cannot prompt).
   4. Record the tick in budget.json; refuse to spend past the cap.
 
 A failed invocation costs no budget and triggers geometric backoff (30m -> 8h); after
@@ -48,6 +53,7 @@ RESEARCH = ROOT / 'research'
 LEDGER = RESEARCH / 'ledger'
 PROMPTS = RESEARCH / 'prompts'
 PANEL = RESEARCH / 'panel' / 'panel.parquet'
+INGESTED = RESEARCH / 'panel' / 'ingested_files.json'
 STATE = LEDGER / 'runner_state.json'
 BUDGET = LEDGER / 'budget.json'
 LOCK = LEDGER / '.runner.lock'
@@ -72,6 +78,11 @@ CLAUDE_BIN = Path.home() / '.local' / 'bin' / 'claude'
 BACKOFF_MINUTES = (30, 60, 120, 240, 480)
 MAX_CONSECUTIVE_FAILURES = 8
 
+# How long open rows may go without a forward-metric advance before the panel is
+# refreshed even though no new signal file landed. Roughly daily: the measurement
+# only changes when a new daily bar exists, so more often is wasted yfinance traffic.
+PANEL_REFRESH_HOURS = 20
+
 
 def _load_json(p: Path, default: dict) -> dict:
     try:
@@ -93,16 +104,52 @@ PANEL_MODES = ('swing', 'longterm')
 
 
 def new_signal_files() -> list[str]:
-    """Signal CSVs on disk/S3, in tracked modes, that the panel has never seen."""
+    """Signal CSVs on disk/S3, in tracked modes, that update_panel has never SEEN.
+
+    "Seen" comes from research/panel/ingested_files.json, written by update_panel.py
+    after every successful run — NOT from differencing against panel.source_file.
+    A CSV that load_signal_rows() drops (empty, or no Symbol column) produces no
+    panel rows, so the old inference reported it as new on every tick, forever. That
+    is what the ~283 daytrade CSVs did on 2026-07-24: 12 agent invocations burned on
+    no real new data. Falls back to the old inference only when the record does not
+    exist yet (first run after this change).
+    """
     import pandas as pd
     from utils import list_files
 
     available = {f for f in list_files('scanner_output/signals', 'signals_*.csv')
                  if f.split('_')[1:2] and f.split('_')[1] in PANEL_MODES}
+
+    if INGESTED.exists():
+        try:
+            seen = set(json.loads(INGESTED.read_text()).get('files', []))
+            return sorted(available - seen)
+        except Exception as e:
+            print(f"  WARNING: {INGESTED.name} unreadable ({e}); falling back to panel rows")
+
     if not PANEL.exists():
         return sorted(available)
     known = set(pd.read_parquet(PANEL, columns=['source_file'])['source_file'].unique())
     return sorted(available - known)
+
+
+def panel_is_stale(state: dict) -> bool:
+    """True if open rows have not been advanced within PANEL_REFRESH_HOURS.
+
+    update_panel.py has two jobs: append new files, and ADVANCE forward metrics on
+    rows still accruing bars. The tick used to return early whenever no new file had
+    landed, so job 2 never ran on a quiet day and open rows silently went stale. Panel
+    freshness is decoupled from agent invocation: the panel refreshes on its own
+    cadence, agents are still only invoked on genuinely new data.
+    """
+    last = state.get('last_panel_update')
+    if not last:
+        return True
+    try:
+        when = datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - when > timedelta(hours=PANEL_REFRESH_HOURS)
 
 
 def acquire_lock():
@@ -323,10 +370,19 @@ def _tick(args) -> int:
         return 0
 
     fresh = new_signal_files()
-    print(f"tick {state['ticks'] + 1}: {len(fresh)} new signal file(s)")
+    stale = panel_is_stale(state)
+    print(f"tick {state['ticks'] + 1}: {len(fresh)} new signal file(s)"
+          f"{', panel stale' if stale else ''}")
 
-    if not fresh and not args.force:
-        print("no new data — nothing to do.")
+    # Panel freshness and agent invocation are INDEPENDENT decisions. The panel is
+    # refreshed on new data or on its own ~daily cadence (open rows must keep accruing
+    # forward bars); an agent is invoked only on genuinely new data. Previously both
+    # hung off `fresh`, so a quiet day advanced nothing at all.
+    want_panel = bool(fresh) or stale
+    want_agent = bool(fresh) or args.force
+
+    if not want_panel and not want_agent:
+        print("no new data, panel fresh — nothing to do.")
         state['ticks'] += 1
         state['last_tick'] = datetime.now(timezone.utc).isoformat()
         if not args.dry_run:
@@ -334,19 +390,33 @@ def _tick(args) -> int:
         return 0
 
     if args.dry_run:
-        print(f"--dry-run: would update panel and invoke "
-              f"{args.role or 'next worker'}")
+        print(f"--dry-run: would {'update panel' if want_panel else 'skip panel'}"
+              f"{' and invoke ' + (args.role or 'next worker') if want_agent else ''}")
         return 0
 
-    if fresh:
-        print("  updating panel...")
+    if want_panel:
+        print(f"  updating panel ({'new files' if fresh else 'stale, advancing open rows'})...")
         u = subprocess.run([sys.executable, str(RESEARCH / 'panel' / 'update_panel.py')],
                            cwd=str(ROOT), capture_output=True, text=True, timeout=7200)
         print('   ' + '\n   '.join(u.stdout.strip().splitlines()[-8:]))
         if u.returncode != 0:
             print(f"  panel update FAILED ({u.returncode}) — not invoking an agent on "
                   f"possibly-bad data:\n{u.stderr[-1500:]}")
+            # Deliberately do NOT stamp last_panel_update: the panel is still stale,
+            # so the next tick retries the refresh rather than waiting out the cadence.
+            state['ticks'] += 1
+            state['last_tick'] = datetime.now(timezone.utc).isoformat()
+            _save_json(STATE, state)
             return 1
+        state['last_panel_update'] = datetime.now(timezone.utc).isoformat()
+        _save_json(STATE, state)
+
+    if not want_agent:
+        print("  panel refreshed; no new signal data, so no agent invoked.")
+        state['ticks'] += 1
+        state['last_tick'] = datetime.now(timezone.utc).isoformat()
+        _save_json(STATE, state)
+        return 0
 
     role = args.role or next_worker_role(state)
     rc = invoke_agent(role)

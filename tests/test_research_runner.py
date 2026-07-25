@@ -16,6 +16,12 @@ AC-RR-04  The tick lock is exclusive — the runner and lead labels run the same
 AC-RR-05  Ledger context is role-scoped, so a worker is told what it already did
 AC-RR-06  agent_settings.json denies writes to every live-config file, and deny rules
           are present at all (they are what makes 'propose-only' structural)
+AC-RR-07  Panel staleness is independent of new-file arrival, so open rows keep
+          accruing forward bars on a quiet day
+AC-RR-08  "New file" comes from an explicit ingested record, not inferred from panel
+          rows — an unusable CSV must not read as new forever
+AC-RR-09  A candidate ranking model orders WITHIN the quality tier, never over it,
+          and unscored signals degrade gracefully
 """
 import json
 import os
@@ -165,3 +171,106 @@ def test_agent_settings_allows_the_ledger_it_must_write():
     allow = json.loads(runner.AGENT_SETTINGS.read_text())['permissions']['allow']
     assert 'Write(research/**)' in allow
     assert 'Edit(research/**)' in allow
+
+
+# ── AC-RR-07 ──────────────────────────────────────────────────────────────────────
+def test_panel_staleness_is_independent_of_new_files():
+    """update_panel has two jobs: append new files, and ADVANCE open rows. The tick
+    used to return early whenever no new file had landed, so job 2 never ran on a
+    quiet day and forward metrics silently went stale."""
+    assert runner.panel_is_stale({}) is True, "no record yet => stale"
+    assert runner.panel_is_stale({'last_panel_update': 'not-a-timestamp'}) is True
+
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    assert runner.panel_is_stale({'last_panel_update': fresh}) is False
+
+    old = (datetime.now(timezone.utc)
+           - timedelta(hours=runner.PANEL_REFRESH_HOURS + 1)).isoformat()
+    assert runner.panel_is_stale({'last_panel_update': old}) is True
+
+
+# ── AC-RR-08 ──────────────────────────────────────────────────────────────────────
+def test_new_files_come_from_the_ingested_record_not_panel_rows(tmp_path, monkeypatch):
+    """The regression: load_signal_rows() silently drops an empty / Symbol-less CSV,
+    so it never reaches panel.source_file and the old inference reported it as new on
+    every tick forever — 12 wasted agent invocations on 2026-07-24."""
+    record = tmp_path / 'ingested_files.json'
+    on_disk = ['signals_swing_20260401.csv',
+               'signals_swing_20260402.csv',      # <- unusable: yields no panel rows
+               'signals_longterm_20260401.csv']
+
+    # new_signal_files() does `from utils import list_files` at call time, so patching
+    # the source module is what takes effect.
+    monkeypatch.setattr(runner, 'INGESTED', record)
+    monkeypatch.setattr('utils.list_files', lambda *a, **k: on_disk)
+
+    # update_panel examined all three (one produced no rows) and recorded that fact.
+    record.write_text(json.dumps({'modes': ['swing', 'longterm'], 'files': on_disk}))
+    assert runner.new_signal_files() == [], \
+        "a file that yields no rows must still count as seen"
+
+    # A genuinely new file is still detected.
+    on_disk.append('signals_swing_20260403.csv')
+    assert runner.new_signal_files() == ['signals_swing_20260403.csv']
+
+
+def test_corrupt_ingested_record_falls_back_instead_of_crashing(tmp_path, monkeypatch):
+    record = tmp_path / 'ingested_files.json'
+    record.write_text('{not json')
+    monkeypatch.setattr(runner, 'INGESTED', record)
+    monkeypatch.setattr(runner, 'PANEL', tmp_path / 'missing.parquet')
+    monkeypatch.setattr('utils.list_files', lambda *a, **k: ['signals_swing_20260401.csv'])
+
+    assert runner.new_signal_files() == ['signals_swing_20260401.csv']
+
+
+# ── AC-RR-09 ──────────────────────────────────────────────────────────────────────
+def _sig(symbol, quality='PREMIUM'):
+    return {'date': '2026-04-01', 'symbol': symbol, 'quality': quality,
+            'win_prob': 0, 'rr': 2.5, 'sma_dist_pct': 5, 'vol': 1}
+
+
+def test_rank_scores_order_within_tier_never_over_it(tmp_path):
+    from backtest_regime_compare import _pooled_cap, load_rank_scores
+
+    sigs = [_sig('AAA'), _sig('BBB'), _sig('CCC'), _sig('GGG', 'GOLD')]
+
+    f = tmp_path / 'scores.csv'
+    f.write_text('date,symbol,score\n2026-04-01,CCC,9.0\n2026-04-01,AAA,1.0\n')
+    out = [s['symbol'] for s in _pooled_cap(sigs, max_per_day=4,
+                                            rank_scores=load_rank_scores(str(f)))]
+
+    assert out[0] == 'GGG', "quality tier must stay primary — GOLD>PREMIUM is the one " \
+                            "robust thing the live panel showed the ranking does"
+    assert out.index('CCC') < out.index('AAA'), "higher score ranks earlier within tier"
+    assert out.index('AAA') < out.index('BBB'), "unscored signals sort behind scored ones"
+
+
+def test_rank_scores_absent_leaves_default_order_untouched():
+    """The default path must be byte-identical — every documented baseline depends on it."""
+    from backtest_regime_compare import _pooled_cap
+
+    sigs = [_sig('AAA'), _sig('BBB'), _sig('CCC'), _sig('GGG', 'GOLD')]
+    assert ([s['symbol'] for s in _pooled_cap(sigs, max_per_day=4)]
+            == [s['symbol'] for s in _pooled_cap(sigs, max_per_day=4, rank_scores=None)])
+
+
+def test_rank_scores_rejects_a_bad_schema(tmp_path):
+    from backtest_regime_compare import load_rank_scores
+
+    f = tmp_path / 'bad.csv'
+    f.write_text('date,ticker\n2026-04-01,X\n')
+    with pytest.raises(ValueError, match='missing column'):
+        load_rank_scores(str(f))
+
+
+# ── The promotion gate must target the population live actually trades ────────────
+def test_confirm_backtest_defaults_to_the_live_population():
+    """It hardcoded --no-tc for a month, so the mandatory gate confirmed candidate
+    rules against a ~99.7%-BOUNCE stream while live is 87% TREND_CONFIRM."""
+    src = (ROOT / 'research' / 'confirm_backtest.py').read_text()
+    assert "'--no-tc'" not in src.split('BASE_ARGS')[1].split(']')[0], \
+        '--no-tc must not be unconditional in BASE_ARGS'
+    assert "--realistic-sizing" in src, '§11 requires judging on the realistic arm'
+    assert "'--trades-log'" in src, 'needed to report the realized signal-type mix'
+

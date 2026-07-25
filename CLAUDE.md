@@ -1101,20 +1101,44 @@ the guardrails since the HZ1 fix (`8a12993`), which made it a diagnostic, not a 
 The lead would have rejected correct work. Stale `~92%/~5%` type-mix figures corrected to the
 measured **87% TREND_CONFIRM / 8% BOUNCE / 4% CONTINUATION** (n=1675 episodes).
 
-**⚠ Two structural gaps left OPEN — decide before the next unattended run:**
-1. **The promotion gate validates the wrong population.** `confirm_backtest.py` hardcodes
-   `--no-tc`, which disables TREND_CONFIRM — the 87% of live signals a panel finding is drawn
-   from. It therefore confirms candidate rules against a ~99.7%-BOUNCE simulation: a pass is not
-   evidence for live, and a fail may be for an irrelevant reason. This is the gate standing
-   between agent output and real money.
-2. **Worker B has no promotion path at all.** The gate accepts only `--mult` (an ATR trail
-   multiplier); there is no way to feed a candidate *ranking* model into
-   `backtest_regime_compare.py`, so picking findings can never clear gate #2.
-   Both are now stated in `_shared_guardrails.md` so agents caveat rather than over-claim.
+### §14.2 Promotion-gate and panel-plumbing fixes (2026-07-25)
 
-**Also still open (flagged, not fixed):** panel maintenance is coupled to agent invocation (a
-quiet tick skips `update_panel.py` entirely, so open rows stop accruing forward bars); and
-`new_signal_files()` infers "new" by differencing disk against panel `source_file`s, so any CSV
-that `load_signal_rows` silently drops (empty, or missing `Symbol`) reads as new **forever** —
-the same class of bug as the daytrade CSVs that burned those 12 ticks, fixed then by
-special-casing modes rather than by fixing the mechanism. Zero such files today; latent.
+**The promotion gate was validating the wrong population — fixed.** `confirm_backtest.py`
+hardcoded `--no-tc`, which *disables* TREND_CONFIRM, so the mandatory gate confirmed candidate
+rules against a ~99.7%-BOUNCE stream while live is 87% TREND_CONFIRM. Now `--population live`
+(default) leaves TC Path A enabled exactly as production runs it; `--population champion`
+restores `--no-tc` for reproducing the documented §7–§13 baselines. The two are different
+populations — never mix their numbers.
+
+⚠ **A structural limit that flags cannot fix, and that the gate now surfaces rather than
+hides.** TREND_CONFIRM is blocked in `RED_MARKET`/`BEARISH`
+(`backtest_regime_compare.py`: `if _TC_CFG.get('enabled') and regime not in
+('RED_MARKET','BEARISH')`). 2022 is a sustained bear, so **the 2022 bear gate cannot exercise
+live's dominant signal type — because live does not emit that type in a bear.** That is a
+property of the strategy, not a bug. Consequence: 2022 is a genuine *downside* check but is
+**not** a test of a TREND_CONFIRM-derived rule. The gate now runs with `--trades-log` and prints
+the **realized signal-type mix** of every arm, warning loudly when TREND_CONFIRM is <10% of the
+trades; default years are `2022,2024` so a bull year where TC actually fires is always included.
+This is the difference between a gate that passes silently on zero relevant trades and one that
+tells you it had none.
+
+**Worker B now has a promotion path.** `backtest_regime_compare.py` gained
+`--rank-scores FILE` (CSV `date,symbol,score`), forwarded by `confirm_backtest.py
+--rank-scores`. The score orders signals **within** the quality tier, never over it —
+deliberately, because the panel showed GOLD>PREMIUM is the one robust thing the current ranking
+does (+8.3pp at 20d, significant every month) while the order *within* PREMIUM is inert. Unscored
+signals sort behind every scored one, so a partial model degrades gracefully. Default path
+(`rank_scores=None`) is byte-identical — pinned by a test, since every documented baseline
+depends on it.
+
+**Panel plumbing.** Panel freshness is now decoupled from agent invocation: the panel refreshes
+on new data *or* on its own ~daily cadence (`PANEL_REFRESH_HOURS = 20`), because `update_panel`'s
+second job — advancing forward metrics on rows still accruing bars — previously never ran on a
+quiet day. And "new file" now comes from an explicit record (`research/panel/ingested_files.json`,
+written after every successful update, including files deliberately skipped as unusable) instead
+of being inferred by differencing disk against `panel.source_file`. The old inference meant any
+CSV that `load_signal_rows` silently drops (empty, or no `Symbol` column) read as new **forever** —
+the same class of bug as the daytrade CSVs that burned 12 invocations, which had been patched by
+special-casing modes rather than by fixing the mechanism.
+
+`tests/test_research_runner.py` is now 21 tests covering all of the above.

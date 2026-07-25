@@ -1,6 +1,11 @@
 panel/panel.parquet
 ledger/runner_state.json
 
+# Which signal CSVs update_panel.py has examined. Derived state that belongs to this
+# machine's panel.parquet (also ignored) — committing it would let one machine's
+# ingest history suppress another's "new file" detection.
+panel/ingested_files.json
+
 # Transient tick state. runner.py's _commit_ledger does `git add -- research/ledger`,
 # which otherwise sweeps the flock file into a ledger commit (it did, in tick 29).
 ledger/.runner.lock

@@ -549,9 +549,32 @@ def _stamp_residual_momentum(signals, historical, ret_window: int = 15,
         s['resid_mom'] = stock_ret - beta * spy_ret_n
 
 
+def load_rank_scores(path: str) -> dict:
+    """Load a candidate ranking model's predictions: {(date, symbol): score}.
+
+    This is the promotion path for a RANKING candidate. Before it, the only lever
+    confirm_backtest.py could test was an ATR trail multiplier, so a per-signal
+    ranking model (the "real ranking upgrade" §7 called for, and the direction the
+    live-panel work points at) had no way to be validated against history at all.
+
+    Format: CSV with columns date,symbol,score. Higher score = rank earlier. Signals
+    absent from the file keep the default ordering behind every scored signal, so a
+    partial model degrades gracefully instead of silently reordering everything.
+    """
+    df = pd.read_csv(path)
+    missing = {'date', 'symbol', 'score'} - set(df.columns)
+    if missing:
+        raise ValueError(f"--rank-scores {path}: missing column(s) {sorted(missing)}; "
+                         f"expected date,symbol,score")
+    out = {}
+    for r in df.itertuples(index=False):
+        out[(pd.Timestamp(r.date).normalize(), str(r.symbol).strip().upper())] = float(r.score)
+    return out
+
+
 def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0,
                 residual_dist: bool = False, live_tiebreak: bool = False,
-                sleeve_slots: int = 0):
+                sleeve_slots: int = 0, rank_scores: dict | None = None):
     """Return a new signal list with at most *max_per_day* entries per trading
     day, selected by the same ranking used in auto_portfolio.py.
 
@@ -595,12 +618,27 @@ def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0,
                 float(s.get('sma_dist_pct', 0) or 0),    # closer to trend first
             )
 
+    def _score_key(s, dt):
+        """Candidate-model ordering, applied WITHIN the quality tier.
+
+        Quality stays the primary key deliberately: the live-panel measurement found
+        GOLD > PREMIUM is the one robust thing the current ranking does (+8.3pp at
+        20d, significant in every month), while the sub-ranking WITHIN PREMIUM is
+        inert. So a candidate model's job is to order the PREMIUM sea, not to
+        relitigate the tier. Unscored signals sort behind every scored one.
+        """
+        if rank_scores is None:
+            return ()
+        hit = rank_scores.get((dt, str(s.get('symbol', '')).strip().upper()))
+        return (0, -hit) if hit is not None else (1, 0.0)
+
     result = []
     for dt in sorted(by_date.keys()):
         day_sigs = sorted(
             by_date[dt],
             key=lambda s: (
                 _QUALITY_RANK.get(s.get('quality', 'STANDARD'), 9),
+            ) + _score_key(s, dt) + (
                 -float(s.get('win_prob', 0) or 0),       # higher WinProb first
                 -float(s.get('rr', 0) or 0),             # higher R:R first
             ) + _tiebreak(s),
@@ -1303,7 +1341,8 @@ def run_year(year, symbols, capital,
              normal_bounce_cap=0, start_date_override=None, realistic_sizing=False,
              bounce_sma200_gate=False, residual_dist=False, panic_throttle=False,
              bounce_sma200_bear_only=False, live_tiebreak=False,
-             sleeve_symbols=None, sleeve_slots=0, panic_bear_only=False):
+             sleeve_symbols=None, sleeve_slots=0, panic_bear_only=False,
+             rank_scores=None):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     if start_date_override and start_date_override[:4] == str(year):
@@ -1413,7 +1452,8 @@ def run_year(year, symbols, capital,
     # NEW PREMIUM+ pooled-cap — mirrors auto_portfolio.py MAX_ADDS_PER_SCAN logic.
     # Default pooled_cap=10 reproduces the documented +195% 5yr compound.
     # Requires --no-tc + --bounce-bear-gate 15 to reproduce the +195% baseline.
-    new_premium_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap)
+    new_premium_pooled = _pooled_cap(new_premium, max_per_day=pooled_cap,
+                                     rank_scores=rank_scores)
     rpt = simulate(new_premium_pooled, start, end, end_prices, historical, capital,
                    tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}', **sim_kw)
     print_report(rpt, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} ★', len(new_premium_pooled), spy_info, show_hold_split=True)
@@ -2067,6 +2107,14 @@ PARAMETER REFERENCE:
                    help='High-conviction sleeve universe (e.g. input/plus.txt) run ALONGSIDE the core '
                         '--watchlist (e.g. input/spy_plus.txt). Union-fetched; sleeve names get reserved '
                         'admission slots (--sleeve-slots). Adds a +Sleeve A/B row.')
+    p.add_argument('--rank-scores', default=None, metavar='FILE',
+                   help='CSV (date,symbol,score) of a candidate RANKING model\'s predictions. '
+                        'Higher score ranks earlier, applied WITHIN the quality tier (GOLD>PREMIUM '
+                        'is preserved — the live panel shows the tier is the one robust thing the '
+                        'current ranking does, while the order within PREMIUM is inert). Signals '
+                        'absent from the file sort behind every scored one. This is the promotion '
+                        'path for a ranking candidate; without it only an ATR multiplier could be '
+                        'confirmed against history.')
     p.add_argument('--sleeve-slots', type=int, default=3,
                    help='How many of the pooled daily cap to RESERVE for sleeve-universe names '
                         '(default 3 of 10). Only active with --sleeve-watchlist. Neither bucket wastes '
@@ -2167,6 +2215,16 @@ def main():
               f"→ {len(merged)} union symbols; reserving {args.sleeve_slots}/{args.pooled_cap} daily slots for sleeve")
         symbols = merged
 
+    rank_scores = None
+    if args.rank_scores:
+        rank_scores = load_rank_scores(args.rank_scores)
+        dates = {d for d, _ in rank_scores}
+        print(f"⚠  --rank-scores: {len(rank_scores)} scored (date,symbol) pairs over "
+              f"{len(dates)} dates from {args.rank_scores}. Applied WITHIN quality tier; "
+              f"unscored signals rank behind scored ones.")
+        print("   Judge on the REALISTIC arm (§11) and check >15d WR has not shrunk (§13). "
+              "A model fitted on the same period you score here is IN-SAMPLE — walk it forward.")
+
     for year in years:
         run_year(year, symbols, args.capital,
                  slippage_pct=args.slippage, commission=args.commission,
@@ -2191,7 +2249,8 @@ def main():
                  live_tiebreak=args.live_tiebreak,
                  sleeve_symbols=sleeve_symbols,
                  sleeve_slots=args.sleeve_slots,
-                 panic_bear_only=args.panic_throttle_bear_only)
+                 panic_bear_only=args.panic_throttle_bear_only,
+                 rank_scores=rank_scores)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")

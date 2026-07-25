@@ -33,6 +33,37 @@ from research.panel.build_panel import (  # noqa: E402
     fetch_bars, load_signal_rows,
 )
 
+# Every signal file this script has SEEN, whether or not it produced panel rows.
+#
+# The runner used to compute "new files" as (files on disk) - (panel.source_file).
+# But load_signal_rows() silently drops a CSV that is empty or has no Symbol column,
+# so such a file never appears in source_file and reads as new FOREVER — an agent
+# invocation every 30 minutes on no real new data. That is exactly what the ~283
+# daytrade CSVs did on 2026-07-24 (12 wasted invocations); it was patched then by
+# special-casing modes rather than by fixing the mechanism. Recording what was
+# examined, rather than inferring it from what survived, fixes the class of bug.
+INGESTED = OUT_PARQUET.parent / 'ingested_files.json'
+
+
+def _record_ingested(modes: set[str]) -> int:
+    """Persist every tracked-mode signal file present on disk right now.
+
+    Called only after a successful write, so a crashed run does not mark files as
+    consumed. Deliberately records unusable files too — they have been examined and
+    will never yield rows, so re-examining them every tick is pure waste.
+    """
+    import json
+
+    from research.panel.build_panel import _mode_from_filename
+    from utils import list_files
+
+    seen = sorted(f for f in list_files('scanner_output/signals', 'signals_*.csv')
+                  if _mode_from_filename(f) in modes)
+    INGESTED.parent.mkdir(parents=True, exist_ok=True)
+    INGESTED.write_text(json.dumps({'modes': sorted(modes), 'files': seen}, indent=1))
+    return len(seen)
+
+
 METRIC_COLS = [
     'bars_available', 'entry_used', 'day0_low_pct', 'day0_high_pct',
     'price_in_bar_range', 'price_vs_bar_close_pct',
@@ -73,8 +104,11 @@ def main() -> int:
     print(f"open rows needing re-measurement: {len(open_rows)}"
           f" (frozen: {len(panel) - len(open_rows)})")
 
+    modes = set(args.modes.split(','))
     if not len(new_rows) and not len(open_rows):
-        print("nothing to do.")
+        # Still record: these files have been examined. Any that are unusable would
+        # otherwise read as "new" on every future tick.
+        print(f"nothing to do. (recorded {_record_ingested(modes)} seen files)")
         return 0
     if args.dry_run:
         print("--dry-run: no write.")
@@ -117,6 +151,7 @@ def main() -> int:
 
     combined.to_parquet(path, index=False)
     print(f"wrote {len(combined)} rows -> {path}")
+    print(f"recorded {_record_ingested(modes)} seen signal files -> {INGESTED.name}")
 
     m = combined.dropna(subset=['mae_pct', 'mfe_pct'])
     bad = m[m['mae_pct'] > m['mfe_pct']]

@@ -11,9 +11,9 @@ Why this exists
 ---------------
 The champion backtest and live production trade almost disjoint signal populations:
 live runs TREND_CONFIRM Path A (config.py:226-228) while every documented champion
-baseline was measured with --no-tc. The live archive is ~92% TREND_CONFIRM / ~5%
-BOUNCE; the backtest stream is ~99.7% BOUNCE. The panel is the only place live's
-real distribution can be studied.
+baseline was measured with --no-tc. The live archive is 87% TREND_CONFIRM / 8%
+BOUNCE / 4% CONTINUATION (n=1675 episodes); the backtest stream is ~99.7% BOUNCE.
+The panel is the only place live's real distribution can be studied.
 
 Day-0 handling (important for stop research)
 --------------------------------------------

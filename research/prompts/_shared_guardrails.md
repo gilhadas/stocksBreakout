@@ -100,17 +100,23 @@ Never propose a specific trail multiplier *from* a fixed-% sweep — the sweep c
 
 1. Measured on the panel with episode-deduped `n >= 30`, using `entry_used` (never the raw
    `Price` column), and reported against its no-op baseline per the sweep-discipline rules above.
-2. Confirmed by `research/confirm_backtest.py` against **2022** — the panel window (Apr–Jul 2026)
-   contains **no sustained bear**, and stops matter most in one.
-   ⚠ **Known unresolved flaw in this gate — state it whenever you invoke it.** `confirm_backtest.py`
-   hardcodes `--no-tc`, which *disables TREND_CONFIRM* — the 87% of live signals your panel finding
-   is most likely drawn from. So the gate currently confirms candidate rules against a ~99.7%-BOUNCE
-   population. A pass is therefore **not** evidence the rule works on live's stream, and a fail may
-   be for an irrelevant reason. Report the gate result *with this caveat attached*; do not treat it
-   as settled. Fixing the gate is a human decision, not yours to make unilaterally.
-   ⚠ **The gate only accepts an ATR-trail multiplier (`--mult`).** There is no path to confirm a
-   *ranking* candidate (Worker B's continuous model). Until one exists, picking findings are
-   **diagnostic-only** — write them up as such rather than proposing them for live.
+2. Confirmed by `research/confirm_backtest.py` — the panel window (Apr–Jul 2026) contains **no
+   sustained bear**, and stops matter most in one. Defaults to `--years 2022,2024` and
+   `--population live` (TREND_CONFIRM Path A enabled, exactly as production runs it).
+   - `--population champion` passes `--no-tc` and reproduces the documented §7–§13 baselines.
+     That is a **different signal population** (~99.7% BOUNCE vs live's 87% TREND_CONFIRM) —
+     never mix its numbers with a live-arm result.
+   - **Ranking candidates:** `--rank-scores FILE` (CSV `date,symbol,score`) is the promotion path
+     for Worker B's continuous model. Scores order signals *within* the quality tier, never over
+     it — GOLD>PREMIUM is measured and robust; the order within PREMIUM is what is inert and what
+     your model is for. Unscored signals rank behind scored ones. **A model scored on the period
+     it was fitted on is in-sample — walk it forward before you run this.**
+   - ⚠ **A limit you must state in any 2022 result.** TREND_CONFIRM is blocked in
+     `RED_MARKET`/`BEARISH`, so a bear year **cannot exercise live's dominant signal type** —
+     live does not emit that type in a bear. 2022 is therefore a genuine *downside* check, not a
+     test of a TREND_CONFIRM-derived rule. The gate prints the realized signal-type mix and warns
+     when TREND_CONFIRM is <10% of trades; **read that output and quote it**, do not assume the
+     gate exercised what your finding was drawn from.
 3. Ship bar: **≥ +0.10 Sharpe on the `--realistic-sizing` arm** (CLAUDE.md §11 standing rule).
    Idealized numbers are reference only.
 4. **`>15d` hold win-rate must NOT shrink** (§13 halt criterion). That bucket is the entire edge

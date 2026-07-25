@@ -39,6 +39,19 @@ for ("real ranking upgrade requires per-signal features + a continuous model").
 - Keep it simple and inspectable. A linear/GBM model you can explain beats a black box that
   cannot be reasoned about at 09:35 on a live trading morning.
 
+**You now have a promotion path.** Write your walk-forward holdout predictions to a CSV with
+columns `date,symbol,score` and run:
+
+```
+python research/confirm_backtest.py --rank-scores <your_preds.csv>
+```
+
+It re-runs the pooled-cap admission with your scores ordering signals **within** the quality tier
+(GOLD>PREMIUM is preserved — that tier split is measured and robust; the order *within* PREMIUM is
+the inert part your model exists to fix). Judge on the REALISTIC arm, and check `>15d` WR did not
+shrink. Score only *holdout* dates — scoring the dates you fitted on is in-sample and proves
+nothing.
+
 ## Explicitly out of scope
 
 **Do not test more bucket/tiebreak/cap variants.** Eleven have been tested and all were null
