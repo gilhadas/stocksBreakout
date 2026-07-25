@@ -56,12 +56,20 @@ def _save_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
 
 
+# Modes the panel actually ingests (must match update_panel.py's default). daytrade
+# signals are NOT tracked (daytrade is retired), so they must be excluded here too —
+# otherwise ~283 daytrade CSVs look perpetually "new", the panel update ignores them,
+# and the runner invokes an agent every single tick on no real new data.
+PANEL_MODES = ('swing', 'longterm')
+
+
 def new_signal_files() -> list[str]:
-    """Signal CSVs on disk/S3 that the panel has never seen."""
+    """Signal CSVs on disk/S3, in tracked modes, that the panel has never seen."""
     import pandas as pd
     from utils import list_files
 
-    available = set(list_files('scanner_output/signals', 'signals_*.csv'))
+    available = {f for f in list_files('scanner_output/signals', 'signals_*.csv')
+                 if f.split('_')[1:2] and f.split('_')[1] in PANEL_MODES}
     if not PANEL.exists():
         return sorted(available)
     known = set(pd.read_parquet(PANEL, columns=['source_file'])['source_file'].unique())
@@ -160,11 +168,29 @@ def main() -> int:
     rc = invoke_agent(role)
 
     state['ticks'] += 1
-    state['last_role'] = role
     state['last_tick'] = datetime.now(timezone.utc).isoformat()
-    _save_json(STATE, state)
-    budget['agent_invocations_used'] = budget.get('agent_invocations_used', 0) + 1
-    _save_json(BUDGET, budget)
+
+    # Only a SUCCESSFUL invocation costs budget and advances the role rotation. A
+    # session-limit rejection (the CLI prints "You've hit your session limit" and
+    # exits nonzero) produced no research — counting it would burn the cap on
+    # nothing and would flip the rotation so the same role never retries. Leave
+    # last_role unchanged so the next tick retries the SAME role once capacity
+    # returns, and record consecutive failures so the runner can back off.
+    if rc == 0:
+        state['last_role'] = role
+        state['consecutive_failures'] = 0
+        _save_json(STATE, state)
+        budget['agent_invocations_used'] = budget.get('agent_invocations_used', 0) + 1
+        _save_json(BUDGET, budget)
+    else:
+        state['consecutive_failures'] = state.get('consecutive_failures', 0) + 1
+        _save_json(STATE, state)
+        print(f"  agent invocation FAILED (rc={rc}) — not charging budget "
+              f"(used stays {budget.get('agent_invocations_used', 0)}/"
+              f"{budget.get('agent_invocations_cap', 0)}); "
+              f"{state['consecutive_failures']} consecutive failure(s). "
+              f"Likely the Claude session limit; will retry role={role} next tick.")
+        return rc
 
     # Persist the tick's ledger writes. Unattended, an agent that appended to
     # results.jsonl / decisions.md but didn't commit would lose that work on the
