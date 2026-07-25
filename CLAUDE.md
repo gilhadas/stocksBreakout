@@ -1103,12 +1103,24 @@ measured **87% TREND_CONFIRM / 8% BOUNCE / 4% CONTINUATION** (n=1675 episodes).
 
 ### §14.2 Promotion-gate and panel-plumbing fixes (2026-07-25)
 
-**The promotion gate was validating the wrong population — fixed.** `confirm_backtest.py`
-hardcoded `--no-tc`, which *disables* TREND_CONFIRM, so the mandatory gate confirmed candidate
-rules against a ~99.7%-BOUNCE stream while live is 87% TREND_CONFIRM. Now `--population live`
-(default) leaves TC Path A enabled exactly as production runs it; `--population champion`
-restores `--no-tc` for reproducing the documented §7–§13 baselines. The two are different
-populations — never mix their numbers.
+**The promotion gate's population is now an explicit choice.** `confirm_backtest.py` originally
+hardcoded `--no-tc`. ⚠ **That was deliberate, not a slip** — its first docstring said it "runs the
+champion config" and `BASE_ARGS` was a verbatim copy of the canonical champion CLI in §7. Using
+the documented champion as the reference makes gate numbers comparable to every §7–§13 baseline,
+which is a defensible reason.
+
+What was never reconciled: `--no-tc` *disables* TREND_CONFIRM, so the gate ran a ~99.7%-BOUNCE
+stream while live is 87% TREND_CONFIRM — meaning it could not confirm a panel-derived rule on the
+population live actually trades. H4 (the divergence) had been logged **that same morning, five
+hours before this script was written**, yet nothing in the docstring, the guardrails, or the
+ledger records the tradeoff being weighed. Two decisions made the same day, never checked against
+each other.
+
+Now explicit rather than implicit: `--population live` (default, TC Path A as production runs it)
+or `--population champion` (`--no-tc`, reproducing documented baselines). Both arms of any run use
+the same population, so the ship bar (candidate vs *its own* baseline, ≥ +0.10 Sharpe) stays
+internally valid either way — what changes is which population the answer is about. Never mix
+numbers across the two.
 
 ⚠ **A structural limit that flags cannot fix, and that the gate now surfaces rather than
 hides.** TREND_CONFIRM is blocked in `RED_MARKET`/`BEARISH`

@@ -265,12 +265,46 @@ def test_rank_scores_rejects_a_bad_schema(tmp_path):
 
 
 # ── The promotion gate must target the population live actually trades ────────────
-def test_confirm_backtest_defaults_to_the_live_population():
-    """It hardcoded --no-tc for a month, so the mandatory gate confirmed candidate
-    rules against a ~99.7%-BOUNCE stream while live is 87% TREND_CONFIRM."""
-    src = (ROOT / 'research' / 'confirm_backtest.py').read_text()
-    assert "'--no-tc'" not in src.split('BASE_ARGS')[1].split(']')[0], \
-        '--no-tc must not be unconditional in BASE_ARGS'
-    assert "--realistic-sizing" in src, '§11 requires judging on the realistic arm'
-    assert "'--trades-log'" in src, 'needed to report the realized signal-type mix'
+def _confirm_backtest():
+    """Import the gate module by path (research/ has no package __init__)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        'confirm_backtest', ROOT / 'research' / 'confirm_backtest.py')
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_confirm_backtest_population_is_a_choice_not_a_hardcode():
+    """--no-tc was hardcoded until 2026-07-25. That was a DELIBERATE 'run the champion
+    config' choice, not a bug — but it was never reconciled against H4, so the gate
+    could not confirm a panel-derived rule on live's 87%-TREND_CONFIRM population.
+    Asserts on the real runtime value, not on source text."""
+    m = _confirm_backtest()
+    assert '--no-tc' not in m.BASE_ARGS, \
+        'population must be selected via --population, never hardcoded in BASE_ARGS'
+    assert '--realistic-sizing' in m.BASE_ARGS, '§11 requires judging on the realistic arm'
+    assert '--trades-log' in m.BASE_ARGS, 'needed to report the realized signal-type mix'
+
+
+def test_confirm_backtest_champion_population_restores_no_tc():
+    """The documented §7-§13 baselines are only reproducible with --no-tc, so that
+    path must remain available — it is a different population, not a wrong one."""
+    m = _confirm_backtest()
+    import inspect
+
+    src = inspect.getsource(m.run)
+    assert "population == 'champion'" in src and "--no-tc" in src, \
+        '--population champion must still pass --no-tc'
+
+
+def test_confirm_backtest_log_paths_are_consistent():
+    """--skip-baseline must look for exactly what run() writes (they diverged for the
+    ranking arm: 'multNone' vs 'rank')."""
+    m = _confirm_backtest()
+    assert m.log_path('baseline', 'live', 2.0, '2022,2024').name \
+        == 'baseline_live_mult2.0_2022-2024.log'
+    assert m.log_path('baseline', 'live', None, '2022,2024').name \
+        == 'baseline_live_rank_2022-2024.log'
 

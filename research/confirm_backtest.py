@@ -10,19 +10,30 @@ paired comparison.
 
 This IS a simulation, unlike the panel. Label its numbers as such.
 
-Two things this script got wrong until 2026-07-25, both worth understanding
-----------------------------------------------------------------------------
-1. It hardcoded `--no-tc`, which DISABLES TREND_CONFIRM. Live runs TREND_CONFIRM
-   Path A (config.py), and the live archive is 87% TREND_CONFIRM / 8% BOUNCE, while
-   `--no-tc` produces a ~99.7% BOUNCE stream. So the mandatory gate was confirming
-   candidate rules against a population live barely produces: a pass was not evidence
-   for live, and a fail could be for an irrelevant reason. Default is now
-   `--population live`. `--population champion` restores `--no-tc` for reproducing the
-   documented CLAUDE.md baselines.
+Why `--population` exists (history — do not "simplify" this away)
+-----------------------------------------------------------------
+This script originally hardcoded `--no-tc`. That was **deliberate, not a slip**: its
+first docstring said it "runs the champion config", and BASE_ARGS was a verbatim copy
+of the canonical champion CLI in CLAUDE.md §7. Using the documented champion as the
+reference point is a defensible choice — it makes gate numbers comparable to every
+baseline in §7-§13.
 
-2. It accepted only `--mult` (an ATR trail multiplier), so a candidate RANKING model
-   had no promotion path at all. `--rank-scores FILE` now forwards a candidate
-   ranking's predictions (date,symbol,score) into the pooled-cap ordering.
+What was never reconciled is that `--no-tc` DISABLES TREND_CONFIRM, while live runs
+TC Path A: the live archive is 87% TREND_CONFIRM / 8% BOUNCE, and `--no-tc` yields a
+~99.7% BOUNCE stream. H4 (the population divergence) had been logged that same morning
+— five hours before this script was written — but nothing in the docstring, the
+guardrails, or the ledger records the tradeoff being weighed. So the gate could not
+confirm a panel-derived (TC) rule on the population live actually trades.
+
+Hence the explicit choice instead of a silent default:
+  * `--population live`      (default) TC Path A enabled, exactly as production runs.
+  * `--population champion`  passes `--no-tc`, reproducing the documented baselines.
+Both arms of a run always use the SAME population, so the ship bar (candidate vs its
+own baseline, >= +0.10 Sharpe) stays internally valid either way. What changes is
+which population the answer is *about* — never mix numbers across the two.
+
+`--rank-scores` likewise widened the gate: it previously accepted only `--mult` (an ATR
+trail multiplier), so a candidate RANKING model had no promotion path at all.
 
 A structural limit you cannot fix by flags — READ THIS BEFORE TRUSTING A 2022 RESULT
 ------------------------------------------------------------------------------------

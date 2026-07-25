@@ -105,7 +105,10 @@ Never propose a specific trail multiplier *from* a fixed-% sweep — the sweep c
    `--population live` (TREND_CONFIRM Path A enabled, exactly as production runs it).
    - `--population champion` passes `--no-tc` and reproduces the documented §7–§13 baselines.
      That is a **different signal population** (~99.7% BOUNCE vs live's 87% TREND_CONFIRM) —
-     never mix its numbers with a live-arm result.
+     never mix its numbers with a live-arm result. (The gate hardcoded `--no-tc` until
+     2026-07-25. That was a deliberate "run the champion config" choice, not a bug — it was
+     simply never reconciled against H4. Both arms of a run share a population, so the ship
+     bar stays valid either way; only the *scope* of the answer changes.)
    - **Ranking candidates:** `--rank-scores FILE` (CSV `date,symbol,score`) is the promotion path
      for Worker B's continuous model. Scores order signals *within* the quality tier, never over
      it — GOLD>PREMIUM is measured and robust; the order within PREMIUM is what is inert and what
