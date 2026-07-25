@@ -264,3 +264,114 @@ has room to add value. It does not need to reorder GOLD; it needs to order the P
 - **Live config: no proposal.** Do not touch `_compute_priority_score`, `MAX_ADDS_PER_SCAN`,
   or the tiebreak. The measured direction of any change would need to come from the
   walk-forward model result, not from this decomposition alone.
+
+
+---
+
+## 2026-07-25 - worker-stops - H3: behaviour-bins pre-test - NULL (kill condition met)
+
+### What this closes
+
+The final H3 task in `hypotheses.md`:
+
+> Next task: run H1's cohort analysis on cheap behaviour bins (ATR percentile, RSI, Gap%, Vol)
+> first. Only if those show structure worth explaining should pattern labels be computed and
+> tested for *incremental* power over them.
+
+My prior stop-sweep entry mentioned in passing that tertile bins "pass for free" but never
+wrote a standalone H3 result to the ledger. Doing that now.
+
+### Panel state (unchanged for frozen-episode analysis)
+
+New rows landed since the H1 pass (9862 -> 9882), but **frozen-episode count is identical
+(1675, date range 2026-04-01 -> 2026-06-08)** -- the fresh rows are still accruing forward
+bars. So no new sub-slicing power is available. Re-running H1 tasks would produce identical
+numbers, hence skipped per the "do not redo" rule.
+
+### Method
+
+Restricted to `TREND_CONFIRM` (n=1459), which is the only cohort with enough episodes to
+survive tertile splits (BOUNCE n=134 -> ~45/bin, sub-slice noise dominates any signal).
+Tertile-binned on the four cheapest behaviour features present in the panel with 100%
+coverage: `RSI`, `Gap%`, `Vol`, `SMA_Dist%`. (No ATR column in the panel; treated as
+out-of-scope for cheap-features.) For each of the 12 bins:
+
+1. Winner-MAE p50/p90 (winners = `ret_30d > 0`, 58.9% base rate).
+2. Stop-distance sweep in {5, 7, 10, 15, 20, NO-STOP}%, expectancy at each.
+3. Bootstrap 95% CI on the no-stop expectancy; flag whether the best-stop expectancy sits
+   inside it.
+
+### Results
+
+**Winner-MAE across bins is nearly flat** (TC-overall baseline: p50=-3.09, p90=-10.71):
+
+| Feature   | p50 range across LO/MID/HI | p90 range |
+|-----------|---------------------------:|----------:|
+| RSI       |                     0.66pp |    0.22pp |
+| Gap%      |                     0.97pp |    3.17pp |
+| Vol       |                     0.27pp |    2.18pp |
+| SMA_Dist% |                     0.84pp |    1.30pp |
+
+The largest single spread (Gap% p90: -8.87 -> -12.04) is 3.17pp -- ~30% of the -10.71
+baseline. Every other range is <=2.2pp. There is no behaviour bin whose winners bleed
+materially differently from the TC average.
+
+**Stop-sweep: every bin's apparent optimum sits inside the no-stop CI95.**
+- 7/12 bins: monotone-to-NO-STOP (converging on no stop entirely).
+- 5/12 bins: apparent optimum at stop=20%, delta vs no-stop = +0.03 to +0.22pp.
+- Max delta observed: +0.22pp (Vol_HI, on n=477, no-stop CI95 [5.46, 11.78]) - well
+  inside the CI, i.e. indistinguishable from noise.
+
+### Verdict: NULL. H3 kill condition met.
+
+Per the guardrails sweep-discipline rule: if the apparent optimum is inside the no-stop
+CI and/or the sweep is monotone-to-no-stop, the honest finding is **stops add no
+measurable expectancy** *on this panel window*, and cheap behaviour bins add no
+structure to explain. **Pattern labels therefore cannot be expected to add incremental
+power** over features that already fail to reveal any -- H3's precondition ("only if
+those show structure worth explaining should pattern labels be computed") is negated.
+
+### Caveats (mandatory to staple)
+
+1. Panel window (Apr-Jun 2026 frozen episodes) contains **no sustained bear** (BBG15's
+   ≥15d SPY<SMA200 condition was not triggered). This does NOT refute the live ATR×2.0
+   trail; it only says a *fixed-%* stop shows no measurable expectancy edge, per-bin or
+   in aggregate, in this window.
+2. **30-bar truncation flatters no-stop** systematically -- a no-stop loser can only
+   bleed for 30 days here; in reality it bleeds until stopped by the live trail.
+3. **Fixed-% != trailing.** Panel measures a static level; live uses an ATR trail that
+   ratchets up. Panel sweep is at best a lower bound on the trail's own curve.
+4. **Sizing not held constant across stop widths.** Per-trade %-return expectancy is
+   NOT comparable across stop widths without holding dollar-risk constant.
+
+None of these caveats change the H3-specific conclusion, because the H3 test is
+**relative between bins under identical measurement**, not absolute.
+
+### Diagnostic side-note (forwarded to H2/picking, not a stop finding)
+
+`ret30_mean` varies **11.09 -> 25.36pp across Gap%/SMA_Dist tertiles** inside TC (see
+raw table in `research/tmp/h3_analysis.py` output). This is a **ranking signal**, not
+an exit signal -- worth flagging for worker-picking's continuous-model task (§decisions
+2026-07-25 picking), whose feature list already includes both. No action from the stops
+side.
+
+### Proposal to lead
+
+- **Close H3 as `closed-null`.** Kill condition per hypotheses.md met.
+- **Close H1 as `closed-null`.** All three H1 tasks (coverage, winner-MAE, stop-sweep)
+  are logged, all optima sit inside their no-stop CI95, and the H1 kill condition ("no
+  cohort's optimum differs from ATR×2.0 by more than the cohort's own bootstrap CI") is
+  met. Note that "ATR×2.0" was never directly comparable here -- the sweep tested
+  fixed-%, not ATR-multiples -- so what H1 actually proves on this window is stronger:
+  **no fixed stop distance shows a measurable edge over no-stop, on any cohort**. That
+  either confirms the live trail is fine or the panel window has no bear stress to
+  discriminate on. Either way, no proposal to change live is warranted from panel data
+  alone; the mandatory 2022 gate (`research/confirm_backtest.py`) exists precisely for
+  this reason and there is currently nothing to feed it.
+- **No live config proposal.** Live ATR×2.0 trail stays.
+- **No new stops-side work is queued.** Worker-stops is now idle until either:
+  (a) the lead opens a new hypothesis owned by `stops`; or
+  (b) enough new frozen episodes accumulate to justify a re-run with materially
+  different power (rough guide: another ~50% more episodes, i.e. ~2500 total, which at
+  the current ~25 episodes/day means roughly late September before the analysis moves).
+
