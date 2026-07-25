@@ -375,3 +375,129 @@ side.
   different power (rough guide: another ~50% more episodes, i.e. ~2500 total, which at
   the current ~25 episodes/day means roughly late September before the analysis moves).
 
+
+---
+
+## 2026-07-25 (worker-picking, tick 2) — H2 task 3: walk-forward continuous PREMIUM ranker — NULL
+
+### What this closes
+
+Task 3 in H2 ("continuous forward-return model, walk-forward"), scoped by the prior
+picking tick to fit **within the PREMIUM tier only** — because that tick had already
+proven GOLD>PREMIUM is measured and robust (+8.33pp/20d, CI [+3.17,+13.48]), so the
+addressable gap for a model is the inert within-PREMIUM sub-order (6-7 of the daily 10
+admits) and *not* the GOLD-vs-PREMIUM boundary.
+
+### Design
+
+- Universe: PREMIUM tier, `is_episode_start`, `ret_20d` not null. **n=1440**
+  (1330 TREND_CONFIRM / 78 BOUNCE / 28 CONTINUATION / 4 Momentum), Apr-Jun 2026.
+- Split: train `signal_date <= 2026-05-31` (1379 rows / 36 days),
+  holdout `>2026-05-31` (61 rows / 5 days: 2026-06-01/02/03/04/08).
+- Target: `ret_20d`, winsorized 1/99pct (extreme microcap gainers otherwise).
+- Model: **Ridge (closed-form, standardized).** Guardrails: "Keep it simple and
+  inspectable. A linear/GBM model you can explain beats a black box that cannot be
+  reasoned about at 09:35."
+- Features (16): Vol, Dist(±25), RSI, Gap%, SMA_Dist%(±50), TC_Score, Earnings, FinBERT
+  + missing indicator, GoldenCross, FreshCross, Type dummies, Sector dummies, mode.
+- Baseline: current effective within-PREMIUM order = **Vol descending** (WinProb 99.8%
+  NaN, R:R uniform 2.5, Dist capped ⇒ Vol is the differentiator — established last tick).
+
+### Primary result
+
+| Metric | Model | Baseline (Vol) |
+|---|---:|---:|
+| In-sample train R² (winsor ret_20d) | **0.225** | — |
+| In-sample train Spearman ρ | **+0.332** | — |
+| **Holdout Spearman ρ** | **−0.182** | −0.021 |
+| **Per-day top-3 paired delta (pp, n_days=4)** | **−9.74** | 0 (ref) |
+| ... bootstrap CI95 | **[−18.5, −2.19]** | — |
+| Per-day top-5 delta (n_days=3) | −10.73 | 0 |
+| Model tercile spread (top - bot, pp) | **−6.80** | −0.29 |
+| Days model wins top-3 | 1/4 | — |
+
+The training fit was decent (R²=0.225, ρ=+0.33) but did not transfer. Holdout Spearman
+is **negative and outside the top-3 delta CI95** — the model doesn't just fail to help,
+it actively reorders in the wrong direction on the six days it was tested on.
+
+### Why it failed (from the standardized coefficients)
+
+Top-magnitude coefs are **Sec_Technology +6.72** and **RSI −2.20** — the model learned
+"Tech beat everything in Apr-May" and "low-RSI beat high-RSI in Apr-May", both
+regime-specific patterns that reversed in early June. That is regime memorization on a
+36-day training window, not transferable signal.
+
+### Sensitivity — the null is robust
+
+Ran **36 variants** (3 feature sets × 3 targets × 4 ridge lambdas). Feature sets:
+`full` (16 feats), `no_sector` (drop 10 sector one-hots), `core` (Vol/Dist/RSI/Gap/
+SMA_Dist/TC_Score only). Targets: ret_10d/20d/30d. Lambdas: 0.3/1.0/3.0/10.0.
+
+| Feature set | Target | Holdout ρ range | Baseline Vol ρ |
+|---|---|---:|---:|
+| any | ret_20d | −0.19 to −0.08 | −0.021 |
+| any | ret_30d | −0.10 to −0.06 | −0.021 |
+| any | ret_10d | −0.14 to +0.074 | +0.019 |
+
+**Best variant: core / ret_10d / any λ: rho_m=+0.074 vs rho_vol=+0.019** — only
++0.055 rho advantage, top-3 delta +0.31pp on 4 days — indistinguishable from noise and
+a very generous read on a 5-day holdout.
+
+Ridge λ is **inert across two orders of magnitude** (0.3→10 gives identical results) —
+this is not variance-collapse from a too-flexible model; it is a **genuine absence of
+transferable signal** in the panel's current feature space on 36 training days.
+
+### Verdict: NULL. Kill condition met for the continuous-model path on this panel.
+
+- Holdout beats baseline in **zero** of the ret_20d/ret_30d variants tested.
+- The one weakly-positive (core / ret_10d) is +0.05 rho — well inside noise.
+- The addressable gap the prior tick identified (within-PREMIUM order is inert)
+  **is not addressable by a linear ranker on the current features**. Panel too short
+  and too regime-narrow for a features-heavy model to generalize.
+
+### Why I did NOT run `confirm_backtest.py`
+
+1. **Holdout already ruled the candidate out.** A gate exists to check that history
+   confirms an in-sample edge; there is no in-sample edge to confirm here.
+2. **The CSV has zero overlap with the gate's default 2022,2024 years.** Every 2022 or
+   2024 signal would be unscored and rank behind scored ones, of which there are none —
+   the gate would run baseline≡candidate at ~1-2 hours + ~2 agent invocations of
+   compute for guaranteed null output.
+3. Running with `--years 2026` (partial overlap) is technically possible but scoring
+   only 5 dates worth of signals inside a full-year backtest would produce a very small
+   effect vs run-to-run yfinance noise (§13.1: two identical runs differed by 0.25
+   Sharpe on 4-year averages). Not a meaningful test.
+
+The scores CSV (`research/tmp/premium_model_scores_holdout.csv`, 58 rows / 5 dates)
+is retained for a future lead review, not fed to the gate.
+
+### Proposal to lead
+
+- **Close H2 as `closed-null` on the continuous-model path** for the current panel.
+  H2 as a hypothesis is now fully answered: (a) admitted > skipped weakly-positive
+  (prior tick), (b) the direction is driven entirely by the Quality tier
+  (GOLD>PREMIUM +8.33pp/20d, prior tick), (c) within-PREMIUM ordering **cannot be
+  improved by a walk-forward Ridge on 36 training days** — the panel does not yet
+  support this analysis. The kill condition per hypotheses.md ("if admitted ≥ skipped
+  consistently and the cap rarely binds") is not textbook-met (cap binds 42/43 days),
+  but the *actionable* answer — is the ranking upgrade-able? — is now measured NULL on
+  the currently-available feature space and time window.
+- **Reopen H2 automatically when the panel reaches ~2× current training-window
+  length.** Rough guide: 70+ training days (roughly early September 2026) before a
+  refit is likely to escape regime memorization at n_features≈16.
+- **Standing recommendation from the prior tick still stands** (out of picking's
+  remit but noted here so it does not get lost): the WinProb calibration JSON exists
+  in `scanner_output/backtests/atr_trail_restore_20260702/` but is not deployed to
+  `scanner_output/`. It is inert on backtest BOUNCE-only data but on live's
+  TC-dominated stream it might not be — a cheap experiment for a human, orthogonal to
+  any model above.
+- **Live config: no proposal.** Do not touch `_compute_priority_score`,
+  `MAX_ADDS_PER_SCAN`, or the tiebreak. The measured evidence for changing the current
+  within-PREMIUM order is negative on this panel.
+
+### What is queued for picking
+
+Same shape as stops: idle until either (a) the lead opens a new picking hypothesis,
+or (b) the panel accumulates enough temporal coverage for a refit — see reopening
+guidance above.
+
