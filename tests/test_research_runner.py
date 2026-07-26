@@ -173,6 +173,33 @@ def test_agent_settings_allows_the_ledger_it_must_write():
     assert 'Edit(research/**)' in allow
 
 
+# ── Cost controls: pinned model + per-invocation budget cap ────────────────────────
+def test_invoke_agent_pins_model_and_budget(tmp_path, monkeypatch):
+    """2026-07-26 finding: with no --model, `claude -p` silently inherited whatever the
+    human's global CLI default was (Opus), burning ~46.6M cache-read tokens across 8
+    real invocations in two days. --max-budget-usd is the per-invocation circuit
+    breaker the invocation-count cap in budget.json can't provide (a single tick ran
+    94 turns / ~10.6M cache-read tokens and still didn't count against that cap,
+    because it exited nonzero)."""
+    monkeypatch.setattr(runner, 'LEDGER', tmp_path)
+    monkeypatch.setattr(runner, 'AGENT_SETTINGS', tmp_path / 'missing_settings.json')
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured['cmd'] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout='ok', stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    runner.invoke_agent('stops')
+
+    cmd = captured['cmd']
+    assert '--model' in cmd, "unattended agents must not inherit the interactive default"
+    assert cmd[cmd.index('--model') + 1] == runner.AGENT_MODEL
+    assert '--max-budget-usd' in cmd, "a runaway session must have its own cost cap"
+    assert cmd[cmd.index('--max-budget-usd') + 1] == str(runner.AGENT_MAX_BUDGET_USD)
+
+
 # ── AC-RR-07 ──────────────────────────────────────────────────────────────────────
 def test_panel_staleness_is_independent_of_new_files():
     """update_panel has two jobs: append new files, and ADVANCE open rows. The tick

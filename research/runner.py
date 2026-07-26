@@ -66,6 +66,23 @@ LOCK = LEDGER / '.runner.lock'
 # a Write under research/ succeeds, headless, with no prompt.
 AGENT_SETTINGS = RESEARCH / 'agent_settings.json'
 
+# Without an explicit --model, `claude -p` inherits whatever the human's global CLI
+# default happens to be at invocation time — found 2026-07-26 to be Opus, which ran
+# every tick on 07-24/07-25 (~46.6M cache-read tokens in two days across 8 real
+# invocations). This work — panel stats, sweeps, structured writeups against a
+# prescriptive guardrails doc — doesn't need Opus-level reasoning, and Opus is
+# ~5x Sonnet's cost for the same tokens. Pinned so a change to the interactive
+# default never silently changes what the unattended jobs cost.
+AGENT_MODEL = 'claude-sonnet-5'
+
+# budget.json's invocation cap counts invocations, not cost: 2026-07-24's worst tick
+# ran 94 turns / ~10.6M cache-read tokens and still exited nonzero (didn't even count
+# against the cap). --max-budget-usd is `claude -p`'s own circuit breaker, per
+# invocation. $5 covers every real tick observed so far (typical $2-8 on Opus, so
+# comfortably more on Sonnet) with room to spare, and stops a runaway one well short
+# of that.
+AGENT_MAX_BUDGET_USD = 5.0
+
 ROLE_PROMPTS = {'stops': 'worker_stops.md', 'picking': 'worker_picking.md',
                 'lead': 'lead.md'}
 WORKER_ROLES = ('stops', 'picking')
@@ -255,13 +272,15 @@ def invoke_agent(role: str, extra: str = '') -> int:
             "stop. Repeating completed work is a failure, not a safe default.\n\n"
             + context)
 
-    cmd = [str(CLAUDE_BIN), '-p', task, '--append-system-prompt', system]
+    cmd = [str(CLAUDE_BIN), '-p', task, '--append-system-prompt', system,
+           '--model', AGENT_MODEL, '--max-budget-usd', str(AGENT_MAX_BUDGET_USD)]
     if AGENT_SETTINGS.exists():
         cmd += ['--settings', str(AGENT_SETTINGS)]
     else:
         print(f"  WARNING: {AGENT_SETTINGS} missing — agent runs with the human's "
               f"interactive permissions and NO live-config deny rules.")
-    print(f"  invoking agent role={role} ({len(system)} chars of role prompt, "
+    print(f"  invoking agent role={role} model={AGENT_MODEL} "
+          f"budget=${AGENT_MAX_BUDGET_USD:.2f} ({len(system)} chars of role prompt, "
           f"{len(context)} chars of ledger context)")
     try:
         r = subprocess.run(cmd, cwd=str(ROOT), timeout=3600,
