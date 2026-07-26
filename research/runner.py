@@ -78,10 +78,15 @@ AGENT_MODEL = 'claude-sonnet-5'
 # budget.json's invocation cap counts invocations, not cost: 2026-07-24's worst tick
 # ran 94 turns / ~10.6M cache-read tokens and still exited nonzero (didn't even count
 # against the cap). --max-budget-usd is `claude -p`'s own circuit breaker, per
-# invocation. $5 covers every real tick observed so far (typical $2-8 on Opus, so
-# comfortably more on Sonnet) with room to spare, and stops a runaway one well short
-# of that.
-AGENT_MAX_BUDGET_USD = 5.0
+# invocation.
+#
+# Raised from $5 -> $12 on 2026-07-26: the first real 'lead' invocation (a heavier
+# role — it audits both workers' full output against a 12.6k-char prompt, not just
+# one focused task) needed headroom past $5. The 8 real worker ticks measured
+# 07-24/07-25, translated to Sonnet pricing, ranged $2-$9.57 (avg $8.36) -- several
+# would already have exceeded $5. $12 covers that observed range with margin instead
+# of routinely truncating a session before it finishes its work.
+AGENT_MAX_BUDGET_USD = 12.0
 
 ROLE_PROMPTS = {'stops': 'worker_stops.md', 'picking': 'worker_picking.md',
                 'lead': 'lead.md'}
