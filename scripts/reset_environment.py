@@ -40,7 +40,6 @@ FRESH_SUBDIRS = [
     "cache",
     "exits",
     "lists",
-    "live20",
     "logs",
     "macd_rsi",
     "outcomes",

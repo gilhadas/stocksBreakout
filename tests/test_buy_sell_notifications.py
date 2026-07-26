@@ -146,12 +146,6 @@ class TestDisabledNotifications:
         assert '# notifier.send_discord(subject, body)' in code, \
             "monitor_watch Discord should be disabled"
 
-    def test_live20_discord_disabled(self):
-        """live20_monitor.py Discord alerts should be commented out."""
-        code = Path('live20_monitor.py').read_text()
-        assert '# send_discord_alert(alerts, source=source, dry_run=dry_run)' in code, \
-            "live20_monitor Discord should be disabled"
-
     def test_position_health_disabled(self):
         """position_health.py notifications should be commented out."""
         code = Path('position_health.py').read_text()
