@@ -572,6 +572,21 @@ def load_rank_scores(path: str) -> dict:
     return out
 
 
+def rank_score_year_overlap(rank_scores: dict, years) -> tuple[list, list, list]:
+    """(overlap, missing, score_years) between a scores file and the simulated years.
+
+    Exists because a scores file covering none of the simulated years is a SILENT
+    NO-OP — every signal falls into the unscored bucket and the run reproduces the
+    baseline exactly, which reads as "the candidate changed nothing" rather than
+    "the candidate was never applied". Caught by worker-picking on 2026-07-25: a
+    model fitted on the panel covers Apr-Jul 2026, while the gate defaults to
+    2022,2024.
+    """
+    score_years = sorted({d.year for d, _ in rank_scores})
+    yrs = {int(y) for y in years}
+    return sorted(yrs & set(score_years)), sorted(yrs - set(score_years)), score_years
+
+
 def _pooled_cap(signals, max_per_day: int = 10, normal_bounce_cap: int = 0,
                 residual_dist: bool = False, live_tiebreak: bool = False,
                 sleeve_slots: int = 0, rank_scores: dict | None = None):
@@ -2224,6 +2239,24 @@ def main():
               f"unscored signals rank behind scored ones.")
         print("   Judge on the REALISTIC arm (§11) and check >15d WR has not shrunk (§13). "
               "A model fitted on the same period you score here is IN-SAMPLE — walk it forward.")
+
+        # A scores file that covers none of the simulated years is a SILENT NO-OP: every
+        # signal falls into the unscored bucket and the run reproduces the baseline
+        # exactly, looking like "the candidate changed nothing". Refuse instead.
+        # (Caught by worker-picking on 2026-07-25: a model fitted on the panel covers
+        # Apr-Jul 2026 only, while this gate defaults to 2022,2024.)
+        overlap, missing, score_years = rank_score_year_overlap(rank_scores, years)
+        if not overlap:
+            print(f"\n✗ --rank-scores covers year(s) {score_years} but this run "
+                  f"simulates {years} — ZERO overlap.")
+            print("  Every signal would be unscored and the result would silently equal the "
+                  "baseline.")
+            print("  Either score the years you are simulating, or run --years "
+                  f"{','.join(str(y) for y in score_years)}.")
+            return
+        if missing:
+            print(f"   NOTE: no scores for {missing} — those year(s) run at BASELINE ranking. "
+                  f"Only {overlap} actually tests the candidate.")
 
     for year in years:
         run_year(year, symbols, args.capital,

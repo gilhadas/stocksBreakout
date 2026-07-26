@@ -291,6 +291,51 @@ def test_rank_scores_rejects_a_bad_schema(tmp_path):
         load_rank_scores(str(f))
 
 
+def test_rank_score_year_overlap_zero(tmp_path):
+    """The regression: a scores file fitted on the panel (Apr-Jul 2026) run against the
+    gate's default --years 2022,2024 scores nothing and silently reproduces the
+    baseline. rank_score_year_overlap() is what main() uses to refuse that instead of
+    reporting a false null."""
+    from backtest_regime_compare import load_rank_scores, rank_score_year_overlap
+
+    f = tmp_path / 'scores.csv'
+    f.write_text('date,symbol,score\n2026-05-01,AAA,1.0\n2026-06-15,BBB,2.0\n')
+    rank_scores = load_rank_scores(str(f))
+
+    overlap, missing, score_years = rank_score_year_overlap(rank_scores, [2022, 2024])
+    assert overlap == [], "2026-only scores must not overlap a 2022,2024 run"
+    assert missing == [2022, 2024]
+    assert score_years == [2026]
+
+
+def test_rank_score_year_overlap_partial(tmp_path):
+    """Some simulated years are scored, some aren't -- those must run at baseline
+    ranking rather than being silently dropped or silently treated as fully scored."""
+    from backtest_regime_compare import load_rank_scores, rank_score_year_overlap
+
+    f = tmp_path / 'scores.csv'
+    f.write_text('date,symbol,score\n2024-03-01,AAA,1.0\n')
+    rank_scores = load_rank_scores(str(f))
+
+    overlap, missing, score_years = rank_score_year_overlap(rank_scores, [2022, 2024])
+    assert overlap == [2024]
+    assert missing == [2022]
+    assert score_years == [2024]
+
+
+def test_rank_score_year_overlap_full(tmp_path):
+    from backtest_regime_compare import load_rank_scores, rank_score_year_overlap
+
+    f = tmp_path / 'scores.csv'
+    f.write_text('date,symbol,score\n2022-06-01,AAA,1.0\n2024-06-01,BBB,2.0\n')
+    rank_scores = load_rank_scores(str(f))
+
+    overlap, missing, score_years = rank_score_year_overlap(rank_scores, [2022, 2024])
+    assert overlap == [2022, 2024]
+    assert missing == []
+    assert score_years == [2022, 2024]
+
+
 # ── The promotion gate must target the population live actually trades ────────────
 def _confirm_backtest():
     """Import the gate module by path (research/ has no package __init__)."""
