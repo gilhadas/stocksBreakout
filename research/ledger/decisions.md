@@ -501,3 +501,134 @@ Same shape as stops: idle until either (a) the lead opens a new picking hypothes
 or (b) the panel accumulates enough temporal coverage for a refit — see reopening
 guidance above.
 
+---
+
+## 2026-07-26 (lead review) — H1 + H3 closed, H2 blocked (not null), H4 activated, H5 opened
+
+New raw signal files landed since the last review (archive now spans through
+2026-07-25 vs 2026-06-09 before). Panel rebuilt accordingly (`ingested_files.json`
+now 833+ entries). This entry is the lead's daily audit/reprioritisation pass over
+the four results banked since the last lead touch (H1 stop-sweep, H3 behaviour-bins,
+H2 walk-forward + its 36-variant sensitivity sweep — all 2026-07-24/25).
+
+### Audit — all four results pass the four checks
+For each: n reported and episode-deduped (yes, ≥30 per cohort quoted), `entry_used`/
+derived columns used and no `price_in_bar_range` filtering (confirmed — worker prompts
+`worker_stops.md`/`worker_picking.md` already carry the correct instruction; verified
+by spot-checking that H1's coverage count, 1675, matches the panel's known unfiltered
+frozen-episode total, i.e. no rows were dropped), observed vs. simulated kept distinct
+throughout (nothing here claims a backtest return — it's all panel arithmetic), and
+each verdict was checked against a stated noise floor (bootstrap CIs, sensitivity
+sweeps) rather than a bare point estimate. **No result sent back.**
+
+### Status changes
+- **H1 → `closed-null`.** Kill condition met exactly as written. Caveat carried
+  forward into `hypotheses.md`: this is a fixed-% stop finding on a no-bear window: it
+  does not question the live ATR trail, a different (trailing) instrument validated
+  elsewhere.
+- **H3 → `closed-null`.** Kill condition met exactly as written. 28-detector pattern
+  library confirmed not worth computing.
+- **H2 → `blocked`, not `closed-null`.** I'm overriding the worker's own proposed
+  label here. The worker's tick 2 entry proposed "close as closed-null on the
+  continuous-model path" — reasonable in substance, but `closed-null` per this file's
+  own status legend should mean "measured and answered negatively," and that's not
+  quite what happened: the model was fit on only 36 training days and failed to
+  generalize, which the guardrails' own walk-forward standard treats as "not enough
+  data to trust a verdict either way," not "tested at adequate power and rejected."
+  Filing it `blocked` keeps the distinction visible and gives it an explicit,
+  checkable reopening trigger instead of quietly closing the door. Concretely
+  unchanged either way: no task for picking this cycle, no live-config action.
+  **What is genuinely settled and stays settled:** the Quality-tier sort
+  (GOLD>PREMIUM, +8.33pp/20d, CI excludes 0, robust across months and within
+  TREND_CONFIRM alone) — this describes current live behaviour correctly and needs no
+  change.
+
+### Checked, not just assumed: did the new data actually unlock a re-run?
+This is the one piece of real analysis in this review (a data-availability audit, not
+an experiment — consistent with the lead's "audit, don't run" remit). I checked
+whether the archive's growth (Jun 9 → Jul 25) produced any new **frozen** (20d/30d
+complete) episodes, since that's what H1/H2's methodology depends on:
+
+| Horizon | Episode-starts available | Unique dates | Max date |
+|---|---:|---:|---:|
+| ret_5d | 1715 | 45 | 2026-07-16 |
+| ret_10d | 1710 | 44 | 2026-07-09 |
+| ret_20d | 1675 | **41** | **2026-06-08** |
+| ret_30d | 1675 | **41** | **2026-06-08** |
+
+**The 20d/30d frozen set has not grown at all since the walk-forward result was
+produced — same 41 dates, same 1675 episodes.** Two compounding reasons, both
+checked directly against the parquet:
+1. The 2026-06-09 cohort (78 rows, all fully aged to 30 bars) contributed **zero**
+   new episode-starts — every row that day was a continuation of an already-counted
+   episode.
+2. There is a genuine **~4-week gap in the raw archive, 2026-06-10 → 2026-07-05**
+   (zero signal files) — full date list checked directly, not inferred. This lines
+   up suspiciously well with the 2026-07-07 EC2 cutover (CLAUDE.md §9); not
+   root-caused here, logged as new hazard **HZ4** in `hypotheses.md`, and flagged
+   below for a human to sanity-check (did signals stop being *generated*, or just
+   stop being *archived*, during that window — different severities).
+3. Everything from 2026-07-06 onward is real but too young: e.g. the 07-06 cohort
+   averages only 11.2 bars of forward data so far. At 30 trading days per episode,
+   the first new frozen dates start arriving **mid-to-late August 2026** — after the
+   current `budget.json` `end_date` (2026-07-31).
+
+**Consequence for today's call:** re-running H2's continuous model this cycle would
+have been the same 41×1675 dataset producing the same answer — not "new panel data"
+in the sense that matters for that specific question. I did not re-task picking to
+redo it. Ret_5d/10d have marginally more coverage (44-45 dates) but the walk-forward's
+own sensitivity sweep already tested a ret_10d target and it was the *best* of 36
+variants at only +0.055 ρ over baseline — already known to be noise-level. Nothing
+here changes that verdict.
+
+### What actually is new and actionable: H4 was never executed
+While auditing, I found `hypotheses.md`'s own H4 entry still carried the
+pre-correction figures (**~92% TREND_CONFIRM / ~5% BOUNCE**) that CLAUDE.md §14.1
+fixed everywhere else on 2026-07-25 (measured, correct value: 87%/8%/4%,
+n=1675) — `worker_stops.md`/`worker_picking.md` already had the fix, only this file
+didn't. Fixed now. More importantly: **H4 has zero results.jsonl entries under its
+own name** — it was logged as a discovery at bootstrap and then never assigned as a
+worker's actual next task, despite owning "lead" priority since 2026-07-24. It needs
+no new data (uses the same stable 1675-episode set H1/H3 already used), so unlike H2
+it is not blocked by anything. Promoted to **top priority for the next worker-stops
+tick.**
+
+### Reprioritisation
+1. **H4 (stops, next tick)** — per-Type profile: forward-return, hit-rate,
+   hold-duration (incl. the ≤15d/>15d split), by Type and Type×Quality where n≥30.
+   Diagnostic only, no gate needed.
+2. **H5 (stops, opened today)** — does the universe-independent ≤15d-hold drag
+   (4–29% WR vs 72–93%, measured on every `--no-tc` backtest universe in §8/§13)
+   actually show up inside TREND_CONFIRM, the 87% of live's stream every one of
+   those backtests barely touched? This is the highest-leverage open question on the
+   board per the lead prompt's own steering rule (#1 changes what live trades, #2
+   targets the largest known drag) — ranked above re-attempting H2's ranking model,
+   which targets a smaller, already-partially-explained effect.
+3. **Picking — no task this cycle.** Genuinely idle, not busywork-filled: H2's
+   reopening trigger isn't met (see above) and H5's output is a prerequisite for the
+   next sensible picking task (an admission-time feature that predicts ≤15d-vs->15d
+   outcome, once H5 shows whether that split exists in TC). Documented in
+   `hypotheses.md` so the runner's role rotation doesn't waste an invocation
+   re-deriving the current null.
+
+### Escalations for a human (not blocking the team, just flagging)
+- **HZ4** (new): ~4-week gap in the raw signal archive, 2026-06-10 → 2026-07-05,
+  immediately before the EC2 cutover. Not a panel-quality bug — it's simply missing
+  data, and nothing downstream mis-measured it — but worth a one-line check on
+  whether the scanner was actually down for a month or just not archiving.
+- **Budget window**: `budget.json`'s `end_date` (2026-07-31) will pass before H2 can
+  be usefully reopened (mid-to-late August at the earliest). Not urgent — H4/H5 give
+  the team real, non-data-starved work through the current window — but noting it now
+  so it isn't a surprise later. Left `budget.json` untouched; extending it is a scope
+  decision for a human, not a reprioritisation call.
+
+### If a trader asked "is this worth anything yet?"
+Two things are now bankable, not hypothetical: (1) the live ranking's Quality-first
+sort is doing real, measured work and needs no change — confirmed, not assumed; (2)
+stops on a fixed-% basis show no edge on this window, which is expected and doesn't
+threaten the live trail. Nothing has *changed* what should ship. The next real shot
+at moving the needle is H5 — checking whether the short-hold drag that has dogged
+every backtest also dogs live's dominant signal type — because that, unlike ranking
+tweaks, targets a large, already-quantified problem on the population that actually
+trades money.
+
