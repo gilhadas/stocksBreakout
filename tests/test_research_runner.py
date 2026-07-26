@@ -200,6 +200,49 @@ def test_invoke_agent_pins_model_and_budget(tmp_path, monkeypatch):
     assert cmd[cmd.index('--max-budget-usd') + 1] == str(runner.AGENT_MAX_BUDGET_USD)
 
 
+# ── Lead must not re-audit unchanged state on its fixed daily clock ────────────────
+def test_lead_run_skipped_when_nothing_changed(tmp_path, monkeypatch):
+    """research-lead fires daily with --force regardless of new data. Production cron
+    doesn't scan weekends, so without this guard every Saturday/Sunday re-runs a full
+    ($2-12) audit of literally unchanged ledger state."""
+    monkeypatch.setattr(runner, 'LEDGER', tmp_path)
+    old = datetime.now(timezone.utc) - timedelta(hours=5)
+    (tmp_path / 'decisions.md').write_text('# old\n')
+    (tmp_path / 'results.jsonl').write_text('{}\n')
+    os.utime(tmp_path / 'decisions.md', (old.timestamp(), old.timestamp()))
+    os.utime(tmp_path / 'results.jsonl', (old.timestamp(), old.timestamp()))
+
+    last_run = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    assert runner.lead_run_is_redundant({'last_lead_run': last_run}, fresh=[]) is True
+
+
+def test_lead_run_not_redundant_with_fresh_signal_files():
+    assert runner.lead_run_is_redundant(
+        {'last_lead_run': datetime.now(timezone.utc).isoformat()},
+        fresh=['signals_swing_20260727.csv']) is False
+
+
+def test_lead_run_not_redundant_when_never_run_before():
+    assert runner.lead_run_is_redundant({}, fresh=[]) is False
+
+
+def test_lead_run_not_redundant_after_ledger_activity(tmp_path, monkeypatch):
+    """A worker tick wrote new findings after the last lead audit -> there IS
+    something new, even with zero fresh signal files."""
+    monkeypatch.setattr(runner, 'LEDGER', tmp_path)
+    old = datetime.now(timezone.utc) - timedelta(hours=5)
+    (tmp_path / 'decisions.md').write_text('# stale\n')
+    os.utime(tmp_path / 'decisions.md', (old.timestamp(), old.timestamp()))
+    (tmp_path / 'results.jsonl').write_text('{}\n')  # fresh mtime: written just now
+
+    last_run = old.isoformat()
+    assert runner.lead_run_is_redundant({'last_lead_run': last_run}, fresh=[]) is False
+
+
+def test_lead_run_not_redundant_on_malformed_timestamp():
+    assert runner.lead_run_is_redundant({'last_lead_run': 'garbage'}, fresh=[]) is False
+
+
 # ── AC-RR-07 ──────────────────────────────────────────────────────────────────────
 def test_panel_staleness_is_independent_of_new_files():
     """update_panel has two jobs: append new files, and ADVANCE open rows. The tick

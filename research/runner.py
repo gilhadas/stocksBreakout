@@ -174,6 +174,34 @@ def panel_is_stale(state: dict) -> bool:
     return datetime.now(timezone.utc) - when > timedelta(hours=PANEL_REFRESH_HOURS)
 
 
+def lead_run_is_redundant(state: dict, fresh: list) -> bool:
+    """True if a forced 'lead' invocation would have nothing new to audit.
+
+    Unlike the worker roles (which only ever run when new signal data justifies it),
+    research-lead's launchd job fires on a fixed daily clock with --force,
+    unconditionally. Production cron doesn't scan on weekends, so every Saturday and
+    Sunday this would otherwise re-run a full-cost ($2-12) audit of literally
+    unchanged state -- found 2026-07-26 when the first successful lead run (a
+    Sunday morning manual trigger) was about to be followed, hours later, by the
+    same day's regular 18:47 fire with zero new signals and zero new ledger writes
+    in between.
+    """
+    if fresh:
+        return False
+    last = state.get('last_lead_run')
+    if not last:
+        return False  # never run before -> let it run
+    try:
+        since = datetime.fromisoformat(last)
+    except ValueError:
+        return False  # can't tell -> don't block a real audit
+    for name in ('decisions.md', 'results.jsonl'):
+        p = LEDGER / name
+        if p.exists() and datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc) > since:
+            return False
+    return True
+
+
 def acquire_lock():
     """Exclusive, non-blocking. Returns the held fd, or None if another tick owns it.
 
@@ -413,9 +441,15 @@ def _tick(args) -> int:
             _save_json(STATE, state)
         return 0
 
+    role = args.role or next_worker_role(state)
+    lead_skip = want_agent and role == 'lead' and lead_run_is_redundant(state, fresh)
+
     if args.dry_run:
+        agent_desc = None
+        if want_agent:
+            agent_desc = f'skip {role} (redundant audit)' if lead_skip else f'invoke {role}'
         print(f"--dry-run: would {'update panel' if want_panel else 'skip panel'}"
-              f"{' and invoke ' + (args.role or 'next worker') if want_agent else ''}")
+              f"{' and ' + agent_desc if agent_desc else ''}")
         return 0
 
     if want_panel:
@@ -442,7 +476,14 @@ def _tick(args) -> int:
         _save_json(STATE, state)
         return 0
 
-    role = args.role or next_worker_role(state)
+    if lead_skip:
+        print(f"  lead: no new signal files and no ledger activity since the last lead "
+              f"run ({state.get('last_lead_run')}) — skipping, nothing to audit.")
+        state['ticks'] += 1
+        state['last_tick'] = datetime.now(timezone.utc).isoformat()
+        _save_json(STATE, state)
+        return 0
+
     rc = invoke_agent(role)
 
     state['ticks'] += 1
@@ -458,6 +499,8 @@ def _tick(args) -> int:
         state['last_role'] = role
         if role in WORKER_ROLES:
             state['last_worker_role'] = role
+        if role == 'lead':
+            state['last_lead_run'] = datetime.now(timezone.utc).isoformat()
         state['consecutive_failures'] = 0
         state['retry_after'] = None
         _save_json(STATE, state)
