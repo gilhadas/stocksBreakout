@@ -1,15 +1,23 @@
 # Claude Code Skills — vendored
 
+> **Why `claude_skills/` and not `skills/`?** `skills/` is an unrelated **Python package**
+> that predates this (`skills/__init__.py`'s `SKILLS_REGISTRY`, `skills/scan.py`,
+> `backtest.py`, `monitor.py`, `analyze_market.py` — added in `c239994`, documented in
+> `SKILLS.md` and `CLAUDE_BUILD_SUMMARY.txt`). These are Claude Code skill *documents*,
+> a different thing entirely, so they get their own directory rather than muddling that
+> namespace. `.claude/skills/` was not an option either — `.claude/` is gitignored
+> (`.gitignore:24`), which would defeat the point of versioning them.
+
 The six trading skills Claude Code loads when working on this project. They are
 **symlinked**, not copied, into `~/.claude/skills/`:
 
 ```
-~/.claude/skills/technical-indicators -> <repo>/skills/technical-indicators
-~/.claude/skills/chart-patterns       -> <repo>/skills/chart-patterns
-~/.claude/skills/portfolio-exits      -> <repo>/skills/portfolio-exits
-~/.claude/skills/market-regime        -> <repo>/skills/market-regime
-~/.claude/skills/fibonacci-bounce     -> <repo>/skills/fibonacci-bounce
-~/.claude/skills/sentiment-analysis   -> <repo>/skills/sentiment-analysis
+~/.claude/skills/technical-indicators -> <repo>/claude_skills/technical-indicators
+~/.claude/skills/chart-patterns       -> <repo>/claude_skills/chart-patterns
+~/.claude/skills/portfolio-exits      -> <repo>/claude_skills/portfolio-exits
+~/.claude/skills/market-regime        -> <repo>/claude_skills/market-regime
+~/.claude/skills/fibonacci-bounce     -> <repo>/claude_skills/fibonacci-bounce
+~/.claude/skills/sentiment-analysis   -> <repo>/claude_skills/sentiment-analysis
 ```
 
 ## Why symlinks and not copies
@@ -29,7 +37,7 @@ stays a purely local skill.
 cd ~/.claude/skills
 for s in technical-indicators chart-patterns portfolio-exits \
          market-regime fibonacci-bounce sentiment-analysis; do
-    ln -s "$HOME/Documents/GitHub/stocksBreakout/skills/$s" "$s"
+    ln -s "$HOME/Documents/GitHub/stocksBreakout/claude_skills/$s" "$s"
 done
 ```
 
