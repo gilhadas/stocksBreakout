@@ -1,5 +1,34 @@
-# Breakout Scanner Cron Jobs
-# Add these to your crontab with: crontab -e
+# ############################################################################
+# ##  RETIRED — THIS FILE DOES NOT RUN ANYWHERE.                            ##
+# ##                                                                        ##
+# ##  Production is `docker/crontab`, executed by supercronic in the         ##
+# ##  scanner-cron container on EC2 (CLAUDE.md §9 cutover, 2026-07-07).      ##
+# ##  Nothing reads this file. Do NOT `crontab -e` it, and do NOT reason     ##
+# ##  about production behaviour from it.                                    ##
+# ##                                                                        ##
+# ##  It is kept ONLY as the historical reference that                       ##
+# ##  tests/test_crontab_parity.py diffs docker/crontab against, so that     ##
+# ##  capabilities present here but missing in production get caught.        ##
+# ##                                                                        ##
+# ##  WHY THE WARNING IS THIS LOUD — three production incidents, all from    ##
+# ##  someone reading this file and believing it described production:       ##
+# ##    1. exit path      — docker/crontab kept the append-only mock CSVs    ##
+# ##                        after 75a638f migrated this file to              ##
+# ##                        --exit-from-portfolio (CLAUDE.md §13)            ##
+# ##    2. monitor path   — same commit, same omission, separate alert       ##
+# ##                        stream (CLAUDE.md §13)                           ##
+# ##    3. refresh_prices — chained onto the exit jobs HERE (lines ~79/82)   ##
+# ##                        but never in docker/crontab. For four months no  ##
+# ##                        ATR trail ratcheted and no stop ever closed a    ##
+# ##                        position; CLAUDE.md §12 read the schedule from   ##
+# ##                        THIS file and shipped dc3e252 into a function    ##
+# ##                        cron never called. Fixed 2026-07-27.             ##
+# ##                                                                        ##
+# ##  Any schedule change must land in docker/crontab. Changing only this    ##
+# ##  file changes nothing at all.                                           ##
+# ############################################################################
+#
+# Breakout Scanner Cron Jobs (historical reference — see banner above)
 #
 # IMPORTANT: All times are US Eastern (NYSE/NASDAQ market hours)
 # TZ=America/New_York is set per-job so cron fires at the correct ET time
