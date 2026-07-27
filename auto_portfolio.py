@@ -1132,6 +1132,50 @@ def scan_and_add_all_users(min_date: str | None = None,
     return results
 
 
+def refresh_prices_all_users() -> dict:
+    """
+    Run refresh_prices for every registered user in the database.
+
+    Mirrors :func:`scan_and_add_all_users`. Adds were already multi-user; refresh
+    was not, so `refresh_prices()` with no arguments only ever touched the default
+    book (``scanner_output/portfolio/auto_portfolio.json``) and left every per-user
+    portfolio untouched — no trail raised, no stop honoured.
+
+    Returns a dict: {email: refresh_prices result} for each user, with the bulky
+    'data' payload stripped so the cron log stays readable.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    def _slim(res: dict) -> dict:
+        return {k: v for k, v in res.items() if k != 'data'}
+
+    try:
+        from api.database import get_db
+        from api.models import User as _User
+        db = next(get_db())
+        users = db.query(_User).all()
+    except Exception as exc:
+        _log.error(f"refresh_prices_all_users: could not load users from DB: {exc}")
+        # Fall back to default book only — better than refreshing nothing.
+        return {'default': _slim(refresh_prices())}
+
+    results = {}
+    for user in users:
+        try:
+            result = refresh_prices(user_id=user.id)
+            closed = result.get('closed', [])
+            _log.info(f"refresh_prices [{user.email}]: {result.get('updated', 0)} updated"
+                      + (f", closed {', '.join(closed)}" if closed else ", 0 closed"))
+            results[user.email] = _slim(result)
+        except Exception as exc:
+            # Isolate per-user failures: one bad book must not stop the rest.
+            _log.error(f"refresh_prices [{user.email}]: {exc}")
+            results[user.email] = {'error': str(exc)}
+
+    return results
+
+
 # ── Refresh prices & auto-close stops ────────────────────────────────────────
 
 def _close_basis_history(hist: 'pd.DataFrame', now_et: 'datetime') -> 'pd.DataFrame':
