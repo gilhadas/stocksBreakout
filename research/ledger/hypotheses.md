@@ -4,9 +4,10 @@ Status values: `active` | `blocked` | `closed-null` | `closed-promising`
 The **lead** owns this file. Workers read it to pick their next task and may append
 evidence lines, but only the lead changes a status or reorders priorities.
 
-Last lead review: 2026-07-26 (ticks reviewed: H1 stop-sweep + H3 behaviour-bins,
-2026-07-25; H2 walk-forward + sensitivity sweep, 2026-07-25). See `decisions.md` same
-date for the full audit and rationale.
+Last lead review: 2026-07-27 (ticks reviewed: H4 per-Type profile table + H5 hold-split-
+within-TC, both 2026-07-27 worker-stops; H2 reopening-trigger recheck + admission-time
+RSI prescreen, 2026-07-27 worker-picking). See `decisions.md` same date for the full
+audit and rationale. New hypothesis H6 opened this review.
 
 ---
 
@@ -69,10 +70,26 @@ noted for a human, not urgent), and the July signals since then simply haven't a
 `budget.json` end_date (2026-07-31). Flagged to the human in `decisions.md`; not
 reopening prematurely.
 
-**No task assigned to picking this cycle.** Next task, when reopened: retry the
-walk-forward Ridge with ≥70 frozen training days, AND (new, added today) cross the model
-against H5's hold-duration split once available — a ranking feature that predicts
-≤15d-vs->15d hold outcome would be more actionable than one that predicts raw ret_20d.
+**Reconfirmed 2026-07-27:** frozen episode-start count is still 1675/43 dates
+(2026-04-01→06-09); the panel grew to 9961 rows and one new frozen date, but that date
+added zero new episode starts (all re-flags). No change to the mid-to-late-August ETA.
+
+**No task assigned to picking this cycle for the multivariate retry.** Next task, when
+reopened: retry the walk-forward Ridge with ≥70 frozen training days, targeting H5's now-
+confirmed ≤15d-vs->15d hold split rather than raw ret_20d — and lead with **RSI** as the
+first feature to test (see evidence below), not a fresh 16-feature sweep.
+
+**RSI named as the candidate feature (prescreen, 2026-07-27):** a diagnostic univariate
+screen (not a fitted model) found RSI's tercile/decile spread on the TC gt15d rate is the
+largest of 10 admission-time features tested (37.9pp, next-best sector at 32.6pp with no
+MC correction), monotonic across deciles (21.3%→66.4%), and orthogonal to Quality/TC_Score/
+Vol (near-zero correlation, near-identical mean RSI by quality tier). Caveat: 86% of the
+frozen set is April; the April-internal chronological split (first-5-days vs last-12-days)
+shows the relationship replicating and strengthening (ρ 0.29→0.45), not reversing, but
+May/June are much weaker (ρ −0.004, 0.202) — consistent with either genuine regime-
+dependence or simple underpower at n=50–150; the data cannot yet distinguish these.
+**This is promising but not walk-forward-ready on the panel alone — see H6, which tests
+the same RSI signal on a data source that already has multi-regime coverage.**
 
 ---
 
@@ -87,56 +104,98 @@ logic) likely the ranking question. No further tasks.
 
 ---
 
-## H4 — Live's TREND_CONFIRM-dominated stream behaves differently from the backtest's BOUNCE stream  ·  owner: lead  ·  status: active  ·  **TOP PRIORITY — next worker-stops tick**
+## H4 — Live's TREND_CONFIRM-dominated stream behaves differently from the backtest's BOUNCE stream  ·  owner: lead  ·  status: closed-promising
 
-**Correction (2026-07-26):** this entry still carried the pre-correction figures (~92%
-TREND_CONFIRM / ~5% BOUNCE). CLAUDE.md §14.1 fixed this everywhere else on 2026-07-25 but
-missed this file. Measured, episode-deduped (n=1675): **87% TREND_CONFIRM (1459), 8%
-BOUNCE (134), 4% CONTINUATION (62).** Every champion baseline in CLAUDE.md §7–§13 was
-measured with `--no-tc`, i.e. ~99.7% BOUNCE — a population live barely produces.
-
-**Why it matters:** H1's and H3's cohort tables already show *some* of this (winner-MAE by
-Type, cohort sample sizes) as a side effect of the stop/pattern work, but no one has
-produced the dedicated per-Type profile this hypothesis calls for. It has been on the
-board since bootstrap (2026-07-24) and has never been executed as its own deliverable.
-It needs **no new data** — the existing 1675 frozen (20d/30d-complete) episodes are enough
-— so, unlike H2, there is nothing blocking it today.
-
-**Next task (assign to worker-stops, next tick):** build the per-`Type` profile table:
-forward-return (ret_5/10/20/30d mean+median), hit-rate (`hit_stop`/`hit_target` frequency),
-and hold-duration (`bars_to_stop`/`bars_to_target`, and the ≤15d-vs->15d split called out
-in CLAUDE.md §8/§13 as the project's one universe-independent drag). Report by Type, and
-by Type×Quality where n≥30. This is diagnostic — no lever, no sweep-discipline gate needed,
-just report the numbers honestly with n on every cell.
-
-**Follow-on (queued as H5 below):** once this table exists, dig into the ≤15d/>15d split
-specifically within TREND_CONFIRM, since that's ~87% of what live trades and the drag is
-large everywhere else it's been measured (CLAUDE.md §13.5).
+**Closed 2026-07-27 — deliverable produced, folded into H5.** Worker-stops built the
+per-Type profile table (n=1459 TREND_CONFIRM, 134 BOUNCE, 62 CONTINUATION, all frozen
+episode-starts, entry_used-based). Headline: TC and BOUNCE differ materially —
+`ret_30d_mean` 6.4% (TC) vs 1.38% (BOUNCE); `overall_wr_pct` (exit-based: stop=loss,
+target=win, else mark-to-market) 42.3% (TC) vs 34.3% (BOUNCE) vs 45.2% (CONTINUATION,
+n=62, thin). TC|GOLD (n=129) beats TC|PREMIUM (n=1330) on ret_30d_mean (8.55% vs 6.19%)
+and hit_stop_rate (46.5% vs 55.7%) — consistent with H2's already-closed GOLD>PREMIUM
+finding. This is descriptive infrastructure, not a lever — its value was enabling H5's
+run below, which is where the actionable finding lives. No further tasks under H4 itself.
 
 ---
 
-## H5 — Is the universe-independent ≤15d-hold drag present, and how large, within TREND_CONFIRM specifically?  ·  owner: stops  ·  status: active  ·  queued after H4
+## H5 — Is the universe-independent ≤15d-hold drag present, and how large, within TREND_CONFIRM specifically?  ·  owner: stops  ·  status: closed-promising
 
-Every backtest universe tested in CLAUDE.md (§8, §13) shows the same shape: ≤15d holds at
-4–29% WR, >15d holds at 72–93% WR. That was always measured on the `--no-tc` (~99.7%
-BOUNCE) population. H4's diagnostic will show whether the split exists, and how large it
-is, in the population live actually trades (87% TREND_CONFIRM).
+**Closed 2026-07-27 — kill condition NOT met; this is the single largest, most
+statistically overdetermined finding on the panel to date.** Measured within TC
+(n=1459, frozen episode-starts): ≤15d WR **22.6%** (n=804) vs >15d WR **66.4%** (n=655),
+gap **43.8pp**, two-prop z=−16.85. Within TC|PREMIUM (n=1330, the highest-powered cell):
+gap **45.7pp**, z=−16.81. TC|GOLD (n=129+53) attenuates but does not eliminate it: gap
+23.6pp, z=−2.64. BOUNCE shows the same shape (36.8pp gap, n=76+58). This squarely matches
+the 40–70pp shape every `--no-tc` backtest universe showed (CLAUDE.md §8/§13) — **the
+drag is not a BOUNCE/mean-reversion-only artifact; it is present, large, and highly
+significant inside live's dominant TREND_CONFIRM stream (87% of live signals).**
 
-**Why it matters:** per the lead's "steering toward profit" priorities — this is the
-"large + affects what live trades" combination that ranking tweaks (H2) do not have. If
-TREND_CONFIRM shows the same short-hold drag, it's the highest-value remaining target on
-this panel; if it's much smaller within TC, that changes where effort goes next.
+**Why this is the highest-value finding of the cycle:** per "steering toward profit"
+priority 1 (does it change what live actually trades?) and priority 2 (is the drag it
+targets large?) — this is the first result this cycle that is both. Nothing else on the
+board (H1–H3, H2's Quality-sort answer) combines "affects TC" with "large effect."
 
-**Next task:** depends on H4's output. If the split is large (comparable to the backtest's
-4–29%/72–93% shape) within TC, look for an *admission-time* signature (features available
-before the trade, not post-hoc) that predicts which bucket a TC signal falls into — this
-is the natural point where H2 (picking) reopens with a sharper, more actionable target than
-raw ret_20d.
+**Follow-on, spun out as H6 below:** the natural next step — find an admission-time
+feature that predicts the ≤15d/>15d bucket and test it as a rule — is picked up there,
+using a data source that does NOT require waiting on H2's blocked panel-growth trigger.
 
-**Kill condition:** if the ≤15d/>15d split is materially smaller within TC than in the
-`--no-tc` backtests (say, WR gap <20pp instead of 40–70pp), close as `closed-null` — the
-drag is a BOUNCE/mean-reversion artifact, not something live's dominant signal type
-suffers from.
+---
+
+## H6 — Does an RSI-conditioned TREND_CONFIRM admission rule survive real multi-regime history?  ·  owner: picking → stops  ·  status: active  ·  **TOP PRIORITY — next tick**
+
+**Opened 2026-07-27.** H5 confirmed the ≤15d/>15d drag is large and highly significant
+within TREND_CONFIRM (live's dominant type). H2's own prescreen named RSI as the
+strongest, cleanest, most orthogonal admission-time predictor of that split — but the
+panel can't validate it across regimes yet: 86% of the frozen episode set is a single
+month (April), and H2's own reopening trigger (more frozen days, spanning more than one
+regime) won't fire until mid-to-late August — **after** the current `budget.json`
+`end_date` (2026-07-31, only 4 days from today).
+
+**Why this doesn't have to wait:** TREND_CONFIRM already carries an `RSI` value on every
+signal, and `backtest_regime_compare.py` already has a `--rank-scores FILE` mechanism
+(CSV `date,symbol,score`, applied within quality tier, forwarded by `confirm_backtest.py
+--rank-scores`) built for exactly this kind of continuous-score test — confirmed present
+and wired end-to-end by reading both files just now. The **5-year historical backtest is
+a completely different data source from the panel** — it already spans 2022 (bear,
+though TC is blocked in RED_MARKET/BEARISH — see the standard caveat below),
+2023–2025 (bull/mixed), and 2026 (mixed), i.e. genuine multi-regime coverage the panel
+does not have yet. This sidesteps H2's data-volume block entirely rather than waiting on
+it, and is checkable within the current budget window.
+
+**Next task (assign to picking, next tick):** build a `date,symbol,score` CSV scoring
+TREND_CONFIRM signals in the historical backtest universe by RSI (e.g., percentile within
+day, or a monotone transform matching the decile shape H2's prescreen measured — worker's
+judgment on the exact form, since the panel screen only established direction/shape, not
+a specific functional form). Run `backtest_regime_compare.py --realistic-sizing
+--rank-scores <file>` across the full 2022–2026 window (`--population live`, i.e. TC Path
+A enabled — do NOT use `--no-tc`, that reproduces a population that is not TREND_CONFIRM).
+Report per-year Sharpe (realistic-sizing arm per the standing §11 rule) vs the champion
+baseline, AND the ≤15d/>15d trade-count and WR split per year (the halt criterion below).
+
+**Follow-on (assign to stops once picking has a candidate):** run the result through
+`research/confirm_backtest.py --rank-scores <file> --population live` (the mandatory
+promotion gate, default years 2022,2024) and quote its printed realized signal-type mix —
+per the standing caveat, 2022 will show few/no TREND_CONFIRM trades since TC is blocked
+in RED_MARKET/BEARISH, so 2022 is a downside check only, not a test of this specific rule;
+2024 is where this candidate must actually prove itself.
+
+**Ship bar (unchanged from standing rules):** ≥+0.10 Sharpe on the realistic-sizing arm
+vs the no-op baseline (no RSI conditioning), AND >15d hold win-rate must not shrink in any
+tested year. A result that only wins via a partial-year (2026 YTD) blend does not count —
+recompute full-year-only averages by hand before reading a verdict (CLAUDE.md §13.5 /
+`feedback_backtest_verdict_pitfalls`).
+
+**Kill condition:** if the realistic-sizing Sharpe delta is within ±0.05 of the no-op
+baseline in every full year tested, or if it requires shrinking >15d WR to get there,
+close as `closed-null` — RSI's panel-measured correlation would then be an April-specific
+artifact that doesn't generalize, exactly the risk H2's own prescreen flagged and did not
+rule out.
+
+**Budget note for the lead/human:** if H6 comes back null or ambiguous, the only
+remaining path to resolving whether RSI (or any admission-time feature) predicts TC hold
+duration is H2's blocked multivariate retry, which needs panel data that will not exist
+until after the current budget `end_date`. That would require a human decision to extend
+`end_date` past 2026-07-31, not something this run can do on its own.
 
 ---
 

@@ -793,3 +793,83 @@ candidate feature under H2's "next task, when reopened" text, so the eventual re
 there rather than re-deriving it. Results appended to `research/ledger/results.jsonl`
 (hypothesis H2, tasks `reopening-trigger-recheck-after-panel-refresh` and
 `admission-time-feature-prescreen-for-H5-hold-bucket`).
+
+---
+
+## 2026-07-27 (lead review) — H4 + H5 closed-promising, H2 reconfirmed blocked, H6 opened
+
+**Audit of the two ticks above (worker-stops' H4/H5, worker-picking's H2 recheck +
+prescreen) — all pass.** Checked each against the four lead gates:
+- `n` reported and episode-deduped: yes throughout (H4/H5 use the same 1459/134/62 frozen
+  TREND_CONFIRM/BOUNCE/CONTINUATION episode-starts as H1/H3; H5's sub-cells down to
+  TC|GOLD n=129+53 and CONTINUATION n=56+6 are explicitly flagged as thinner, with the
+  CONTINUATION gt15d cell correctly marked "not interpretable" rather than reported as if
+  solid).
+- `entry_used`, not raw `Price`: confirmed directly against `build_panel.py:198` —
+  `out['entry_used'] = entry` feeds `hit_stop`/`hit_target`, which is what H4/H5's exit
+  hierarchy is built on. No `price_in_bar_range` filtering was applied anywhere (correct —
+  it's a diagnostic, not a gate).
+- Observed vs simulated labeled honestly: H4/H5 are pure measurement (arithmetic on
+  realized bars); the RSI prescreen is explicitly called a "diagnostic univariate screen,
+  not a fitted/walk-forward model, no promotion sought" — no overclaiming.
+- Effect vs noise floor: H5's TC hold-split gap is 43.8pp at z=−16.85 (n=1459) — nowhere
+  near the ~0.25-Sharpe backtest noise floor this project uses elsewhere, though that
+  specific noise figure is a backtest-reproducibility number and not directly comparable
+  to a panel proportion test; the two-proportion z-test is the right tool here and the
+  effect clears it by a wide margin regardless. The RSI prescreen's honest caveat (86%
+  April, weaker in May/June) is exactly the kind of self-flagging this role exists to
+  reward, not penalize — it stopped short of a walk-forward claim it hadn't earned.
+
+**No result sent back. Both ticks banked as-is.**
+
+**Hypotheses.md updated:**
+- **H4 → closed-promising.** Its one deliverable (the per-Type profile table) is built
+  and confirmed materially different stats across TC/BOUNCE/CONTINUATION. No further work
+  under H4 itself — it was infrastructure for H5.
+- **H5 → closed-promising.** This is the most important finding of the cycle, not just
+  today's tick: the ≤15d/>15d hold-duration drag that every `--no-tc` (~99.7% BOUNCE)
+  backtest universe showed in CLAUDE.md §8/§13 is **not** a BOUNCE-only mean-reversion
+  artifact — it is present, comparably large (43.8pp vs the backtests' 40–70pp), and
+  overdetermined (z=−16.85, n=1459) inside TREND_CONFIRM, the signal type that is 87% of
+  what live actually trades. Every prior ranking experiment in §13 (residual-dist,
+  live-tiebreak, sleeve-slots, panic-throttle, NBC) targeted admission/ranking on the
+  wrong population relative to this specific drag, or didn't target the drag at all. This
+  is the first result on the panel that is simultaneously "affects what live trades" and
+  "the drag is large" — the two things this role has been asked to weight above all else.
+- **H2 → still blocked, reconfirmed, not reopened.** Worker-picking's recheck is correct:
+  frozen episode-starts are unchanged at 1675/43 dates; the one new frozen date
+  (2026-06-09) added zero new episode starts. No premature reopening. RSI is now the
+  named candidate feature for whenever the multivariate retry does happen.
+- **H6 opened (new, top priority).** RSI's panel-measured relationship to the hold-split
+  is real but not walk-forward-ready on the panel alone (86% April-dominated, and H2's own
+  reopening trigger for more panel data won't fire until mid-to-late August — after this
+  run's `budget.json` `end_date` of 2026-07-31). Rather than let the most valuable finding
+  of the cycle sit idle for three-plus weeks, H6 redirects it to a data source that isn't
+  blocked: `backtest_regime_compare.py`'s existing `--rank-scores` mechanism and
+  `confirm_backtest.py`'s existing `--population live` gate already give genuine
+  multi-year, multi-regime coverage (2022 bear through 2026 mixed) that the panel doesn't
+  have yet. Confirmed both are wired and ready by reading the source directly — this is
+  not new infrastructure, just a new use of what already exists. Assigned: picking builds
+  the RSI-scored candidate and runs the idealized+realistic-sizing sweep across full
+  history; stops runs the winner (if any) through the mandatory `confirm_backtest.py`
+  gate. Ship bar and halt criteria are the project's standing rules, unchanged.
+
+**What I'd tell a trader who asked "is this worth anything yet?":** Not yet, but this is
+the closest this project has come in weeks. We've now measured — not simulated — that the
+short-hold drag that has quietly capped every backtest for months is fully present in the
+signal type you actually trade live, and we have a specific, orthogonal, statistically
+clean candidate (RSI) for predicting it before the trade, not after. It has not cleared a
+single promotion gate yet, and its only regime-diverse test starts next tick. If H6 clears
+the realistic-sizing Sharpe bar on real multi-year history without shrinking the >15d WR
+edge, this becomes the first genuinely new lever since the ATR-trail champion itself — not
+another ranking tweak on a signal population live barely emits. If it doesn't, we've still
+learned the drag is real and large, which narrows every future search.
+
+**Budget/schedule flag for the human:** `budget.json.end_date` is 2026-07-31, four days
+from today. H2's natural reopening (more frozen panel days) lands mid-to-late August —
+after this window closes. H6 is designed to make progress within the current window
+regardless, but if H6 is inconclusive and the multivariate panel retry is still wanted,
+that requires a deliberate `end_date` extension; this run cannot do that on its own.
+
+No entries added to `results.jsonl` this review — this was an audit/reprioritization
+pass, not a new empirical measurement.
