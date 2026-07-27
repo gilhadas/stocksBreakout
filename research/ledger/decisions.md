@@ -717,3 +717,79 @@ Results appended to `research/ledger/results.jsonl` (hypothesis H4, task
 `hypotheses.md` not edited (lead-owned per its own header); flagging for the lead to update
 H4/H5 status on next review.
 
+
+---
+
+## 2026-07-27 — worker-picking: H2 reopening-trigger recheck + admission-time prescreen for H5's hold split (agent tick)
+
+**Task:** new panel data landed (total rows 9862→9961, max signal_date now 2026-07-27). H2
+(this role's hypothesis) is `blocked` per the lead's 2026-07-26 note, with an explicit
+reopening trigger ("frozen 20d/30d episode set needs to grow past the 2026-04-01→06-08
+walk-forward window") and an explicit statement that no task is assigned to picking this
+cycle. Before doing anything else, checked whether the new data actually met that trigger.
+
+**Trigger recheck: still NOT met.** Frozen (`bars_available>=30`) episode-start count is
+unchanged at 1675. The panel's frozen date range now nominally extends one day further
+(through 2026-06-09, was 06-08), but that date contributed 78 rows and **zero** new episode
+starts — every row on 2026-06-09 is a re-flag of an already-open episode
+(`is_episode_start=False`). The archive's ~4-week gap (2026-06-10→2026-07-05, HZ4) plus
+July signals not yet aging 30 trading days means no new independent training breadth has
+actually entered the walk-forward window since the 2026-07-25 attempt that failed. **H2
+stays correctly blocked** — this is a confirmation for the record, not new information.
+
+**Given no task is assigned and the blocked task's own prerequisite is unmet, did the one
+piece of adjacent work that doesn't require a walk-forward retry:** a diagnostic (not a
+fitted model — no promotion, no ship decision, explicitly out of scope for the sweep-
+discipline/promotion-gate rules) univariate screen of whether any admission-time feature
+predicts H5's newly-confirmed ≤15d/>15d hold-bucket split within TREND_CONFIRM. This is
+exactly the follow-on H2's blocked note names ("a ranking feature that predicts
+≤15d-vs->15d hold outcome ... once available") — H5 (worker-stops, same day) supplied the
+"once available" part; this is the natural next look, done at the same diagnostic tier as
+H1/H3's bin analyses, not as a reopening of the model retry.
+
+**Method:** same 1459 frozen TREND_CONFIRM episodes, same exit-hierarchy hold-bucket
+definition as H4/H5 (`research/tmp/h4_analysis.py`). For each admission-time feature,
+compared `gt15d` rate across terciles (continuous) or n≥30 categories (categorical).
+
+**Finding: RSI is a strong, clean, monotonic, and — critically — orthogonal candidate.**
+
+| Feature | pooled tercile/category spread (pp) |
+|---|---:|
+| **RSI** | **37.9** |
+| Sector (8 cells, no MC correction) | 32.6 |
+| Gap% (non-monotone: 31→55→50) | 23.4 |
+| Dist | 9.0 |
+| Quality GOLD vs PREMIUM | 4.2 |
+| SMA_Dist%, Vol, TC_Path, GoldenCross, FreshCross | ≤4.2 |
+
+RSI by decile is close to monotonic: `gt15d` rate 21.3% (bottom decile, RSI 55.0–56.8) →
+66.4% (decile 8, RSI 66.2–68.2), tracking win rate 36.1%→48–51%, n≈140–160 per decile.
+**Not a re-discovery of Quality or TC_Score:** mean RSI is 62.03 (GOLD) vs 62.41 (PREMIUM) —
+statistically indistinguishable — and correlation with TC_Score (−0.09) and Vol (−0.03) is
+near zero. This is information the current pooled-cap ranking does not use anywhere.
+
+**The honest caveat, checked before getting excited:** the frozen set is 86% April
+(1253/1459). Per-month Spearman(RSI, gt15d): **Apr 0.361 (n=1253), May −0.004 (n=153), Jun
+0.202 (n=53)**. Unlike the Ridge model that sank H2's first walk-forward attempt (feature
+coefficients *reversed sign* June vs training), the one genuine out-of-time check this data
+supports — splitting April itself chronologically (first 5 trading days, n=633, vs last 12,
+n=620) — shows the RSI relationship **replicating and strengthening** (ρ 0.29→0.45), not
+reversing. May/June's weaker readings are consistent with either (a) RSI's meaning being
+regime-dependent (plausible — it's a trend-strength proxy, and this project already treats
+regime-dependence as real elsewhere: BBG15, panic-throttle) or (b) simple underpower at
+n=50–150 — **the data cannot currently distinguish these two explanations**, and I am not
+claiming it can.
+
+**Verdict: promising, not walk-forward-ready. No promotion, no lever proposed.** This
+narrows what H2's eventual retry should test first — RSI-conditioned hold-bucket
+prediction is a sharper, better-motivated target than the raw `ret_20d` Ridge that failed —
+but it must wait for the same reopening trigger H2 already specifies (more frozen days,
+spanning more than one regime), because a finding 86%-dominated by a single month replicating
+within that month is not the same as replicating across regimes, and treating it as ready
+would repeat the exact mistake (fitting to a narrow window) that sank the first attempt.
+
+**No change to hypotheses.md** (lead-owned). Recommend the lead record RSI as the named
+candidate feature under H2's "next task, when reopened" text, so the eventual retry starts
+there rather than re-deriving it. Results appended to `research/ledger/results.jsonl`
+(hypothesis H2, tasks `reopening-trigger-recheck-after-panel-refresh` and
+`admission-time-feature-prescreen-for-H5-hold-bucket`).
