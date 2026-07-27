@@ -210,6 +210,102 @@ def verify_indicator_formulas(df: pd.DataFrame) -> None:
           f"ADX>25 gate disagrees on {gate_disagree:.1f}% of bars")
 
 
+def verify_composite_scores(df: pd.DataFrame) -> None:
+    """
+    The parts of technical-indicators that are TABLES, not runnable code.
+
+    Roughly a third of that skill is prose: composite-score weight tables, the 8
+    Minervini conditions, the Volume Profile description. None of it was machine
+    checked — it was verified by reading, and reading is not proving. These are the
+    claims a reader would copy into real scoring code, so they are worth pinning.
+    """
+    import inspect
+    from quantkit import indicators as qk
+
+    text = (SKILLS / 'technical-indicators' / 'SKILL.md').read_text()
+
+    def table_weights(heading: str) -> dict[str, int]:
+        """Parse '| RSI | 30 | ... |' rows out of a markdown section."""
+        section = text.split(heading)[1].split('####')[0]
+        out = {}
+        for row in re.findall(r'^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|', section, re.M):
+            out[row[0].strip()] = int(row[1])
+        return out
+
+    # ── Momentum Score ───────────────────────────────────────────────────────
+    # quantkit's own docstring is machine-readable: "Components: RSI (0-30), ..."
+    doc = inspect.getdoc(qk.calculate_momentum_score) or ''
+    # The docstring's opening line also says "score (0-100)" — that is the total,
+    # not a component. Match only the "Components: ..." line.
+    comp_line = next((l for l in doc.splitlines() if l.strip().startswith('Components:')), '')
+    canon = {k: int(v) for k, v in re.findall(r'(\w+)\s*\(0-(\d+)\)', comp_line)}
+    skill_w = table_weights('#### Momentum Score')
+    check(canon == skill_w,
+          'Momentum Score component weights match quantkit',
+          f'quantkit={canon} skill={skill_w}')
+    check(sum(canon.values()) == 100, 'Momentum Score weights sum to 100', str(sum(canon.values())))
+
+    # ── Breakout Conviction ──────────────────────────────────────────────────
+    doc = inspect.getdoc(qk.calculate_breakout_conviction) or ''
+    comp_line = next((l for l in doc.splitlines() if l.strip().startswith('Components:')), '')
+    canon_c = {k.strip(): int(v) for k, v in re.findall(r'([\w ]+?)\s*\(0-(\d+)\)', comp_line)}
+    skill_c = table_weights('#### Breakout Conviction Score')
+    check(sum(canon_c.values()) == 100 == sum(skill_c.values()),
+          'Breakout Conviction weights sum to 100 in both',
+          f'quantkit={canon_c} skill={skill_c}')
+
+    # Behavioural: the tier thresholds the skill documents must actually fire.
+    # Synthetic bar — flat history, then one bar with a known gap / close position.
+    n = 40
+    base = pd.DataFrame({
+        'open': 100.0, 'high': 100.5, 'low': 99.5, 'close': 100.0, 'volume': 1_000_000.0,
+    }, index=pd.date_range('2025-01-01', periods=n, freq='B'))
+    spike = base.copy()
+    spike.iloc[-1, spike.columns.get_loc('open')] = 102.0      # +2.0% gap  -> 20
+    spike.iloc[-1, spike.columns.get_loc('low')] = 102.0
+    spike.iloc[-1, spike.columns.get_loc('high')] = 110.0
+    spike.iloc[-1, spike.columns.get_loc('close')] = 110.0     # close at high -> 30
+    # NOTE 10M, not 2M: calculate_volume_ratio divides by rolling(20).mean(), which
+    # INCLUDES the spike bar itself. A "2x" bar therefore scores 2M/1.05M = 1.905 and
+    # lands in the >=1.5 tier, not >=2.0. Easy to get wrong when hand-checking.
+    spike.iloc[-1, spike.columns.get_loc('volume')] = 10_000_000.0
+    conviction = float(qk.calculate_breakout_conviction(spike).iloc[-1])
+    # close 30 + vol 30 + gap 20 + green streak (1 green bar) 7 = 87
+    check(abs(conviction - 87.0) < 1e-6,
+          'Conviction tiers fire as documented (close30+vol30+gap20+green7)',
+          f'got {conviction}')
+
+    # ── Minervini: 8 conditions, in the documented order ─────────────────────
+    cond, score = qk.calculate_minervini_template(df)
+    check(len(cond) == 8, 'Minervini returns exactly 8 conditions', str(len(cond)))
+    check(0 <= score <= 8, 'Minervini score is 0–8', str(score))
+    # Split on a horizontal rule at line start, NOT bare '---': the markdown table's
+    # own separator row (|---|---|) contains '---' and truncates the section to nothing.
+    mini_section = re.split(r'\n---\n', text.split('Minervini Stage 2 Template')[1])[0]
+    for tag, must in (
+        ('c1', ['sma150', 'sma200']), ('c2', ['sma150', 'sma200']),
+        ('c3', ['sma200', 'slope']), ('c4', ['sma50']),
+        ('c5', ['sma50']), ('c6', ['25%', '52-week low']),
+        ('c7', ['25%', '52-week high']), ('c8', ['252']),
+    ):
+        row = next((l for l in mini_section.splitlines()
+                    if re.match(rf'^\|\s*{tag.upper()}\s*\|', l.strip(), re.I)), '')
+        low = row.lower()
+        check(bool(row) and all(m.lower() in low for m in must),
+              f'Minervini {tag.upper()} documented as in quantkit',
+              row.strip()[:80] or 'ROW MISSING')
+
+    # ── Volume Profile ───────────────────────────────────────────────────────
+    vp = qk.compute_volume_profile(df)
+    for key in ('vpoc', 'value_area_high', 'value_area_low',
+                'high_volume_nodes', 'low_volume_nodes'):
+        check(key in vp, f'volume profile returns {key}')
+    src = inspect.getsource(qk.compute_volume_profile)
+    check('0.70' in src or '0.7' in src, 'Value Area really is 70% of volume (skill says 70%)')
+    check('1.5 * median_vol' in src, 'HVN threshold really is 1.5x median (skill says >1.5x)')
+    check('0.5 * median_vol' in src, 'LVN threshold really is 0.5x median (skill says <0.5x)')
+
+
 def verify_trailing_stop(df: pd.DataFrame) -> None:
     print("\n[2] portfolio-exits — ATR trail vs auto_portfolio._raise_atr_trail")
     from auto_portfolio import _raise_atr_trail
@@ -453,6 +549,7 @@ def main() -> int:
     print(f"Bars   : {len(df)}")
 
     guarded(lambda: verify_indicator_formulas(df), 'technical-indicators formula parity')
+    guarded(lambda: verify_composite_scores(df), 'technical-indicators composite/prose claims')
     guarded(lambda: verify_trailing_stop(df), 'portfolio-exits trail parity')
     guarded(verify_api_contracts, 'API contracts')
     guarded(verify_static, 'static hygiene')
