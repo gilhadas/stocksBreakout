@@ -80,13 +80,33 @@ AGENT_MODEL = 'claude-sonnet-5'
 # against the cap). --max-budget-usd is `claude -p`'s own circuit breaker, per
 # invocation.
 #
-# Raised from $5 -> $12 on 2026-07-26: the first real 'lead' invocation (a heavier
-# role — it audits both workers' full output against a 12.6k-char prompt, not just
-# one focused task) needed headroom past $5. The 8 real worker ticks measured
-# 07-24/07-25, translated to Sonnet pricing, ranged $2-$9.57 (avg $8.36) -- several
-# would already have exceeded $5. $12 covers that observed range with margin instead
-# of routinely truncating a session before it finishes its work.
-AGENT_MAX_BUDGET_USD = 12.0
+# Raised from $5 -> $12 on 2026-07-26 using Opus-era token counts *translated* to
+# Sonnet pricing (that estimate said $2-$9.57, avg $8.36).
+#
+# 2026-07-27: replaced by per-role caps. The estimate above was ~2x pessimistic.
+# MEASURED cost of every real Sonnet invocation, read from the transcripts rather
+# than translated from Opus token counts:
+#     worker  picking, 21 msgs   $1.62
+#     worker  stops,   55 msgs   $3.79   <- tick 94
+#     lead             55 msgs   $4.48
+#     -- for scale, the two pre-pinning Opus runs were $9.05 and $22.96 --
+#
+# A single flat cap is the wrong shape: 'lead' audits both workers' full output
+# against a 12.6k-char prompt. One number is either too loose for workers or too
+# tight for the lead, and too tight is the expensive failure — a truncated session
+# wastes everything spent before the cut AND writes no ledger entry.
+#
+# Headroom over measured worst case: worker 1.6x ($3.79), lead 2.2x ($4.48). The
+# worker margin is thinner than it first looked — the $1.62 sample was a short tick,
+# and cost tracks message count far more than role. If a worker ever truncates, the
+# fix is to raise the worker figure, NOT to collapse back to one flat number.
+AGENT_MAX_BUDGET_USD = {'stops': 6.0, 'picking': 6.0, 'lead': 10.0}
+_DEFAULT_MAX_BUDGET_USD = 6.0
+
+
+def role_budget(role: str) -> float:
+    """Per-invocation cost ceiling for `role`, defaulting to the worker figure."""
+    return AGENT_MAX_BUDGET_USD.get(role, _DEFAULT_MAX_BUDGET_USD)
 
 ROLE_PROMPTS = {'stops': 'worker_stops.md', 'picking': 'worker_picking.md',
                 'lead': 'lead.md'}
@@ -305,15 +325,16 @@ def invoke_agent(role: str, extra: str = '') -> int:
             "stop. Repeating completed work is a failure, not a safe default.\n\n"
             + context)
 
+    budget = role_budget(role)
     cmd = [str(CLAUDE_BIN), '-p', task, '--append-system-prompt', system,
-           '--model', AGENT_MODEL, '--max-budget-usd', str(AGENT_MAX_BUDGET_USD)]
+           '--model', AGENT_MODEL, '--max-budget-usd', str(budget)]
     if AGENT_SETTINGS.exists():
         cmd += ['--settings', str(AGENT_SETTINGS)]
     else:
         print(f"  WARNING: {AGENT_SETTINGS} missing — agent runs with the human's "
               f"interactive permissions and NO live-config deny rules.")
     print(f"  invoking agent role={role} model={AGENT_MODEL} "
-          f"budget=${AGENT_MAX_BUDGET_USD:.2f} ({len(system)} chars of role prompt, "
+          f"budget=${budget:.2f} ({len(system)} chars of role prompt, "
           f"{len(context)} chars of ledger context)")
     try:
         r = subprocess.run(cmd, cwd=str(ROOT), timeout=3600,

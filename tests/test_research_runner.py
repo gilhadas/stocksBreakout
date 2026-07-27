@@ -197,7 +197,49 @@ def test_invoke_agent_pins_model_and_budget(tmp_path, monkeypatch):
     assert '--model' in cmd, "unattended agents must not inherit the interactive default"
     assert cmd[cmd.index('--model') + 1] == runner.AGENT_MODEL
     assert '--max-budget-usd' in cmd, "a runaway session must have its own cost cap"
-    assert cmd[cmd.index('--max-budget-usd') + 1] == str(runner.AGENT_MAX_BUDGET_USD)
+    assert cmd[cmd.index('--max-budget-usd') + 1] == str(runner.role_budget('stops'))
+
+
+def test_budget_is_per_role_and_lead_gets_more(tmp_path, monkeypatch):
+    """
+    2026-07-27: measured Sonnet cost is $1.62 for a focused worker vs $4.48 for the
+    lead, which audits both workers' output against a 12.6k-char prompt. One flat cap
+    is either too loose for workers or too tight for the lead — and too tight is the
+    expensive failure, because a truncated session wastes everything spent before the
+    cut and still writes no ledger entry.
+    """
+    monkeypatch.setattr(runner, 'LEDGER', tmp_path)
+    monkeypatch.setattr(runner, 'AGENT_SETTINGS', tmp_path / 'missing.json')
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen[cmd[cmd.index('--append-system-prompt') - 2]] = float(
+            cmd[cmd.index('--max-budget-usd') + 1])
+        return subprocess.CompletedProcess(cmd, 0, stdout='ok', stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    budgets = {}
+    for role in ('stops', 'picking', 'lead'):
+        runner.invoke_agent(role)
+        budgets[role] = runner.role_budget(role)
+
+    assert budgets['lead'] > budgets['stops'], "lead is the heavier role"
+    assert budgets['stops'] == budgets['picking'], "both workers do one focused task"
+    # Every cap must clear the measured worst case for that role with real margin.
+    # Measured Sonnet costs: worker $1.62 (21 msgs) and $3.79 (55 msgs, tick 94);
+    # lead $4.48 (55 msgs). Cost tracks message count more than role, so the worker
+    # figure is pinned to the *larger* worker sample, not the flattering one.
+    WORST_WORKER, WORST_LEAD = 3.79, 4.48
+    assert budgets['stops'] > WORST_WORKER, f"worker cap {budgets['stops']} too tight"
+    assert budgets['lead'] > WORST_LEAD, f"lead cap {budgets['lead']} too tight"
+    # ...and must still be below the $12 flat cap this replaced.
+    assert max(budgets.values()) < 12.0, "the point was to lower the ceiling"
+
+
+def test_role_budget_defaults_for_unknown_role():
+    """An unrecognised role must get the conservative worker figure, not KeyError."""
+    assert runner.role_budget('some-future-role') == runner._DEFAULT_MAX_BUDGET_USD
 
 
 # ── Lead must not re-audit unchanged state on its fixed daily clock ────────────────
