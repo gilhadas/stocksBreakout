@@ -34,8 +34,30 @@
 # Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + auto-add positions
 35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
 
+# ── POSITION MANAGEMENT (refresh_prices) ───────────────────────────────────
+# refresh_prices() is the ONLY code path that raises the ATR×2.0 trail and
+# auto-closes a position on a stop breach. It was chained onto these same exit
+# jobs in cron_jobs.txt (the retired Mac schedule) but never carried across when
+# docker/crontab was branched — the same cron_jobs.txt-vs-docker/crontab drift
+# already documented in CLAUDE.md §13 for the exit + monitor paths, third
+# instance. Symptom (found 2026-07-27): every position in every book had
+# current_price == entry_price, zero positions had ever been closed, and three
+# sat 27–30% BELOW their stops since April.
+#
+# Two runs, matching the close-basis design in §12 Task 1 (dc3e252):
+#   10:00 ET — pre-15:30, so _close_basis_history() drops today's partial bar and
+#              decides on the last COMPLETED daily close (overnight-gap catch-up).
+#   15:45 ET — late window, near-close price is a fair proxy for today's close.
+# Uses *_all_users: plain refresh_prices() only touches the default book.
+# _save() writes S3 via utils.save_json, so no separate upload step is needed.
+
+# Weekdays 10:00 AM — Close-basis catch-up: raise trails, honour stops breached
+# on yesterday's close.
+0 10 * * 1-5 cd /app && python3 -c "from auto_portfolio import refresh_prices_all_users; refresh_prices_all_users()" >> scanner_output/logs/cron_refresh.log 2>&1
+
 # Weekdays 3:45 PM — Swing exit evaluation (from actual portfolio, not mock file)
-45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1
+# then refresh prices / raise trails / close stopped-out positions.
+45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1 && python3 -c "from auto_portfolio import refresh_prices_all_users; refresh_prices_all_users()" >> scanner_output/logs/cron_refresh.log 2>&1
 
 # Weekdays 4:30 PM — Phase 2: Re-evaluate PREMIUM + combined exit check (use actual portfolio for exits)
 30 16 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-from-portfolio --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING_CLOSE}" > /dev/null 2>&1 || true
