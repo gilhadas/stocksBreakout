@@ -692,6 +692,33 @@ tests/test_backtest_atr_trail.py). But cron runs `refresh_prices()` at **10:00 A
 above. The 10 AM run also raises the trail using an intraday price as a pseudo-close. 15:45 run is
 a fair close proxy; the 10:00 run is the deviation. → Task 1 below.
 
+> **🔴 CORRECTION (2026-07-27) — the premise of the paragraph above was false, and this
+> is the single most expensive documentation error in this file.**
+>
+> "cron runs `refresh_prices()` at 10:00 AND 15:45 ET" cited **`cron_jobs.txt`** — the
+> **retired Mac** schedule, which had not been production since the §9 cutover on
+> 2026-07-07. `docker/crontab`, the file supercronic actually runs on EC2, had **never**
+> contained `refresh_prices` in any commit (`git log -S` on that path is empty; the file
+> was branched 2026-02-19, a month before `75a638f` introduced the call).
+>
+> So the audit was analysing a schedule that was not running, and Task 1's fix
+> (`dc3e252`, `_close_basis_history`) shipped **into a function cron never called.**
+> Consequences observed in S3 production state on 2026-07-27: `current_price ==
+> entry_price` on all 25 open positions across both live books, **zero** positions
+> closed ever, three sitting 27–30% below their stops since April, and AMD at +145%
+> with its stop still at the original entry-level value. The champion's largest measured
+> edge (+97 pts compound / +0.45 Sharpe) had never run in production.
+>
+> Fixed 2026-07-27 (`d20c2a5`, deployed): `refresh_prices_all_users()` added — bare
+> `refresh_prices()` only touches the default book, not the per-user portfolios — and
+> wired into `docker/crontab` at 10:00 and 15:45 ET. Guarded by
+> `tests/test_crontab_parity.py`, whose SEMANTIC_FLAGS check would have caught this the
+> moment `42f4817` landed.
+>
+> **Standing rule: reason about production from `docker/crontab` only.** `cron_jobs.txt`
+> is retired and now carries a banner saying so. Task 1's close-basis logic is correct
+> and is only now actually executing.
+
 ### Research review (sources in git history / session log) mapped to measured weaknesses
 1. **Daniel & Moskowitz "Momentum Crashes"** — momentum crashes happen in panic states (post-
    decline, high vol, during rebounds) because losers' beta >3 → snap back together. This IS the
@@ -825,6 +852,23 @@ display-only signal log.
 `cron_jobs.txt` and `docker/crontab` are two hand-maintained copies of the same schedule with no
 test or CI check binding them. Only `docker/crontab` runs in production. Any schedule change must
 be applied to both, and drift between them is invisible until it produces a symptom like this.
+
+### ⚠ Follow-up (2026-07-27): this fix was a PARTIAL PORT, and the rest bit four days later
+`42f4817` ported the `--exit-from-portfolio` half of commit `75a638f` and rewrote those exact cron
+lines — **without** the `&& refresh_prices()` tail that the same commit had added to the same lines
+in `cron_jobs.txt`. `refresh_prices` is the only path that raises the ATR trail and auto-closes on
+a stop breach, so production held every position forever regardless of stops (see the 🔴 CORRECTION
+in §12 for the measured damage). Third instance of this drift, same root commit as the first two.
+
+Three consequences, all now in place:
+1. **`tests/test_crontab_parity.py`** — the binding check whose absence the Lesson above named as
+   root cause, but which was never actually written at the time. Its `SEMANTIC_FLAGS` test asserts
+   every behaviour-defining flag used in `cron_jobs.txt` also appears in `docker/crontab`; it fails
+   on the exact state production was in.
+2. **`cron_jobs.txt` now opens with a RETIRED banner** listing all three incidents. It is kept
+   solely as the reference the parity test diffs against.
+3. **When porting a commit between the two files, port the whole line, not the flag you came for.**
+   All three incidents were one commit touching one line and only part of it being carried across.
 
 ## 13. Tiebreak / Sleeve / Panic-4b / NBC Validation Cycle (2026-07-23/24)
 

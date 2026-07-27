@@ -588,6 +588,47 @@ def verify_static() -> None:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+VENDORED = ('technical-indicators', 'chart-patterns', 'portfolio-exits',
+            'market-regime', 'fibonacci-bounce', 'sentiment-analysis')
+
+
+def verify_vendoring() -> None:
+    """
+    The vendored skills must be the SAME BYTES as the repo copy, not a duplicate.
+
+    Two hand-maintained copies of one document with nothing binding them is the
+    cron_jobs.txt <-> docker/crontab arrangement that caused three production
+    incidents. Symlinking makes drift impossible; this check makes sure nobody
+    quietly replaces a symlink with a copy and reintroduces the failure mode.
+    """
+    print("\n[0] vendoring — ~/.claude/skills is linked to the repo, not copied")
+    repo_skills = REPO / 'skills'
+    if not repo_skills.exists():
+        check(False, 'repo skills/ directory exists', str(repo_skills))
+        return
+
+    for name in VENDORED:
+        live = SKILLS / name
+        vendored = repo_skills / name / 'SKILL.md'
+        if not live.exists():
+            check(False, f'{name}: present in ~/.claude/skills', 'MISSING — broken symlink?')
+            continue
+        if not vendored.exists():
+            check(False, f'{name}: vendored into repo skills/', 'MISSING')
+            continue
+
+        # A symlink is the intended arrangement; identical content is acceptable
+        # (e.g. a fresh clone before linking). Divergent content never is.
+        linked = live.is_symlink() and live.resolve() == (repo_skills / name).resolve()
+        same = (live / 'SKILL.md').read_text() == vendored.read_text()
+        check(linked or same, f'{name}: live copy tracks the repo',
+              'symlinked' if linked else ('identical content (not linked)' if same
+                                          else 'DIVERGED — live and repo differ'))
+        if same and not linked:
+            print(f"       note: {name} is a COPY, not a symlink — it will drift. "
+                  f"See skills/README.md.")
+
+
 def guarded(fn, label: str) -> None:
     """
     Run a check group, converting an exception into a FAIL rather than a crash.
@@ -619,6 +660,7 @@ def main() -> int:
     df = load_bars(args.symbol, args.start, end)
     print(f"Bars   : {len(df)}")
 
+    guarded(verify_vendoring, 'vendoring')
     guarded(lambda: verify_indicator_formulas(df), 'technical-indicators formula parity')
     guarded(lambda: verify_composite_scores(df), 'technical-indicators composite/prose claims')
     guarded(lambda: verify_trailing_stop(df), 'portfolio-exits trail parity')
