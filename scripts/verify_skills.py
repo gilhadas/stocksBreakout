@@ -295,6 +295,77 @@ def verify_composite_scores(df: pd.DataFrame) -> None:
               f'Minervini {tag.upper()} documented as in quantkit',
               row.strip()[:80] or 'ROW MISSING')
 
+    # ── TradingView parity cheatsheet ────────────────────────────────────────
+    # The ✅ marks were pure assertion until 2026-07-27. Two were wrong. These pin
+    # the **measured*_ relationship so the table cannot drift back to claiming parity.
+    tv_section = text.split('TradingView Parity Cheatsheet')[1]
+
+    def tv_row(name: str) -> str:
+        """
+        The cheatsheet TABLE ROW for one indicator.
+
+        Must target the row, not the whole section: the explanatory prose *below* the
+        table also mentions ddof=0 and ❌, so a section-wide substring search passes
+        even after the table itself is reverted to claiming parity. (Caught by the
+        mutation test — the first version of this check was vacuous.)
+        """
+        for line in tv_section.splitlines():
+            if re.match(rf'^\|\s*{re.escape(name)}\s*\|', line.strip()):
+                return line
+        return ''
+
+    # BB: pandas .std() is ddof=1 (sample); TradingView ta.stdev is ddof=0 (population).
+    sma20 = df['close'].rolling(20).mean()
+    qk_upper = qk.calculate_bollinger_bands(df)[0]
+    tv_upper = sma20 + 2 * df['close'].rolling(20).std(ddof=0)
+    band_gap = (qk_upper - tv_upper).abs().dropna()
+    check(band_gap.max() > 0.01,
+          'BB really does differ from TradingView (ddof=1 vs 0)',
+          f'max ${band_gap.max():.4f}, ratio sqrt(20/19)={np.sqrt(20/19):.6f}')
+    bb_row = tv_row('BB')
+    check('ddof=0' in bb_row and '✅' not in bb_row,
+          'cheatsheet BB row requires ddof=0 and does NOT claim parity',
+          bb_row.strip()[:90] or 'BB ROW MISSING')
+
+    # ...but the squeeze verdict must be unaffected, because is_consolidating is a
+    # ratio to its own mean and the constant factor cancels. If this ever fails, the
+    # scanner's consolidation step HAS changed and the skill's reassurance is stale.
+    _, _, qk_w, _, qk_cons = qk.calculate_bollinger_bands(df)
+    tv_w = (tv_upper - (sma20 - 2 * df['close'].rolling(20).std(ddof=0))) / sma20 * 100
+    tv_cons = tv_w < tv_w.rolling(20).mean() * 0.6
+    both = qk_cons.notna() & tv_cons.notna()
+    check(int((qk_cons[both] != tv_cons[both]).sum()) == 0,
+          'BB squeeze verdict is ddof-invariant (the 2.6% factor cancels)',
+          f'{int((qk_cons[both] != tv_cons[both]).sum())} of {int(both.sum())} bars differ')
+
+    # ADX: quantkit smooths DI and ADX with an SMA; Wilder/TradingView use RMA.
+    adx_qk = qk.calculate_adx(df)
+    pdm = df['high'].diff(); mdm = -df['low'].diff()
+    pdm = pdm.where((pdm > mdm) & (pdm > 0), 0)
+    mdm = mdm.where((mdm > pdm) & (mdm > 0), 0)
+    atr14 = qk.calculate_atr(df)
+    pdi = 100 * pdm.ewm(alpha=1/14, adjust=False).mean() / atr14.replace(0, 1e-10)
+    mdi = 100 * mdm.ewm(alpha=1/14, adjust=False).mean() / atr14.replace(0, 1e-10)
+    dx_w = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, 1e-10)
+    adx_wilder = dx_w.ewm(alpha=1/14, adjust=False).mean()
+    ok = adx_qk.notna() & adx_wilder.notna()
+    gap = (adx_qk[ok] - adx_wilder[ok]).abs().mean()
+    check(gap > 1.0,
+          'ADX genuinely diverges from Wilder/TradingView (skill must not claim parity)',
+          f'mean|Δ| {gap:.1f} pts; >25 gate fires on '
+          f'{(adx_qk[ok] > 25).mean()*100:.0f}% vs {(adx_wilder[ok] > 25).mean()*100:.0f}% of bars')
+    adx_row = tv_row('ADX')
+    check('❌' in adx_row and '✅' not in adx_row,
+          'cheatsheet ADX row marks it NOT TradingView-equivalent',
+          adx_row.strip()[:90] or 'ADX ROW MISSING')
+
+    # And the rows that ARE exact must keep saying so — a guard that only fires on
+    # bad news would let a correct claim be quietly deleted.
+    for name in ('RSI', 'ATR', 'EMA', 'SMA', 'MACD'):
+        row = tv_row(name)
+        check('✅' in row, f'cheatsheet still claims exact parity for {name}',
+              row.strip()[:70] or f'{name} ROW MISSING')
+
     # ── Volume Profile ───────────────────────────────────────────────────────
     vp = qk.compute_volume_profile(df)
     for key in ('vpoc', 'value_area_high', 'value_area_low',
