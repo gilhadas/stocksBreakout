@@ -602,9 +602,12 @@ def verify_vendoring() -> None:
     quietly replaces a symlink with a copy and reintroduces the failure mode.
     """
     print("\n[0] vendoring — ~/.claude/skills is linked to the repo, not copied")
-    repo_skills = REPO / 'skills'
+    # NOT `REPO / 'skills'` — that is a pre-existing Python package (skills/scan.py,
+    # skills/__init__.py's SKILLS_REGISTRY, documented in SKILLS.md). The Claude Code
+    # skill documents live in claude_skills/ to keep the two namespaces apart.
+    repo_skills = REPO / 'claude_skills'
     if not repo_skills.exists():
-        check(False, 'repo skills/ directory exists', str(repo_skills))
+        check(False, 'repo claude_skills/ directory exists', str(repo_skills))
         return
 
     for name in VENDORED:
@@ -626,7 +629,7 @@ def verify_vendoring() -> None:
                                           else 'DIVERGED — live and repo differ'))
         if same and not linked:
             print(f"       note: {name} is a COPY, not a symlink — it will drift. "
-                  f"See skills/README.md.")
+                  f"See claude_skills/README.md.")
 
 
 def guarded(fn, label: str) -> None:
