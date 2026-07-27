@@ -632,3 +632,88 @@ every backtest also dogs live's dominant signal type — because that, unlike ra
 tweaks, targets a large, already-quantified problem on the population that actually
 trades money.
 
+---
+
+## 2026-07-27 — worker-stops: H4 per-Type profile + H5 hold-duration split (agent tick)
+
+**Task:** the lead's 2026-07-26 review flagged H4 as top priority — a dedicated per-Type
+profile table (forward return, hit-rate, hold-duration incl. ≤15d/>15d split) had been on
+the board since bootstrap and never executed. H5 (does the ≤15d/>15d WR drag documented
+everywhere in CLAUDE.md §8/§13 exist inside TREND_CONFIRM) was queued to follow directly
+from H4's output. Ran both in one pass since they share the same underlying computation.
+Checked first whether new panel data changed the frozen (bars_available≥30) episode set —
+it has not (still 1675 episodes, 41 dates, 2026-04-01→06-08, matching the lead's own
+audit two days ago), so this used the same stable dataset H1/H2/H3 used, per the guardrails'
+n≥30/episode-dedup rule.
+
+**Method (arithmetic on the observed path, not a simulation):** for each frozen episode,
+found the first bar that touched the signal's own (HZ1-guarded) stop or target level —
+`bars_to_stop`/`bars_to_target` in the panel, both already first-touch, not extremum, so no
+look-ahead. Whichever level was touched first determines `exit_bars`/`exit_type`; if neither
+was touched within 30 bars, the trade is marked "time exit" and scored win/loss by the sign
+of `ret_30d` (fallback `ret_20d`). This mirrors the champion backtest's own exit hierarchy
+(stop / target / MAX_HOLD mark-to-market) but is **not** a simulation of the live ATR trail —
+it uses the CSV's fixed initial stop/target, which is a different (tighter, non-ratcheting)
+instrument. Full code: `research/tmp/h4_analysis.py`.
+
+### H4 — per-Type profile (n≥30, frozen episodes only)
+
+| Type | n | ret_30d mean/median | hit_stop% | hit_target% | bars-to-stop med | bars-to-target med | exit-based WR% |
+|---|---:|---|---:|---:|---:|---:|---:|
+| TREND_CONFIRM | 1459 | +6.40 / +2.24 | 54.9 | 28.8 | 6.0 | 13.0 | 42.3 |
+| BOUNCE | 134 | +1.38 / −0.12 | 60.4 | 20.7 | 5.0 | 11.0 | 34.3 |
+| CONTINUATION | 62 | +4.38 / +0.56 | 71.0 | 52.5 | 3.0 | 5.0 | 45.2 |
+| TC\|GOLD | 129 | +8.55 / — | 46.5 | 35.5 | — | — | 46.5 |
+| TC\|PREMIUM | 1330 | +6.19 / — | 55.7 | 28.2 | — | — | 41.9 |
+
+**Note on WR definitions — two different, both correct, numbers exist for TC.** H3's
+coverage note reported `winner_rate_ret30d: 0.589` for TREND_CONFIRM — that is the raw
+"did the stock finish positive by day 30" rate. This table's `overall_wr_pct` (42.3%) is the
+**exit-based** rate: it counts a trade as a loss the moment it first touches its own stop,
+even if the stock later recovers and finishes positive. Both are legitimate measurements of
+different questions (did the stock end up, vs would a static-stop position have been
+profitable) — do not conflate them or treat one as superseding the other.
+
+### H5 — the ≤15d/>15d hold split, measured inside TREND_CONFIRM
+
+| Cohort | ≤15d n / WR% | >15d n / WR% | gap (pp) | two-prop z |
+|---|---|---|---:|---:|
+| TREND_CONFIRM | 804 / 22.6 | 655 / 66.4 | **43.8** | −16.85 |
+| TC\|PREMIUM | 728 / 21.2 | 602 / 66.9 | **45.7** | −16.81 |
+| TC\|GOLD | 76 / 36.8 | 53 / 60.4 | 23.6 | −2.64 |
+| BOUNCE | 76 / 18.4 | 58 / 55.2 | 36.8 | −4.45 |
+| CONTINUATION | 56 / 42.9 | 6 / 66.7 | — | n/a, gt15d n=6 underpowered |
+
+**Verdict: H5's kill condition is NOT met.** The kill condition, as written, was "WR gap
+materially smaller within TC than the backtests' 40–70pp shape (say, <20pp)". The measured
+gap is 43.8pp overall and 45.7pp within TC|PREMIUM (n=1330, the highest-powered cell) — squarely
+inside the 40–70pp range every `--no-tc` (~99.7% BOUNCE) backtest in CLAUDE.md §8/§13 showed.
+Both z-scores are extreme (~−17) purely because n is large — this is not a fragile effect, it
+is the single largest, most statistically overdetermined finding on the panel to date, and it
+sits on the population that is 87% of what live actually trades. TC|GOLD shows a smaller but
+still-significant gap (23.6pp, z=−2.64) — quality tier attenuates the drag, it does not
+eliminate it.
+
+**Conclusion: the universe-independent short-hold drag documented in CLAUDE.md §8/§13 is NOT a
+BOUNCE/mean-reversion-only artifact.** It is present, comparably large, and highly significant
+inside live's dominant TREND_CONFIRM stream — directly contradicting the implicit worry that
+§8/§13's 11-null-lever streak might not generalize to what live trades. This is exactly the
+"large + affects what live trades" combination the lead's steering rule ranked above H2's
+ranking-model retry.
+
+**No proposal to ship — this is diagnostic, per H4/H5's own scope ("no lever, no sweep-
+discipline gate needed").** The natural next step is the one H5's own text already named:
+look for an *admission-time* feature (available before the trade) that predicts ≤15d-vs->15d
+bucket membership for a TREND_CONFIRM signal. That is a sharper, more actionable target for
+H2's blocked walk-forward ranker than raw `ret_20d` — but H2 remains blocked on data volume
+(frozen episode set still capped at 1675/41 dates, unchanged since 2026-07-26, next growth
+~mid-to-late August 2026 per the still-unmet reopening trigger). Recommend the lead open a new
+hypothesis (or extend H2) scoped specifically to "predict TC hold-bucket from admission-time
+features," to run once that data arrives — not before, since a model trained on 36 days already
+failed to generalize once (H2) and this target has the same data requirement.
+
+Results appended to `research/ledger/results.jsonl` (hypothesis H4, task
+`per-type-profile-table`; hypothesis H5, task `le15d-vs-gt15d-hold-split-within-TC`).
+`hypotheses.md` not edited (lead-owned per its own header); flagging for the lead to update
+H4/H5 status on next review.
+
