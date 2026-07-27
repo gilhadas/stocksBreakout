@@ -134,6 +134,64 @@ def verify_indicator_formulas(df: pd.DataFrame) -> None:
     )
     series_match(ns['adx'], qk.calculate_adx(df), 'ADX(14)')
 
+    # Everything else the skill ships as runnable code. Extended 2026-07-27 —
+    # the original three (ATR/RSI/ADX) were the only *functions*; the rest are bare
+    # snippets, which were never machine-checked and are exactly where VWAP drifted.
+    def snippet(needle: str, want: str, canonical, tol: float = 1e-9):
+        ns = run_fence(fence_with('technical-indicators', needle),
+                       {'pd': pd, 'np': np, 'df': df.copy(),
+                        'calculate_atr': qk.calculate_atr, 'calculate_rsi': qk.calculate_rsi,
+                        'close': df['close'], 'rsi': qk.calculate_rsi(df), 'lookback': 20})
+        series_match(ns[want], canonical, f'{want} snippet', tol)
+
+    snippet('vol_ratio', 'vol_ratio', qk.calculate_volume_ratio(df))
+    snippet('roc =', 'roc', qk.calculate_roc(df))
+
+    # BB returns (upper, lower, width, avg_width, is_consolidating) — NOT
+    # (upper, middle, lower). Mis-unpacking this produces a fake 283-point diff.
+    bb_u, bb_l, bb_w, _, bb_c = qk.calculate_bollinger_bands(df)
+    for want, canon in (('upper', bb_u), ('lower', bb_l), ('width', bb_w)):
+        snippet('upper = sma + 2 * std', want, canon)
+
+    m_line, m_sig, m_hist = qk.calculate_macd(df)
+    for want, canon in (('macd', m_line), ('signal', m_sig), ('hist', m_hist)):
+        snippet('ema_fast', want, canon)
+
+    stoch = qk.calculate_stochastic_rsi(df)
+    snippet('stoch_k', 'stoch_k', stoch[0] if isinstance(stoch, tuple) else stoch)
+
+    aroon = qk.calculate_aroon(df)          # DataFrame, lowercase columns
+    for want in ('aroon_up', 'aroon_down', 'aroon_osc'):
+        snippet('aroon_up', want, aroon[want])
+
+    # VWAP: the skill must document the session reset, not a bare continuous cumsum.
+    # A DatetimeIndex always has .date, so the reset degenerates to typical price on
+    # daily bars — dormant live (calculate_all_indicators NaNs daily vwap) but a trap
+    # for anyone reusing the function elsewhere.
+    vwap_blk = fence_with('technical-indicators', 'typical_price')
+    check('groupby' in vwap_blk and 'hasattr' in vwap_blk,
+          'VWAP snippet documents the per-session reset, not a bare cumsum')
+    daily_vwap = qk.calculate_vwap(df, '1d').dropna()
+    tp = ((df['high'] + df['low'] + df['close']) / 3).loc[daily_vwap.index]
+    collapses = bool(np.allclose(daily_vwap, tp))
+    # Look for the warning near the VWAP section rather than keyword-matching the
+    # whole file: the claim is "the skill tells you daily VWAP is just typical price".
+    vwap_section = (SKILLS / 'technical-indicators' / 'SKILL.md').read_text()
+    vwap_section = vwap_section.split('#### VWAP')[1].split('####')[0].lower()
+    # Normalise: prose wraps mid-phrase and blockquote lines carry a leading '>',
+    # so a raw substring search misses "typical\n> price".
+    vwap_section = re.sub(r'\s*>?\s+', ' ', vwap_section)
+    warned = 'typical price' in vwap_section and 'daily' in vwap_section
+    check(collapses == warned,
+          'skill warns iff daily VWAP collapses to typical price',
+          f'collapses={collapses}, skill warns={warned}')
+
+    check(qk.calculate_trend_line(df, 'EMA', 21).equals(
+              df['close'].ewm(span=21, adjust=False).mean()),
+          'EMA idiom matches calculate_trend_line (span, adjust=False)')
+    check(qk.calculate_trend_line(df, 'SMA', 50).equals(df['close'].rolling(50).mean()),
+          'SMA idiom matches calculate_trend_line')
+
     # Regression guard: prove the OLD buggy form would have failed this check,
     # so a PASS above is meaningful rather than vacuous.
     plus_dm = df['high'].diff().clip(lower=0)
@@ -350,6 +408,11 @@ def verify_static() -> None:
                         bound.add(n.name)
                     elif isinstance(n, ast.comprehension):
                         bound |= {x.id for x in ast.walk(n.target) if isinstance(x, ast.Name)}
+                    elif isinstance(n, ast.Lambda):
+                        bound |= {a.arg for a in n.args.args}
+                    elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                        bound |= {x.id for x in ast.walk(n.optional_vars)
+                                  if isinstance(x, ast.Name)}
                 for n in ast.walk(fn):
                     if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id not in bound:
                         problems.append(f"{sk} block{i} {fn.name}(): undefined {n.id!r}")
@@ -357,6 +420,20 @@ def verify_static() -> None:
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
+
+def guarded(fn, label: str) -> None:
+    """
+    Run a check group, converting an exception into a FAIL rather than a crash.
+
+    A missing snippet makes fence_with() raise LookupError — and that is precisely
+    the "someone gutted a section" case the guard exists to catch. Crashing there
+    reports nothing at all; a FAIL names the section.
+    """
+    try:
+        fn()
+    except Exception as exc:                                  # noqa: BLE001
+        check(False, f'{label} (raised {type(exc).__name__})', str(exc)[:160])
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -375,10 +452,10 @@ def main() -> int:
     df = load_bars(args.symbol, args.start, end)
     print(f"Bars   : {len(df)}")
 
-    verify_indicator_formulas(df)
-    verify_trailing_stop(df)
-    verify_api_contracts()
-    verify_static()
+    guarded(lambda: verify_indicator_formulas(df), 'technical-indicators formula parity')
+    guarded(lambda: verify_trailing_stop(df), 'portfolio-exits trail parity')
+    guarded(verify_api_contracts, 'API contracts')
+    guarded(verify_static, 'static hygiene')
 
     print(f"\n{'=' * 68}")
     if FAILURES:
