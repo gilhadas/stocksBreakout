@@ -399,6 +399,7 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
                         'win_prob':    float(sig.get('WinProb', 0) or 0),
                         'sma_dist_pct': float(sig.get('SMA_Dist%', 0) or 0),
                         'vol':         float(sig.get('Vol', 0) or 0),  # live Vol tiebreak
+                        'rsi':         float(sig.get('RSI', 0) or 0),  # H6: RSI rank-scores candidate
                     })
                     cooldowns[symbol] = sim_date
                     break  # one signal per symbol per day
