@@ -873,3 +873,84 @@ that requires a deliberate `end_date` extension; this run cannot do that on its 
 
 No entries added to `results.jsonl` this review — this was an audit/reprioritization
 pass, not a new empirical measurement.
+
+---
+
+## 2026-07-28 (lead review) — nothing new to bank; stalled H6 attempt diagnosed and rescoped
+
+**No new committed results since 2026-07-27.** `results.jsonl` is unchanged (14 lines,
+last entry is the H2 RSI prescreen already audited). The only new commit touching
+`research/` since then is `d04f063` ("tick 106 — stops"), which only incremented
+`budget.json`'s invocation counter (8→9) — no ledger content. `runner.py --status`
+confirms: `consecutive failures: 1`. So worker-stops's most recent invocation ran and
+failed to produce anything committable — expected, since H6's stops-side task
+(`confirm_backtest.py`) is explicitly gated on picking having a candidate CSV first, and
+none existed yet.
+
+**Panel growth confirmed, but H2's block is unchanged.** Directly queried
+`panel.parquet` rather than trusting the prior tick's summary (which said "43 dates,
+through 06-09" — didn't reproduce, see hypotheses.md H2 addendum). Panel is now 10,003
+rows with `signal_date` through 2026-07-28 (today's data has genuinely landed — the
+prompt's premise is correct), but the **frozen** episode-start set (`bars_available>=30`)
+is unchanged: 1675 starts, 41 dates, still capped 2026-04-01→2026-06-08. H2 stays
+correctly blocked; no reopening.
+
+**Found and diagnosed a stalled worker-picking attempt at H6, sitting uncommitted in
+`research/tmp/` (gitignored, so invisible to `git log` — only found by listing the
+directory directly).** Evidence: `h6_build_rsi_rank_scores.py` (the CSV builder),
+`h6_extract.log` and `h6_baseline.log` (both real `backtest_regime_compare.py` runs that
+cut off silently mid-2024, no error, no output file ever written), and one small,
+additive, uncommitted change to `backtest_regime_compare.py` (`run_scan()` now stamps
+`sig['rsi']` onto every signal — needed by the CSV builder, touches nothing else).
+
+Reviewed the code change against the four lead gates before acting on it: it's not an
+empirical claim so most gates don't apply, but the relevant one — does it risk silently
+changing existing behavior — checks out. Confirmed additive-only (`grep` for
+`rank_scores` usage: the new field is only ever read by `--rank-scores` consumers), ran
+`tests/test_backtest_pooled_cap.py` + `tests/test_backtest_atr_trail.py` (20/20 green),
+and committed it (`98276b3`) so the next picking invocation doesn't have to rediscover
+this prerequisite.
+
+**Diagnosed why both scans stalled, from reading the logs against the two scripts
+involved (no new experiment run — this is code/log reading, not a measurement):**
+1. The task as written in hypotheses.md had picking run **two full 5-year scans in one
+   invocation** — the CSV build, and a separate manual no-op-baseline comparison. The
+   second one is redundant: `confirm_backtest.py` (assigned to stops, downstream) already
+   runs a paired candidate-vs-baseline comparison as its entire purpose. Cutting the
+   duplicate roughly halves picking's compute for zero information loss.
+2. The CSV builder **never checkpoints** — it accumulates all 5 years in memory and
+   writes once at the end. The log shows 2022 and 2023 completed in full (31 and 156
+   TREND_CONFIRM PREMIUM+/GOLD signals respectively, printed to stdout) before the
+   process died partway through 2024 — genuinely completed work, entirely lost, because
+   nothing was persisted.
+3. **A universe/year mismatch that would have produced a misleading result even if the
+   scans had finished:** the stalled attempt scored `optimizer_watch.txt` (50 symbols)
+   across 2022–2026, but `confirm_backtest.py` defaults to `spx_plus.txt` (548 symbols)
+   and `--years 2022,2024`. A rank-scores CSV run against a much larger gate universe
+   than it was built on would leave most `(date,symbol)` pairs unscored — those fall back
+   to default ordering by design, so the gate wouldn't error, but a resulting null would
+   have been a **coverage failure silently reading as a null finding**, not evidence
+   against RSI. This is exactly the kind of result the audit gates exist to catch before
+   it gets banked — worth stating explicitly since it would have been easy to bank as a
+   real `closed-null` if the run had merely finished rather than crashed.
+
+**Action taken: rescoped H6's task text in hypotheses.md, status unchanged (`active`,
+top priority).** Not a new hypothesis, not a new result — the same task, corrected based
+on hard evidence from the failed attempt: checkpoint the CSV per year; limit the first
+pass to years 2022+2024 (`confirm_backtest.py`'s own default gate years, and the years
+already 40% scanned in the dead log) instead of all 5; keep `optimizer_watch.txt`
+throughout (both the CSV build and the eventual gate run, via `confirm_backtest.py
+--watchlist input/optimizer_watch.txt`) so coverage matches end to end; drop the
+redundant baseline run entirely. Full text in hypotheses.md H6.
+
+**What I'd tell a trader who asked "is this worth anything yet?":** Same answer as
+yesterday — nothing has changed on the merits, because nothing new was measured today.
+What changed is operational: the team's first attempt at the highest-value open question
+(does RSI-conditioning survive real multi-year history) silently failed and would have
+wasted a second invocation repeating the same mistake, or worse, come back with a
+misleading "null" from a coverage bug rather than a real test. That's now fixed. The
+open, undiminished risk is the same one flagged yesterday: `budget.json.end_date` is
+2026-07-31, three days from today, and H6 has not yet produced a single number.
+
+**No entries added to `results.jsonl`** — nothing was measured today, only diagnosed.
+The `98276b3` code commit and the hypotheses.md rescoping are the only changes.

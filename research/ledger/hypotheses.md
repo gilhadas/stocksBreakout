@@ -4,10 +4,12 @@ Status values: `active` | `blocked` | `closed-null` | `closed-promising`
 The **lead** owns this file. Workers read it to pick their next task and may append
 evidence lines, but only the lead changes a status or reorders priorities.
 
-Last lead review: 2026-07-27 (ticks reviewed: H4 per-Type profile table + H5 hold-split-
-within-TC, both 2026-07-27 worker-stops; H2 reopening-trigger recheck + admission-time
-RSI prescreen, 2026-07-27 worker-picking). See `decisions.md` same date for the full
-audit and rationale. New hypothesis H6 opened this review.
+Last lead review: 2026-07-28 (no new committed results since 2026-07-27 — this review
+audited a stalled, uncommitted worker-picking attempt at H6 found in `research/tmp/` and
+rescoped the task; see `decisions.md` 2026-07-28 for the full diagnosis). Prior review:
+2026-07-27 (ticks reviewed: H4 per-Type profile table + H5 hold-split-within-TC, both
+worker-stops; H2 reopening-trigger recheck + admission-time RSI prescreen,
+worker-picking).
 
 ---
 
@@ -73,6 +75,15 @@ reopening prematurely.
 **Reconfirmed 2026-07-27:** frozen episode-start count is still 1675/43 dates
 (2026-04-01→06-09); the panel grew to 9961 rows and one new frozen date, but that date
 added zero new episode starts (all re-flags). No change to the mid-to-late-August ETA.
+
+**Reconfirmed 2026-07-28 (lead, direct panel query, not a worker tick):** panel is now
+10003 rows (signal_date up to 2026-07-28 — today's data has landed), but the frozen set
+(`bars_available>=30` among `is_episode_start`) is **unchanged**: 1675 starts, 41 dates,
+still capped 2026-04-01→2026-06-08. (The prior tick's "43 dates/06-09" figure doesn't
+reproduce against a direct `bars_available` query today — likely counted something
+slightly different, e.g. all rows vs episode-starts; immaterial either way since the
+episode-start count, the number that actually gates a walk-forward, is identical.) No
+frozen date has moved past 06-08 since HZ4's gap was first logged. ETA unchanged.
 
 **No task assigned to picking this cycle for the multivariate retry.** Next task, when
 reopened: retry the walk-forward Ridge with ≥70 frozen training days, targeting H5's now-
@@ -162,22 +173,70 @@ though TC is blocked in RED_MARKET/BEARISH — see the standard caveat below),
 does not have yet. This sidesteps H2's data-volume block entirely rather than waiting on
 it, and is checkable within the current budget window.
 
-**Next task (assign to picking, next tick):** build a `date,symbol,score` CSV scoring
-TREND_CONFIRM signals in the historical backtest universe by RSI (e.g., percentile within
-day, or a monotone transform matching the decile shape H2's prescreen measured — worker's
-judgment on the exact form, since the panel screen only established direction/shape, not
-a specific functional form). Run `backtest_regime_compare.py --realistic-sizing
---rank-scores <file>` across the full 2022–2026 window (`--population live`, i.e. TC Path
-A enabled — do NOT use `--no-tc`, that reproduces a population that is not TREND_CONFIRM).
-Report per-year Sharpe (realistic-sizing arm per the standing §11 rule) vs the champion
-baseline, AND the ≤15d/>15d trade-count and WR split per year (the halt criterion below).
+**⚠ RESCOPED 2026-07-28 (lead) — the first attempt stalled, and the task as originally
+written is why.** A worker-picking invocation started this (evidence: uncommitted,
+gitignored scratch in `research/tmp/` — `h6_build_rsi_rank_scores.py`,
+`h6_extract.log`, `h6_baseline.log`, plus one small, safe, additive code change to
+`backtest_regime_compare.py`'s `run_scan()` stamping `sig['rsi']` onto every signal,
+which the lead reviewed, tested — 20/20 `test_backtest_pooled_cap`/`test_backtest_atr_trail`
+still green — and committed [`98276b3`] since it's a harmless prerequisite any future
+attempt needs). **Neither log finished**: both cut off silently mid-2024 (no error, no
+CSV ever written) — consistent with the runner's own "consecutive failures: 1" and its
+existing 30m→8h backoff. Root cause of the stall, from reading the logs and the two
+scripts involved:
+1. **The task ran two full 5-year scans back to back in one invocation.** `h6_extract.log`
+   was building the rank-scores CSV (looping `YEARS=[2022..2026]` on `optimizer_watch.txt`,
+   50 symbols); `h6_baseline.log` was a *second*, separate full 5-year scan re-deriving a
+   no-op baseline. That second scan was unnecessary duplicate work: **`confirm_backtest.py`
+   already runs a paired candidate-vs-baseline comparison internally** (that is its entire
+   purpose — see its module docstring) — the baseline half belongs to stops's downstream
+   gate step, not to picking's CSV-building step. Cutting it removes roughly half the
+   compute for zero information loss.
+2. **The CSV-builder never checkpoints.** `h6_build_rsi_rank_scores.py` accumulates `rows`
+   across all 5 years in memory and only calls `.to_csv()` once, after the final year. The
+   log shows 2022 and 2023 completed *in full* (31 and 156 TC PREMIUM+/GOLD signals
+   respectively, printed to stdout) before the process died mid-2024 — that work was
+   100% real and 100% lost, because nothing was persisted until the very end. Any
+   worker rebuilding this must write (or append) the CSV after each year's loop
+   iteration, not just once at the end.
+3. **Universe/year mismatch with the downstream gate.** `confirm_backtest.py` defaults to
+   `--watchlist input/spx_plus.txt` (548 symbols) and `--years 2022,2024` (2 years) — the
+   stalled attempt targeted `input/optimizer_watch.txt` (50 symbols) and all 5 years. If
+   stops later runs the gate at its *defaults*, a CSV scored on a 50-symbol universe will
+   have almost no `(date,symbol)` coverage against a 548-symbol gate run — unscored
+   signals silently keep the default order (by design, degrades gracefully — but here
+   that means the candidate barely gets tested at all, and a resulting null would be a
+   **coverage failure masquerading as a null finding**, not evidence RSI doesn't work.
 
-**Follow-on (assign to stops once picking has a candidate):** run the result through
-`research/confirm_backtest.py --rank-scores <file> --population live` (the mandatory
-promotion gate, default years 2022,2024) and quote its printed realized signal-type mix —
-per the standing caveat, 2022 will show few/no TREND_CONFIRM trades since TC is blocked
-in RED_MARKET/BEARISH, so 2022 is a downside check only, not a test of this specific rule;
-2024 is where this candidate must actually prove itself.
+**Corrected next task (assign to picking, next tick):**
+- Build the `date,symbol,score` CSV scoring TREND_CONFIRM PREMIUM+/GOLD signals by RSI
+  (worker's judgment on exact functional form, per the original instruction — direction/
+  shape only was established by the prescreen). **Checkpoint after every year** (append to
+  the CSV or write `research/tmp/h6_rsi_rank_scores_<year>.csv` per year and concatenate at
+  the end) so a repeat stall doesn't lose completed years again.
+- **Limit the first pass to years 2022 and 2024** — exactly `confirm_backtest.py`'s own
+  default gate years — instead of all 5. This alone should roughly halve the remaining
+  compute versus the stalled attempt (which had already burned through 2022+2023 before
+  dying in 2024). Extending to 2023/2025/2026 is only worth doing *after* a 2022/2024
+  result exists and is promising.
+- Keep the universe as `optimizer_watch.txt` (matches the work already validated as
+  running successfully in the stalled log) — **do not** switch to `spx_plus.txt` in this
+  step. Coverage must match between the CSV and whatever gate run consumes it (see below).
+- **Do not run a separate baseline comparison.** Hand the CSV straight to stops's
+  `confirm_backtest.py` step, which already produces the paired baseline.
+
+**Follow-on (assign to stops once picking has a checkpointed candidate):** run
+`research/confirm_backtest.py --rank-scores <file> --population live --watchlist
+input/optimizer_watch.txt` — **the explicit `--watchlist` override is required**, matching
+the CSV's own universe; running the gate at its 548-symbol default against a 50-symbol-built
+CSV would produce a coverage failure, not a real test (point 3 above). Quote the gate's
+printed realized signal-type mix per the standing caveat — 2022 will show few/no
+TREND_CONFIRM trades since TC is blocked in RED_MARKET/BEARISH, so 2022 is a downside check
+only, not a test of this specific rule; 2024 is where this candidate must actually prove
+itself. If this narrower run is promising, broader-universe/more-year confirmation (matching
+`confirm_backtest.py`'s actual defaults) is the natural next step before any ship decision —
+per §13.5's own lesson, a 50-symbol curated-universe result should not be promoted without a
+broader check.
 
 **Ship bar (unchanged from standing rules):** ≥+0.10 Sharpe on the realistic-sizing arm
 vs the no-op baseline (no RSI conditioning), AND >15d hold win-rate must not shrink in any
