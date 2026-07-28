@@ -1150,3 +1150,69 @@ mutation-tested (revert one line ⇒ that one test fails). 564 pass.
 - Whether one wide scan alone fits in 1400m is still unconfirmed — the first clean
   single-scan run is the datapoint. If it OOMs again, the box genuinely is too small
   (t3.small = 1907 MiB usable vs the README's own 4 GB minimum) and t3.medium is the fix.
+
+## 17. t3.small is definitively too small — resize required (2026-07-28)
+
+§16's open question ("does one wide scan alone fit in 1400m?") is answered: **no.**
+
+### Evidence
+Manual re-run of the OOM-killed Monday longterm job, nothing else on the box, §16
+serialization active (mutex verified HELD, so genuinely a solo scan):
+
+- 07:40:17 ET → `rc=137` (SIGKILL) at **08:52:55 ET — 72 min in**
+- memory 162 MiB → 1.143 GiB → **1.361 GiB of the 1.367 GiB cap = 99.55%**
+- host: 108 MiB available of 1907; cgroup OOM kill **#13**
+
+Composition at peak: ~704 MiB FinBERT resident + **~690 MiB held by the scan itself**.
+So FinBERT is only half the problem, and serialization — while necessary, it removed a
+2–3× concurrency multiplier — was never going to be sufficient.
+
+⚠ This retires §15's headroom claim. "1400m leaves ~390 MiB over the measured peak of
+1.01 GiB" was wrong because 1.01 GiB was where the *killer intervened*, not where demand
+stopped. Every OOM measurement in §15/§16 is truncated for the same reason; treat any
+"peak" taken from a killed process as a lower bound only.
+
+### Action: resize to t3.medium AND raise the cap — both, or nothing changes
+`mem_limit: 1400m` binds regardless of host RAM, so a resize on its own leaves the scan
+dying at exactly the same point. `compose.yaml` now carries **2500m**, which **must not be
+applied while the box is still t3.small** (2500m > 1907 MiB ⇒ the cgroup can never bind and
+the *host* killer fires instead — the §9 failure mode the caps exist to prevent).
+
+Order: resize first → `git pull` → `docker compose up -d scanner-cron`. A stop/start alone
+brings containers back with their OLD limits.
+
+t3.medium (2 vCPU / 4 GiB, ~$35/mo vs t3.small's ~$17.52 in eu-central-1) is same-arch, so
+no rebuild; the Elastic IP holds the address and every container has `restart:
+unless-stopped`. Note it has the **same CPU baseline and credit rate** as t3.small — it only
+doubles RAM. Scans will not get faster; the 72-min duration is network-bound on 1375
+yfinance calls. Changing instance type needs `ec2:ModifyInstanceAttribute`, which is **not**
+in `deploy/iam-recovery-policy.json` — use the AWS console.
+
+### Software levers measured, and why neither is the answer yet
+- **Free the model after use — no.** `del pipeline` + `gc.collect()` returns only **132 MiB
+  of 742 (18%)**; the rest is torch/transformers import overhead plus allocator arenas that
+  never return to the OS. It is also the wrong timing — FinBERT loads at the *end* of the
+  scan, so freeing it afterwards cannot lower peak.
+- **int8 dynamic quantization — unsafe as a drop-in.** Labels agreed 8/8 on a sample, but
+  confidence moved up to **0.32** ("Board approves a $2bn buyback" 0.865 → 0.648; "Guidance
+  cut" 0.762 → 0.442). `FINBERT_PROMOTION` gates on `min_score` **0.80** (HIGH→PREMIUM) and
+  **0.88** (PREMIUM→GOLD), and promotions feed `scan_and_add_all_users()` — so this would
+  silently change which positions are opened. Would need threshold recalibration plus a
+  backtest. (Measured on macOS/qnnpack; the container has fbgemm and needs its own run.)
+- **Process isolation — structurally right, blocked on the above.** Since ~610 MiB never
+  returns in-process, running FinBERT in a short-lived subprocess reclaims 100% on exit. But
+  the cgroup counts all processes, so it only lowers peak once the parent stops holding
+  ~690 MiB at that moment.
+
+### Open
+**Profile what the scan still holds after detection completes.** By the FinBERT stage the
+scan is finished and `results` is just a list of signal dicts, yet ~690 MiB is resident. If
+that were released before enrichment, peak would fall to ~700–800 MiB and would fit even on
+t3.small. This is the cheapest and largest remaining win, and it is not yet investigated.
+
+### Silver lining: §15's ping fix is proven in a real failure
+The kill produced `/137` and Healthchecks recorded `last_ping` **one second** after the
+exit, flipping the check to `down` immediately instead of waiting out its 3 h grace. Under
+the old `cmd && curl … || true` no ping would have been sent at all and supercronic would
+have logged "job succeeded" — the exact blindness that let the Monday failure sit unnoticed
+since Jul 23. First correctly-reported kill.

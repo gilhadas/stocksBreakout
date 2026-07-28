@@ -83,22 +83,46 @@ services:
     # loads FinBERT (~440 MB of weights + torch runtime) on the 16:30 ET swing
     # scan; it is the one that must die first if anything does.
     #
-    # 1024m → 1400m (2026-07-28). At 1024m this cap was not a safety margin, it
-    # was the binding constraint: the cgroup OOM killer fired FOUR times on
-    # 2026-07-27 (10:37, 12:25, 16:52, 20:45 ET) with anon-rss ~1007-1009 MiB
-    # each time, i.e. the scan wants marginally more than 1 GiB and died every
-    # run. The 16:52 kill is what took `swing-close` down. Measured peak is
-    # ~1.01 GiB, so 1400m leaves ~390 MiB of headroom.
+    # 1024m → 1400m (2026-07-28, §15), then 1400m → 2500m (2026-07-28, §17).
     #
-    # This deliberately spends some of the protection the caps were added for:
-    # caps now sum to 2424m against 1907 MiB of RAM, so the scan can push the
-    # host further into swap before its own cgroup stops it. That is judged
-    # acceptable only because (a) the 4 GB swapfile from deploy/setup-swap.sh is
-    # in place and near-untouched, and (b) cloudflared/tailscale still carry
-    # oom_score_adj: -500, so the host killer avoids the two lifelines whose loss
-    # caused the 7h outage. The real fix is a bigger instance — t3.small's 2 GB
-    # is below the README's own 4 GB minimum. Revisit on resize.
-    mem_limit: 1400m
+    # ⚠⚠ THIS VALUE REQUIRES t3.medium (4 GiB). DO NOT APPLY IT ON t3.small. ⚠⚠
+    # On the 1907 MiB t3.small, a 2500m cap is larger than the machine, so the
+    # cgroup limit can never bind — the *host* OOM killer fires instead, and it
+    # picks its own victim. That is precisely the failure mode the per-container
+    # caps were introduced to prevent after the 7 h outage (§9). If the box is
+    # still t3.small, keep 1400m.
+    #   Correct order: resize the instance FIRST, then `git pull` and
+    #   `docker compose up -d scanner-cron` to apply this file. A stop/start
+    #   alone restarts the containers with their OLD limits, so the pull+up is
+    #   what actually lands the change.
+    #
+    # Why 1400m was not enough (measured 2026-07-28, §17): §15 sized it against a
+    # "measured peak" of ~1.01 GiB, but that figure was where the OOM killer
+    # intervened, not where demand stopped. With the §16 serialization in place, a
+    # single wide all.txt scan running completely ALONE on an idle box reached
+    # 1.361 GiB of the 1.367 GiB cap — 99.55% — and was SIGKILLed (rc=137) 72 min
+    # in. Composition at that peak: ~704 MiB is FinBERT resident (flat, measured:
+    # 12 MiB baseline → 115 on import → 704 on first inference, and identical for
+    # a 64-headline batch), leaving ~690 MiB held by the scan itself.
+    #
+    # 2500m gives ~1.1 GiB over that observed peak. It is deliberately generous
+    # because true demand is still unknown — every measurement to date is a
+    # truncated one, taken at the moment the killer intervened.
+    #
+    # Caps then sum to 3524m against ~3900 MiB usable on t3.medium (90% worst
+    # case), but the §16 flock mutex guarantees only ONE scan is ever resident, so
+    # real concurrent usage stays far below that. cloudflared/tailscale keep
+    # oom_score_adj: -500 regardless.
+    #
+    # This is a headroom fix, not a root-cause fix. ~1.4 GiB for one scan is still
+    # unreasonable and will creep as the universe grows. The two software levers
+    # measured so far: freeing the model after use returns only 132 MiB of 742
+    # (18% — the rest is torch/transformers runtime and allocator arenas that
+    # never return), and int8 dynamic quantization shifts FinBERT confidence by up
+    # to 0.32, which straddles the 0.80/0.88 FINBERT_PROMOTION thresholds and so
+    # would silently change live admissions. The open lead is the ~690 MiB the
+    # scan still holds after detection has finished.
+    mem_limit: 2500m
 
   # ── Mobile API server ──────────────────────────────────────────────────────
   api:
