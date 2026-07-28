@@ -1006,3 +1006,66 @@ stands; but **wiring NBC into the realistic arm is a prerequisite if it is ever 
    (both), residual-dist, live-tiebreak, sleeve-slots, panic-throttle (+4b), normal-bounce-cap.
    Future effort is better spent on **signal generation** (the ≤15d hold bucket, WR 4–29%, is
    the consistent drag across every universe) than on further admission/ranking tweaks.
+
+## 15. `swing-close` DOWN — cgroup OOM kills masked by `&& curl … || true` (2026-07-28)
+
+### Symptom
+Healthchecks.io reported `swing-close` DOWN: *"success signal did not arrive on time,
+grace time passed."* Supercronic, meanwhile, logged **`job succeeded`** for the same run.
+Both were telling the truth about different things.
+
+### Root cause — two independent faults compounding
+**1. The scan exceeds its memory cap.** `sb-scanner-cron` had `mem_limit: 1024m`
+(compose.yaml, added by the §9 reliability pass). The 16:30 ET job loads FinBERT
+(~440 MB of weights + torch) on top of the scan and peaks at **anon-rss ≈ 1007–1009 MiB**
+— marginally over 1 GiB. The cap was not a safety margin, it was the binding constraint,
+and the cgroup OOM killer fired on **four** jobs on 2026-07-27 (host `dmesg`, UTC→ET):
+
+| ET | Job | Pings? |
+|----|-----|--------|
+| 10:37 | 09:35 swing scan | `HC_UUID_SWING` — also silently unpinged |
+| 12:25 | — | |
+| 16:52 | **16:30 swing-close** | `HC_UUID_SWING_CLOSE` — the reported outage |
+| 20:45 | daytrade evening | no curl tail, so it surfaced honestly as `exit status 137` |
+
+The job log's final line is a bare `Killed`.
+
+**2. The ping shape hid it.** Every healthcheck line was
+`cmd >> log 2>&1 && curl ".../${UUID}" … || true`. On a non-zero exit:
+- `&&` short-circuits ⇒ **the curl never runs, so no ping is ever sent** — the check
+  can only go down later, when the grace window expires;
+- `|| true` then forces exit 0 ⇒ **supercronic logs "job succeeded"** for a SIGKILLed job.
+
+So the one job that failed loudly (daytrade, 20:45) was the only one *without* a curl
+tail. The pattern inverted the signal: adding a healthcheck made failures less visible.
+
+### Fix (branch `fix/cron-oom-healthcheck-visibility`)
+- **All 10 ping lines** → `cmd >> log 2>&1; curl ".../${UUID}/$?" …` — `;` not `&&`, so
+  the ping always fires, and the trailing `/$?` reports the exit status (`/0` success,
+  non-zero failure; a SIGKILL sends `/137`). Healthchecks fails the check *immediately*
+  instead of waiting out the grace window. Verified in POSIX `sh` that a real `kill -9`
+  propagates as 137.
+- **`mem_limit: 1024m → 1400m`** — ~390 MiB of headroom over measured peak. This spends
+  some of the protection the caps exist for: caps now sum to 2424m against 1907 MiB RAM.
+  Accepted only because the 4 GB swapfile is in place and near-untouched, and
+  cloudflared/tailscale keep `oom_score_adj: -500` so the host killer still avoids the
+  two lifelines whose loss caused the 7h outage.
+- **`tests/test_crontab_parity.py`** gains two checks (`…not_short_circuited_by_and`,
+  `…send_the_exit_status`). Both were mutation-tested: reverting one line to the old
+  form fails them; restoring passes. 559 tests green.
+
+### Open / not fixed
+- **The box is too small.** t3.small = 1907 MiB usable, below the README's own 4 GB
+  minimum, for a scan that legitimately wants ~1 GiB alongside five other containers.
+  Raising the cap moves the pressure to the host; a resize is the actual fix.
+- **Why the scan needs ~1 GiB** is not diagnosed. `all.txt` is 1300+ symbols and the
+  process emits `resource_tracker: There appear to be 1 leaked semaphore objects` at
+  shutdown — multiprocessing may not be releasing cleanly.
+- `HC_UUID_SWING` almost certainly also failed to ping at 10:37 on 2026-07-27; worth
+  checking whether that monitor alerted too.
+
+### Lesson
+`|| true` on a cron line buys "no spurious alert" at the cost of "no alert at all."
+Any command whose success is reported to an external monitor must separate the report
+from the work with `;`, and must forward the exit status — otherwise the monitor is
+measuring whether the *shell* ran, not whether the *job* worked.

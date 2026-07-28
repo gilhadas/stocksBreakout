@@ -156,3 +156,43 @@ def test_crontab_lines_have_valid_schedule_fields():
                     continue
                 assert part.isdigit() and lo <= int(part) <= hi, \
                     f"bad {name} field {val!r} in:\n  {line}"
+
+
+# ── Healthcheck pings must report failure, not swallow it ────────────────────
+
+def _ping_lines() -> list[str]:
+    return [l for l in _active_lines(DOCKER_CRONTAB) if 'hc-ping.com' in l]
+
+
+def test_healthcheck_pings_are_not_short_circuited_by_and():
+    """
+    `cmd && curl .../$UUID ... || true` is a trap with two compounding halves:
+
+      1. `&&` means a non-zero exit (e.g. 137 from an OOM kill) short-circuits the
+         curl, so NO ping is sent at all — the check only goes down once the
+         Healthchecks.io grace window expires, long after the failure.
+      2. `|| true` then forces the whole line to exit 0, so supercronic cheerfully
+         logs "job succeeded" for a job that was SIGKILLed.
+
+    Together they made four cgroup OOM kills on 2026-07-27 invisible in the cron
+    logs; `swing-close` was reported DOWN by Healthchecks while supercronic claimed
+    success. The job must instead be separated by `;` so the ping always runs.
+    """
+    offenders = [l for l in _ping_lines()
+                 if re.search(r'&&\s*curl[^\n]*hc-ping\.com', l)]
+    assert not offenders, (
+        "healthcheck ping is chained with && — a failing job sends no ping at all:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_healthcheck_pings_send_the_exit_status():
+    """
+    The ping URL must end in /$? so Healthchecks.io is told the exit status
+    (/0 = success, non-zero = failure) and can fail the check immediately rather
+    than waiting out the grace window.
+    """
+    bad = [l for l in _ping_lines()
+           if not re.search(r'hc-ping\.com/\$\{HC_UUID_[A-Z_]+\}/\$\?', l)]
+    assert not bad, (
+        "ping URL does not report exit status (expected .../${HC_UUID_X}/$?):\n  "
+        + "\n  ".join(bad))
