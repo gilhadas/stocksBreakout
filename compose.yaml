@@ -82,7 +82,23 @@ services:
     # Memory cap — see the "Memory limits" note above. This is the container that
     # loads FinBERT (~440 MB of weights + torch runtime) on the 16:30 ET swing
     # scan; it is the one that must die first if anything does.
-    mem_limit: 1024m
+    #
+    # 1024m → 1400m (2026-07-28). At 1024m this cap was not a safety margin, it
+    # was the binding constraint: the cgroup OOM killer fired FOUR times on
+    # 2026-07-27 (10:37, 12:25, 16:52, 20:45 ET) with anon-rss ~1007-1009 MiB
+    # each time, i.e. the scan wants marginally more than 1 GiB and died every
+    # run. The 16:52 kill is what took `swing-close` down. Measured peak is
+    # ~1.01 GiB, so 1400m leaves ~390 MiB of headroom.
+    #
+    # This deliberately spends some of the protection the caps were added for:
+    # caps now sum to 2424m against 1907 MiB of RAM, so the scan can push the
+    # host further into swap before its own cgroup stops it. That is judged
+    # acceptable only because (a) the 4 GB swapfile from deploy/setup-swap.sh is
+    # in place and near-untouched, and (b) cloudflared/tailscale still carry
+    # oom_score_adj: -500, so the host killer avoids the two lifelines whose loss
+    # caused the 7h outage. The real fix is a bigger instance — t3.small's 2 GB
+    # is below the README's own 4 GB minimum. Revisit on resize.
+    mem_limit: 1400m
 
   # ── Mobile API server ──────────────────────────────────────────────────────
   api:

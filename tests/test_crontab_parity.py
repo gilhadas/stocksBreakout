@@ -156,3 +156,142 @@ def test_crontab_lines_have_valid_schedule_fields():
                     continue
                 assert part.isdigit() and lo <= int(part) <= hi, \
                     f"bad {name} field {val!r} in:\n  {line}"
+
+
+# ── Healthcheck pings must report failure, not swallow it ────────────────────
+
+def _ping_lines() -> list[str]:
+    return [l for l in _active_lines(DOCKER_CRONTAB) if 'hc-ping.com' in l]
+
+
+def test_healthcheck_pings_are_not_short_circuited_by_and():
+    """
+    `cmd && curl .../$UUID ... || true` is a trap with two compounding halves:
+
+      1. `&&` means a non-zero exit (e.g. 137 from an OOM kill) short-circuits the
+         curl, so NO ping is sent at all — the check only goes down once the
+         Healthchecks.io grace window expires, long after the failure.
+      2. `|| true` then forces the whole line to exit 0, so supercronic cheerfully
+         logs "job succeeded" for a job that was SIGKILLed.
+
+    Together they made four cgroup OOM kills on 2026-07-27 invisible in the cron
+    logs; `swing-close` was reported DOWN by Healthchecks while supercronic claimed
+    success. The job must instead be separated by `;` so the ping always runs.
+    """
+    offenders = [l for l in _ping_lines()
+                 if re.search(r'&&\s*curl[^\n]*hc-ping\.com', l)]
+    assert not offenders, (
+        "healthcheck ping is chained with && — a failing job sends no ping at all:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_healthcheck_pings_send_the_exit_status():
+    """
+    The ping URL must end in /$? so Healthchecks.io is told the exit status
+    (/0 = success, non-zero = failure) and can fail the check immediately rather
+    than waiting out the grace window.
+    """
+    bad = [l for l in _ping_lines()
+           if not re.search(r'hc-ping\.com/\$\{HC_UUID_[A-Z_]+\}/\$\?', l)]
+    assert not bad, (
+        "ping URL does not report exit status (expected .../${HC_UUID_X}/$?):\n  "
+        + "\n  ".join(bad))
+
+
+# ── Memory: concurrent FinBERT copies must not be possible ───────────────────
+#
+# Measured 2026-07-28 in the sb-scanner-cron container: FinBERT costs a FLAT
+# ~704 MiB once the model loads, independent of how many headlines are scored
+# (12 MiB baseline -> 115 on import -> 704 on first inference -> 704 after a
+# 64-headline batch). Container peak is therefore ~704 MiB x concurrent scans.
+# Two wide scans (swing + daytrade) fired at the same minute on the same
+# 1375-symbol all.txt and each ran >60 min, so they overlapped completely; on
+# Mondays the 9:00 longterm scan was still resident at 10:00, making three.
+# All three wide-scan logs ended in `Killed`. See CLAUDE.md section 15.
+
+SCAN_MUTEX = 'sb-heavy-scan.lock'
+
+
+def _scan_lines() -> list[str]:
+    """breakout_scanner lines that run a detection scan (and so can load FinBERT).
+
+    `--bounce` is the marker: every scan job passes it, while the exit-only,
+    monitor and refresh_prices jobs do not.
+    """
+    return [l for l in _active_lines(DOCKER_CRONTAB)
+            if 'breakout_scanner.py' in l and '--bounce' in l]
+
+
+def test_every_scan_job_holds_the_memory_mutex():
+    """A scan without the lock can land on top of another and re-create the OOM."""
+    unlocked = [l for l in _scan_lines() if SCAN_MUTEX not in l]
+    assert not unlocked, (
+        f"scan job does not take {SCAN_MUTEX} — two concurrent scans means two "
+        f"resident 704 MiB FinBERT copies:\n  " + "\n  ".join(unlocked))
+
+
+def test_time_critical_jobs_do_not_hold_the_memory_mutex():
+    """
+    Exits, refresh_prices and monitors must never queue behind a 60-minute
+    discovery scan — refresh_prices is the only path that raises the ATR trail and
+    closes a breached stop, so delaying it defeats the champion's largest edge.
+    Scans that ALSO evaluate exits (the 4:30 PM combined job) are exempt: they are
+    scans first, and have always run on that footing.
+    """
+    scans = set(_scan_lines())
+    offenders = []
+    for line in _active_lines(DOCKER_CRONTAB):
+        if line in scans:
+            continue
+        if SCAN_MUTEX in line and any(
+                m in line for m in ('--exit-from-portfolio', '--exit-file',
+                                    '--monitor-portfolio', 'refresh_prices')):
+            offenders.append(line)
+    assert not offenders, (
+        "time-critical job is serialized behind the scan mutex:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_no_two_wide_scans_share_a_start_time():
+    """The concrete 2026-07-27 regression: swing and daytrade both at `35 9`."""
+    starts: dict[tuple[str, str], list[str]] = {}
+    for line in _scan_lines():
+        if 'all.txt' not in line:
+            continue
+        minute, hour = line.split()[:2]
+        starts.setdefault((minute, hour), []).append(line)
+    clashes = {k: v for k, v in starts.items() if len(v) > 1}
+    assert not clashes, (
+        f"two wide all.txt scans start at the same time: {list(clashes)} — this is "
+        f"exactly the pairing that OOM-killed both jobs every weekday")
+
+
+def test_daytrade_jobs_stay_retired():
+    """
+    Daytrade is out of use (CLAUDE.md section 9) and HC_UUID_DAYTRADE is deliberately
+    unset, so a re-enabled daytrade job would run unmonitored — and, because `--cron`
+    calls scan_and_add_all_users() which admits any GOLD/PREMIUM signal regardless of
+    mode, it would also quietly resume feeding the live book.
+    """
+    live = [l for l in _active_lines(DOCKER_CRONTAB) if '--mode daytrade' in l]
+    assert not live, (
+        "daytrade cron job is active again; it needs flock, a non-overlapping start "
+        "time and HC_UUID_DAYTRADE configured first:\n  " + "\n  ".join(live))
+
+
+def test_momentum_watch_monitor_has_a_writer_for_the_list_it_reads():
+    """
+    monitor_watch.py defaults to --mode daytrade and reads
+    momentum_watch_daytrade.txt, whose only writer is the daytrade scan's
+    --export-momentum-watch. Enabling the monitor without that writer means alerting
+    off a never-refreshed list — CLAUDE.md section 13's bug, second edition.
+    """
+    docker = _docker()
+    monitors = [l for l in _active_lines(DOCKER_CRONTAB) if 'monitor_watch.py' in l]
+    default_mode = [l for l in monitors if '--mode' not in l]
+    if not default_mode:
+        return
+    assert '--export-momentum-watch' in docker, (
+        "monitor_watch.py runs in its default daytrade mode but nothing exports "
+        "momentum_watch_daytrade.txt — it would re-alert on a stale list:\n  "
+        + "\n  ".join(default_mode))

@@ -6,12 +6,40 @@
 #   HC_UUID_LONGTERM, HC_UUID_SWING, HC_UUID_SWING_CLOSE, HC_UUID_DAYTRADE,
 #   HC_UUID_MONITOR, HC_UUID_VALIDATE, HC_UUID_VALIDATE_LEARN
 # Healthcheck pings are skipped silently when UUIDs are not set.
+#
+# PING SHAPE — `cmd >> log 2>&1; curl ".../${UUID}/$?"` (note the `;`, not `&&`).
+# The trailing /$? sends the job's exit status: /0 = success, non-zero = failure,
+# so Healthchecks.io flags a dead job immediately instead of waiting out the grace
+# window. Do NOT revert this to `cmd && curl ... || true`: with `&&` a non-zero exit
+# short-circuits the curl so NO ping is ever sent, and the `|| true` then returns 0
+# so supercronic logs "job succeeded". That combination hid four cgroup OOM kills on
+# 2026-07-27 (swing-close among them) — the job was SIGKILLed at 1 GiB, never pinged,
+# and only surfaced when Healthchecks' grace expired hours later. See CLAUDE.md §15.
 # NOTE: SWING and VALIDATE were originally one UUID each covering two differently
 # -timed cron lines (9:35am+4:30pm; weekday 8:30pm+Sunday 9pm). Split into
 # _CLOSE / _LEARN so each Healthchecks.io monitor has ONE unambiguous expected
 # schedule — a shared UUID across two different times can't be expressed without
 # either false "missed ping" alerts or a grace window loose enough to miss a real
 # outage. See CLAUDE.md section 9 (2026-07-23 reliability pass).
+#
+# SERIALIZATION — every wide/re-evaluation scan runs under
+#   flock -w 5400 /tmp/sb-heavy-scan.lock
+# so that at most ONE of them is resident at a time. This is a MEMORY control, not
+# a correctness one. Measured 2026-07-28 inside this container: FinBERT costs a
+# FLAT ~704 MiB the moment the model loads (12 MiB baseline -> 115 on import ->
+# 704 on first inference), and scoring 1 headline or 64 costs exactly the same.
+# So the container's peak is (704 MiB x number of scans running concurrently),
+# and it was the CONCURRENCY that OOM-killed us, not any single job:
+#   - swing and daytrade both fired at 9:35 and each ran >60 min on all.txt
+#     (1375 symbols), so they overlapped for their whole runtime;
+#   - on Mondays the 9:00 longterm scan was STILL RUNNING at 10:00, making three
+#     concurrent wide scans in one 1024 MiB cgroup.
+# All three wide-scan logs ended in `Killed`. With the lock, peak is max(job)
+# rather than sum(jobs). Do NOT put this lock on the exit / refresh_prices /
+# monitor jobs: those are time-critical (a stop breach must not wait behind a
+# 60-minute discovery scan) and are cheap enough not to need it.
+# -w 5400 = wait up to 90 min, then give up and exit non-zero, which the /$? ping
+# reports as a failure instead of hiding it. See CLAUDE.md section 15.
 #
 # Format: minute hour day month weekday command
 
@@ -20,8 +48,16 @@
 # LONG-TERM POSITION TRADING (Weekly scans)
 # ============================================================================
 
-# Monday 9:00 AM — Phase 1: full scan, export PREMIUM tickers
-0 9 * * 1 cd /app && python3 breakout_scanner.py "input/spx_plus.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_LONGTERM}" > /dev/null 2>&1 || true
+# Monday 6:00 AM — Phase 1: full scan, export PREMIUM tickers
+# Moved 9:00 -> 6:00 (2026-07-28). On all.txt this job runs >60 min, so starting it
+# at 9:00 left it still resident when the 9:35 swing scan launched — the Monday
+# three-way overlap described in the SERIALIZATION note above. 6:00 gives it 3.5 h
+# of clear air before 9:35, so the flock below should never actually have to block.
+# Behaviourally identical: longterm works off daily bars, and both 6:00 and 9:00 are
+# pre-open, so the last COMPLETE bar is the prior close either way.
+# ⚠ The HC_UUID_LONGTERM monitor's expected schedule must be updated in the
+#   Healthchecks.io dashboard to match, or it will report a missed ping every Monday.
+0 6 * * 1 cd /app && flock -w 5400 /tmp/sb-heavy-scan.lock python3 breakout_scanner.py "input/all.txt" --mode longterm --bounce --sector-buzz --sentiment --export-premium input/premium_longterm.txt --live --cron --notify >> scanner_output/logs/cron_longterm.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_LONGTERM}/$?" > /dev/null 2>&1 || true
 
 # Monday 9:15 AM — Long-term exit evaluation
 15 9 * * 1 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode longterm --exit-file input/positions_longterm.csv --live --cron --notify >> scanner_output/logs/cron_longterm_exit.log 2>&1
@@ -32,7 +68,7 @@
 # ============================================================================
 
 # Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + auto-add positions
-35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/spx_plus.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}" > /dev/null 2>&1 || true
+35 9 * * 1-5 cd /app && flock -w 5400 /tmp/sb-heavy-scan.lock python3 breakout_scanner.py "input/all.txt" --mode swing --bounce --sector-buzz --sentiment --auto-positions input/positions_swing_mock.csv --export-premium input/premium_swing.txt --live --cron --notify >> scanner_output/logs/cron_swing.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING}/$?" > /dev/null 2>&1 || true
 
 # ── POSITION MANAGEMENT (refresh_prices) ───────────────────────────────────
 # refresh_prices() is the ONLY code path that raises the ATR×2.0 trail and
@@ -60,46 +96,65 @@
 45 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode swing --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_swing_exit.log 2>&1 && python3 -c "from auto_portfolio import refresh_prices_all_users; refresh_prices_all_users()" >> scanner_output/logs/cron_refresh.log 2>&1
 
 # Weekdays 4:30 PM — Phase 2: Re-evaluate PREMIUM + combined exit check (use actual portfolio for exits)
-30 16 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-from-portfolio --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING_CLOSE}" > /dev/null 2>&1 || true
+30 16 * * 1-5 cd /app && flock -w 5400 /tmp/sb-heavy-scan.lock python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --exit-from-portfolio --both --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_combined.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_SWING_CLOSE}/$?" > /dev/null 2>&1 || true
 
 # Weekdays 7:30 PM — Evening PREMIUM re-evaluation
-30 19 * * 1-5 cd /app && python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_evening.log 2>&1
+30 19 * * 1-5 cd /app && flock -w 5400 /tmp/sb-heavy-scan.lock python3 breakout_scanner.py input/premium_swing.txt --mode swing --bounce --sentiment --auto-positions input/positions_swing_mock.csv --live --cron --notify >> scanner_output/logs/cron_swing_evening.log 2>&1
 
 
 # ============================================================================
-# DAY TRADING (Intraday scans)
+# DAY TRADING (Intraday scans) — ⛔ RETIRED 2026-07-28
 # ============================================================================
-
-# Weekdays 9:35 AM — Phase 1: S&P 500 wide scan, export PREMIUM + momentum-watch
-35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/spx_plus.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}" > /dev/null 2>&1 || true
-
-# Weekdays 10:00 AM — Phase 2: Re-evaluate momentum-watch tickers
-0 10 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
-
-# Weekdays 2:00 PM — Phase 2: Afternoon re-evaluation
-0 14 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}" > /dev/null 2>&1 || true
-
-# Weekdays 3:30 PM — Day trade exit check (from actual portfolio, not mock file)
-30 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode daytrade --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
-
-# Weekdays 8:20 PM — Phase 4: Evening re-evaluate momentum-watch tickers
-20 20 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening.log 2>&1
+# Daytrade mode was declared out of use in CLAUDE.md section 9 ("didn't deliver good
+# results; retiring its cron jobs is a pending follow-up, not yet done"), and
+# HC_UUID_DAYTRADE was deliberately left unconfigured for the same reason. The jobs
+# below were nevertheless still firing, and they were the single largest driver of
+# the OOM kills: the 9:35 line scanned the same 1375-symbol all.txt as the swing
+# scan, at the same minute, for >60 min, each holding its own flat 704 MiB FinBERT
+# copy in a 1024 MiB cgroup.
+#
+# Trading impact is not merely "none because it's retired" — these lines DID reach
+# the live book, because `--cron` makes breakout_scanner call
+# scan_and_add_all_users(), which admits any GOLD/PREMIUM signal regardless of mode.
+# The project's own A/B (CLAUDE.md section 7, daytrade_admission_ab.py) measured
+# removing daytrade at B-A = +0.09 Sharpe — i.e. slightly FAVOURABLE, just under the
+# +0.10 ship bar — and found only 2 of 41 control-arm trades were daytrade at all.
+# So this is a small, measured, positive-signed change, not an unmeasured one.
+#
+# To restore: uncomment, re-add flock (see SERIALIZATION note) and set a
+# non-overlapping start time, configure HC_UUID_DAYTRADE, and re-enable the
+# momentum-watch monitor block below.
+#
+# 35 9 * * 1-5 cd /app && python3 breakout_scanner.py "input/all.txt" --mode daytrade --bounce --sector-buzz --sentiment --auto-positions input/positions_daytrade_mock.csv --export-premium input/premium_daytrade.txt --export-momentum-watch input/momentum_watch_daytrade.txt --live --cron --notify >> scanner_output/logs/cron_daytrade_morning.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}/$?" > /dev/null 2>&1 || true
+# 0 10 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_mid.log 2>&1
+# 0 14 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_afternoon.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_DAYTRADE}/$?" > /dev/null 2>&1 || true
+# 30 15 * * 1-5 cd /app && python3 breakout_scanner.py input/1_26_Setups.txt --mode daytrade --exit-from-portfolio --live --cron --notify >> scanner_output/logs/cron_daytrade_exit.log 2>&1
+# 20 20 * * 1-5 cd /app && python3 breakout_scanner.py input/momentum_watch_daytrade.txt --mode daytrade --bounce --sentiment --auto-positions input/positions_daytrade_mock.csv --live --cron --notify >> scanner_output/logs/cron_daytrade_evening.log 2>&1
 
 
 # ============================================================================
-# MOMENTUM-WATCH MONITOR (Every 15 minutes during market hours)
+# MOMENTUM-WATCH MONITOR (Every 15 min) — ⛔ RETIRED 2026-07-28, with daytrade
 # ============================================================================
-# Validates signaled stocks: HOLDING / FADING / FAILED
-# Sends Discord alert on first status change per day.
-
-# Weekdays 9:45 AM — First check (watch list just populated by Phase 1)
-45 9 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
-
-# Weekdays 10:00 AM – 3:45 PM — Continuous validation every 15 minutes
-*/15 10-15 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
-
-# Weekdays 4:00 PM — Final check at market close
-0 16 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+# Validates signaled stocks: HOLDING / FADING / FAILED; Discord alert on first
+# status change per day.
+#
+# Retired as a DIRECT CONSEQUENCE of retiring daytrade above, not as a separate
+# decision. monitor_watch.py defaults to `--mode daytrade` (monitor_watch.py:70) and
+# these three lines pass no --mode, so all of them read
+# `scanner_output/lists/momentum_watch_daytrade.txt` — a file whose only writer was
+# the daytrade 9:35 job's --export-momentum-watch. Leaving them enabled would have
+# re-created CLAUDE.md section 13's exact bug: a never-refreshed list re-alerting on
+# stale tickers every 15 minutes forever, with `.exit_history`-style per-day dedup
+# being the only thing keeping the noise down.
+#
+# Switching them to `--mode swing` is NOT a drop-in fix: that reads
+# `input/momentum_watch_swing.txt`, and no job exports it (the swing 9:35 line has no
+# --export-momentum-watch). Wiring that up is the follow-up if this monitor is wanted
+# back independently of daytrade.
+#
+# 45 9 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+# */15 10-15 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
+# 0 16 * * 1-5 cd /app && python3 monitor_watch.py --notify >> scanner_output/logs/cron_watch_monitor.log 2>&1
 
 
 # ============================================================================
@@ -114,13 +169,13 @@
 30 9 * * 1-5 mv /app/scanner_output/.monitor_alerts.txt /app/scanner_output/.monitor_alerts_$(date +%Y%m%d).txt 2>/dev/null || true
 
 # Weekdays 9:45 AM — First check after open
-45 9 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+45 9 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}/$?" > /dev/null 2>&1 || true
 
 # Weekdays 10:00 AM – 3:45 PM — Continuous monitoring every 15 minutes
-*/15 10-15 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+*/15 10-15 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}/$?" > /dev/null 2>&1 || true
 
 # Weekdays 4:00 PM — Final check at close
-0 16 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}" > /dev/null 2>&1 || true
+0 16 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}/$?" > /dev/null 2>&1 || true
 
 
 # ============================================================================
@@ -138,10 +193,10 @@
 # ============================================================================
 
 # Weekdays 8:30 PM — Validate signals from 3+ days ago
-30 20 * * 1-5 cd /app && python3 validate_signals.py validate-all --min-age-days 3 >> scanner_output/logs/cron_validate.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE}" > /dev/null 2>&1 || true
+30 20 * * 1-5 cd /app && python3 validate_signals.py validate-all --min-age-days 3 >> scanner_output/logs/cron_validate.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE}/$?" > /dev/null 2>&1 || true
 
 # Sundays 9:00 PM — Generate learning recommendations
-0 21 * * 0 cd /app && python3 validate_signals.py learn >> scanner_output/logs/cron_learn.log 2>&1 && curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE_LEARN}" > /dev/null 2>&1 || true
+0 21 * * 0 cd /app && python3 validate_signals.py learn >> scanner_output/logs/cron_learn.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_VALIDATE_LEARN}/$?" > /dev/null 2>&1 || true
 
 
 # ============================================================================
