@@ -40,6 +40,26 @@ def _portfolio_path_for(user_id: str | None = None) -> str:
 INITIAL_CAPITAL    = 100_000
 POSITION_SIZE_PCT  = 0.05      # 5% of capital per trade
 MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
+# Never admit a signal older than this, and never even load the file.
+# Two reasons, and the correctness one matters more than the performance one:
+#   1. CORRECTNESS — a signal from weeks ago describes a setup that no longer
+#      exists. auto_portfolio prices the entry at TODAY's price (it deliberately
+#      does not trust the CSV's Price column, see HZ1), so admitting a stale
+#      signal opens a position on a breakout that already played out.
+#   2. COST — scan_and_add's file loop is bounded ONLY by `processed_files`.
+#      list_files() reads S3, so a book whose processed_files is empty or far
+#      behind re-downloads and parses the ENTIRE archive on every run. On
+#      2026-07-28 that was 858 CSVs; one book (8 positions, 10 processed) was
+#      replaying 848 of them per scan. That is what OOM-killed three consecutive
+#      wide scans — memory grew with files consumed, so the process expanded to
+#      fill whatever mem_limit it was given (died at 1.37 GiB under a 1400m cap,
+#      then at 2.45 GiB under a 2500m cap). See CLAUDE.md §18.
+# The caller-side guard in scan_and_add_all_users() does NOT cover this: it fires
+# only when processed_files AND positions are both empty, so a book with any
+# position falls through it. This bound is inside the loop itself, so it holds
+# regardless of caller. An explicit min_date= still overrides it, which is what
+# deliberate backfills use.
+SIGNAL_MAX_AGE_DAYS = 7        # calendar days; covers a weekend + holiday gap
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
 MAX_ADDS_PER_SCAN  = 10        # Max new positions admitted per trading day (across all files for that day)
 MAX_PORTFOLIO_ATR_RISK = 0.12  # Max total portfolio risk as ATR% (12% = aggressive)
@@ -205,6 +225,12 @@ def scan_and_add(min_date: str | None = None,
     # for the same date arrived (swing + longterm + daytrade backfill), the top
     # 3 from each file got admitted ahead of higher-conviction signals from
     # sibling files.  Pooling lets the date's globally-best signals win.
+    # Cutoff for the no-min_date path. Computed once; string compare is safe
+    # because _date_from_filename() returns YYYY-MM-DD.
+    stale_cutoff = (datetime.now(_NY_TZ).date()
+                    - timedelta(days=SIGNAL_MAX_AGE_DAYS)).isoformat()
+    stale_retired = 0
+
     files_by_date: dict[str, list[str]] = {}
     for fname in all_fnames:
         date_str = _date_from_filename(fname)
@@ -214,7 +240,25 @@ def scan_and_add(min_date: str | None = None,
         else:
             if fname in processed:
                 continue
+            if date_str < stale_cutoff:
+                # Retire it permanently rather than just skipping: marking it
+                # processed means the next run short-circuits on the cheap set
+                # lookup above instead of re-deriving the date, and it lets a
+                # far-behind book self-heal in one pass instead of re-walking
+                # hundreds of filenames forever. The file is never loaded, so
+                # this costs no S3 read.
+                processed.add(fname)
+                stale_retired += 1
+                continue
         files_by_date.setdefault(date_str, []).append(fname)
+
+    if stale_retired:
+        # scan_and_add has no module-level logger; use the same local-import
+        # pattern the rest of this file uses (_log is bound per-function here).
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            f"scan_and_add: retired {stale_retired} signal file(s) older than "
+            f"{stale_cutoff} ({SIGNAL_MAX_AGE_DAYS}d) without loading them")
 
     for date_str in sorted(files_by_date.keys()):
         adds_this_scan = 0                                  # per-day cap

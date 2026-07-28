@@ -1216,3 +1216,67 @@ exit, flipping the check to `down` immediately instead of waiting out its 3 h gr
 the old `cmd && curl … || true` no ping would have been sent at all and supercronic would
 have logged "job succeeded" — the exact blindness that let the Monday failure sit unnoticed
 since Jul 23. First correctly-reported kill.
+
+## 18. The real OOM cause: scan_and_add replays the whole S3 archive (2026-07-28)
+
+§17 concluded "t3.small is too small, resize." That was **wrong** — or rather, it fixed a
+real but secondary problem. The resize happened, the cap went to 2500m, and the very next
+wide scan died anyway.
+
+### The datapoint that exposed it
+| cap | died at |
+|---|---|
+| 1400m | ~1.37 GiB |
+| 2500m | **~2.45 GiB** |
+
+The process **expands to fill whatever ceiling it is given**. That is a leak signature, not
+a sizing problem, and it means every "measured peak" in §15/§16/§17 was just the cap.
+**Standing lesson: if peak == cap on every observation, suspect unbounded growth, not
+under-provisioning.**
+
+### Root cause
+`scan_and_add()`'s file loop was bounded **only** by the book's `processed_files` set, and
+`list_files()` reads **S3**. So a book whose `processed_files` was empty or far behind
+re-downloaded and re-parsed the entire archive on every scan.
+
+On 2026-07-28: **858** signal CSVs on S3 back to 2026-04-06, against per-book backlogs of
+858 / 858 / **848** / 61 — roughly **2,600 S3 downloads + pandas loads per run**, plus a
+yfinance quote per candidate.
+
+Evidence chain:
+- all three killed runs died **40+ min after** writing their signals CSV (detection itself
+  takes ~26 min and completed fine every time)
+- the last log lines before each kill were yfinance 404s on **CTRA**/**OS** — delisted
+  tickers from *old archived* signals, not among that day's signals
+- memory tracked files consumed, so it never plateaued
+
+**Why the existing guard missed it:** `scan_and_add_all_users()` (auto_portfolio.py:1119)
+fires only when `processed_files` **and** `positions` are *both* empty. The book doing the
+most damage had 8 positions and 10 processed files — it fell straight through. The guard
+is also caller-side, so it cannot protect the loop.
+
+### Fix
+`SIGNAL_MAX_AGE_DAYS = 7`, enforced **inside** the loop, so it holds regardless of caller.
+Stale files are *retired* into `processed_files` without ever being loaded — no S3 read —
+which also lets a far-behind book self-heal in a single pass. An explicit `min_date=` still
+overrides, so deliberate backfills are unaffected.
+
+This is a **correctness** fix as much as a performance one: auto_portfolio prices entries at
+TODAY's price (it deliberately distrusts the CSV's `Price` column — HZ1), so admitting a
+weeks-old signal opens a position on a setup that already played out.
+
+`tests/test_scan_add_stale_window.py` — 5 tests, mutation-verified (removing the bound fails
+3, including the production shape: positions present + processed_files far behind).
+
+⚠ **`tests/test_exit_from_portfolio.py::TestV9HFilter` had to change too**, and the reason
+is worth remembering: its 6 fixtures used a hardcoded `20260318` filename. Three of them
+broke outright; the other three — the *rejection* tests — kept passing **for the wrong
+reason**, blocked by the new age bound before the V9-H filter they exist to test ever ran.
+Dates are now derived from today. Verified non-vacuous by re-running with
+`SIGNAL_MAX_AGE_DAYS = 365`: still green, so the rejections are filter-driven.
+
+### Status of §17's resize
+Not wasted — t3.small was genuinely below the README's own 4 GB minimum and the legitimate
+working set is ~700 MiB–1 GiB — but it was **not** the fix, and the 2500m cap is now far
+larger than needed. Once this fix is confirmed in production, consider whether the cap can
+come back down.

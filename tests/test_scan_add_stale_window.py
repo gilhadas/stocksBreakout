@@ -1,0 +1,146 @@
+"""
+scan_and_add must not walk the whole signal archive.
+
+WHY THIS EXISTS
+---------------
+`scan_and_add`'s file loop was bounded ONLY by the book's `processed_files` set,
+and `list_files()` reads S3 — so a book whose `processed_files` was empty or far
+behind re-downloaded and parsed the ENTIRE archive on every scan.
+
+On 2026-07-28 the archive held 858 signal CSVs going back to 2026-04-06, and one
+live book (8 positions, 10 processed) was replaying 848 of them per run. Memory
+grew with files consumed, so the process expanded to fill whatever `mem_limit` it
+was given — it was OOM-killed at ~1.37 GiB under a 1400m cap and again at
+~2.45 GiB under a 2500m cap. Three consecutive wide scans died this way, each
+~40 minutes AFTER its detection phase had already finished and written its CSV.
+
+The caller-side guard in `scan_and_add_all_users()` does not cover this: it fires
+only when `processed_files` AND `positions` are both empty, so any book holding a
+position falls straight through it.
+
+There is a correctness half too, which outlives the memory issue: auto_portfolio
+prices entries at TODAY's price (it deliberately distrusts the CSV's Price column
+— HZ1), so admitting a weeks-old signal opens a position on a setup that has
+already played out.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+import pytest
+
+import auto_portfolio as ap
+import utils
+
+
+def _fname(day: str, mode: str = 'swing') -> str:
+    """signals_swing_20260406_103303.csv from '2026-04-06'."""
+    return f"signals_{mode}_{day.replace('-', '')}_103303.csv"
+
+
+def _days_ago(n: int) -> str:
+    return (datetime.now(ap._NY_TZ).date() - timedelta(days=n)).isoformat()
+
+
+def test_constant_is_sane():
+    """A too-large window re-opens the door; a too-small one drops Monday's Friday signals."""
+    assert 2 <= ap.SIGNAL_MAX_AGE_DAYS <= 14, ap.SIGNAL_MAX_AGE_DAYS
+
+
+def test_stale_files_are_never_loaded(monkeypatch, tmp_path):
+    """The whole point: old files must not reach load_data()."""
+    old = [_fname(_days_ago(n)) for n in (400, 120, 60, 30, 8)]
+    fresh = [_fname(_days_ago(n)) for n in (0, 1)]
+
+    loaded: list[str] = []
+
+    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: list(old + fresh))
+
+    def _fake_load(path):
+        loaded.append(path.rsplit('/', 1)[-1])
+        return None                      # empty -> loop marks processed and moves on
+    monkeypatch.setattr(utils, 'load_data', _fake_load)
+
+    book = ap._empty()
+    monkeypatch.setattr(ap, 'load', lambda **k: book)
+    monkeypatch.setattr(ap, '_save', lambda *a, **k: None)
+
+    ap.scan_and_add()
+
+    for f in old:
+        assert f not in loaded, f"stale file was downloaded and parsed: {f}"
+    for f in fresh:
+        assert f in loaded, f"fresh file was skipped: {f}"
+
+
+def test_stale_files_are_retired_into_processed_files(monkeypatch):
+    """
+    Retiring (not merely skipping) is what lets a far-behind book self-heal in one
+    pass — otherwise every future run re-walks hundreds of filenames forever.
+    """
+    old = [_fname(_days_ago(n)) for n in (365, 90, 20)]
+    fresh = [_fname(_days_ago(0))]
+
+    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: list(old + fresh))
+
+    loaded: list[str] = []
+
+    def _fake_load(path):
+        loaded.append(path.rsplit('/', 1)[-1])
+        return None
+    monkeypatch.setattr(utils, 'load_data', _fake_load)
+
+    book = ap._empty()
+    monkeypatch.setattr(ap, 'load', lambda **k: book)
+    saved = {}
+    monkeypatch.setattr(ap, '_save', lambda d, **k: saved.update(d))
+
+    ap.scan_and_add()
+
+    processed = set(saved.get('processed_files', book.get('processed_files', [])))
+    for f in old:
+        # BOTH halves matter, and the second is what makes this test
+        # discriminating: the loop also marks a file processed when load_data()
+        # returns empty, so "is in processed_files" alone passes even with the
+        # age bound removed. Retired-WITHOUT-loading is the real invariant.
+        assert f in processed, f"stale file not retired, will be re-walked forever: {f}"
+        assert f not in loaded, f"stale file was retired only AFTER an S3 load: {f}"
+
+
+def test_a_book_with_positions_but_empty_processed_is_still_bounded(monkeypatch):
+    """
+    The exact production shape that broke: positions present, processed_files far
+    behind. scan_and_add_all_users()'s guard needs BOTH empty, so this book fell
+    through it and replayed 848 files.
+    """
+    old = [_fname(_days_ago(n)) for n in range(30, 200)]
+    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: list(old))
+
+    loaded = []
+    monkeypatch.setattr(utils, 'load_data', lambda p: loaded.append(p) or None)
+
+    book = ap._empty()
+    book['positions'] = [{'symbol': 'AAPL', 'shares': 10, 'entry_price': 100.0,
+                          'stop_loss': 90.0, 'cost': 1000.0}]
+    monkeypatch.setattr(ap, 'load', lambda **k: book)
+    monkeypatch.setattr(ap, '_save', lambda *a, **k: None)
+
+    ap.scan_and_add()
+    assert loaded == [], f"replayed {len(loaded)} archived file(s) despite the age bound"
+
+
+def test_explicit_min_date_still_overrides_the_window(monkeypatch):
+    """Deliberate backfills pass min_date=; the bound must not silently break them."""
+    old = [_fname(_days_ago(n)) for n in (100, 90)]
+    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: list(old))
+
+    loaded = []
+    monkeypatch.setattr(utils, 'load_data', lambda p: loaded.append(p) or None)
+
+    book = ap._empty()
+    monkeypatch.setattr(ap, 'load', lambda **k: book)
+    monkeypatch.setattr(ap, '_save', lambda *a, **k: None)
+
+    ap.scan_and_add(min_date=_days_ago(365))
+    assert len(loaded) == len(old), (
+        "explicit min_date must still reach old files — backfill is a supported flow")

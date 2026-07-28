@@ -19,8 +19,18 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+
+# Signal-file dates must stay INSIDE auto_portfolio.SIGNAL_MAX_AGE_DAYS.
+# These fixtures used a hardcoded 2026-03-18, which was fine only while
+# scan_and_add had no age bound at all. With the bound in place a stale
+# filename is retired before the V9-H quality filter ever runs — so the
+# "accepted" tests broke outright, and (worse) the "rejected" ones kept
+# passing for entirely the wrong reason. Deriving the date from today keeps
+# every test in this class measuring the quality filter, which is its subject.
+_TODAY = datetime.now().strftime('%Y%m%d')
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -73,7 +83,7 @@ class TestV9HFilter(unittest.TestCase):
         """Breakout signal with MinerviniScore=NaN should be rejected."""
         mock_fetch.return_value = (100.0, 102.0)
 
-        self._write_signal_csv('signals_swing_20260318_093500.csv', [
+        self._write_signal_csv(f'signals_swing_{_TODAY}_093500.csv', [
             {'Symbol': 'AAPL', 'Price': '100', 'Stop': '95', 'Target': '110',
              'Quality': 'PREMIUM', 'Mode': 'swing', 'MinerviniScore': '',
              'Type': 'Breakout'},
@@ -95,7 +105,7 @@ class TestV9HFilter(unittest.TestCase):
         """CONTINUATION signal (PREMIUM) should be accepted without MinerviniScore."""
         mock_fetch.return_value = (25.0, 26.0)
 
-        self._write_signal_csv('signals_swing_20260318_093500.csv', [
+        self._write_signal_csv(f'signals_swing_{_TODAY}_093500.csv', [
             {'Symbol': 'ELAN', 'Price': '25', 'Stop': '23', 'Target': '28',
              'Quality': 'PREMIUM', 'Mode': 'swing', 'MinerviniScore': '',
              'Type': 'CONTINUATION'},
@@ -118,7 +128,7 @@ class TestV9HFilter(unittest.TestCase):
         """BOUNCE signal (PREMIUM) should be accepted without MinerviniScore."""
         mock_fetch.return_value = (26.0, 27.0)
 
-        self._write_signal_csv('signals_swing_20260318_094800.csv', [
+        self._write_signal_csv(f'signals_swing_{_TODAY}_094800.csv', [
             {'Symbol': 'RGC', 'Price': '26', 'Stop': '21', 'Target': '37',
              'Quality': 'PREMIUM', 'Mode': 'swing', 'MinerviniScore': '',
              'Type': 'BOUNCE'},
@@ -140,7 +150,7 @@ class TestV9HFilter(unittest.TestCase):
         """Breakout signal with MinerviniScore=8 should be accepted."""
         mock_fetch.return_value = (150.0, 155.0)
 
-        self._write_signal_csv('signals_swing_20260318_093500.csv', [
+        self._write_signal_csv(f'signals_swing_{_TODAY}_093500.csv', [
             {'Symbol': 'NVDA', 'Price': '150', 'Stop': '140', 'Target': '170',
              'Quality': 'GOLD', 'Mode': 'swing', 'MinerviniScore': '8',
              'Type': 'Breakout'},
@@ -162,7 +172,7 @@ class TestV9HFilter(unittest.TestCase):
         """When Type column is absent, MinerviniScore filter applies to all."""
         mock_fetch.return_value = (50.0, 52.0)
 
-        self._write_signal_csv('signals_swing_20260318_093500.csv', [
+        self._write_signal_csv(f'signals_swing_{_TODAY}_093500.csv', [
             {'Symbol': 'XYZ', 'Price': '50', 'Stop': '47', 'Target': '55',
              'Quality': 'PREMIUM', 'Mode': 'swing', 'MinerviniScore': '3'},
         ], has_type=False)
@@ -183,7 +193,7 @@ class TestV9HFilter(unittest.TestCase):
         """HIGH quality signals should always be rejected (only GOLD/PREMIUM)."""
         mock_fetch.return_value = (70.0, 72.0)
 
-        self._write_signal_csv('signals_swing_20260318_093500.csv', [
+        self._write_signal_csv(f'signals_swing_{_TODAY}_093500.csv', [
             {'Symbol': 'VIST', 'Price': '70', 'Stop': '65', 'Target': '80',
              'Quality': 'HIGH', 'Mode': 'swing', 'MinerviniScore': '8',
              'Type': 'CONTINUATION'},
