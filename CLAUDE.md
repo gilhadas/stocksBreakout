@@ -1069,3 +1069,84 @@ tail. The pattern inverted the signal: adding a healthcheck made failures less v
 Any command whose success is reported to an external monitor must separate the report
 from the work with `;`, and must forward the exit status — otherwise the monitor is
 measuring whether the *shell* ran, not whether the *job* worked.
+
+## 16. Scan concurrency was the OOM cause — serialize, retire daytrade (2026-07-28)
+
+§15 raised `mem_limit` 1024m→1400m and fixed the ping shape that hid the kills. That
+treated the symptom. This section is the demand-side fix, and it corrects §15's own
+sizing rationale.
+
+### Measurement: FinBERT costs a FLAT ~704 MiB, independent of workload
+Measured inside `sb-scanner-cron` (not inferred):
+
+| stage | RSS |
+|---|---|
+| baseline python | 12.2 MiB |
+| `import finbert_sentiment` | 114.9 MiB |
+| **first inference (model resident)** | **704.4 MiB** |
+| 16-headline batch | 704.4 MiB |
+| 64-headline batch | 704.4 MiB |
+
+**Scoring more headlines is free.** Two consequences:
+1. The intuitive fix — "only score sentiment on the PREMIUM shortlist" — would have
+   saved **~0 MiB**. FinBERT was *already* restricted to HIGH+ signals
+   (`breakout_scanner.py:198`, `_quality_sigs`), and the cost is model residency, not
+   inference volume. Note also that FinBERT is **not** gated by `--sentiment`; that flag
+   only controls the Tavily `check_sentiment` block at line 122. Dropping `--sentiment`
+   from cron would not have stopped the model loading.
+2. Container peak ≈ **704 MiB × number of scans running concurrently**. The cause was
+   concurrency, not any single job.
+
+### The actual concurrency
+- `swing` and `daytrade` both fired at **`35 9`** on the same 1375-symbol `all.txt`, and a
+  wide scan runs **>60 min** (the 2026-07-27 swing scan was killed 62 min in) — so they
+  overlapped for their entire runtime, every weekday.
+- On Mondays the `0 9` longterm scan was **still running at 10:00**, making three
+  concurrent wide scans in a 1024 MiB cgroup.
+- All three wide-scan logs (`cron_swing`, `cron_daytrade_morning`, `cron_longterm`) end
+  in `Killed`. **12 cgroup OOM kills** between Jul 23 and Jul 28 — i.e. every trading day
+  since the caps were added, not the 4 that §15 recorded.
+
+⚠ **This invalidates §15's headroom claim.** §15 sized 1400m as "~390 MiB over the
+measured peak of ~1009 MiB." But 1009 MiB is where the *killer intervened*, not where
+demand stopped: kills occurred at anon-rss of 724–1009 MiB against a 1024 MiB cap, so
+the cgroup charge (anon + page cache + kernel) hit the limit while anon-rss was far
+lower. Peak demand was truncated, never measured. 1400m is adequate for **one** resident
+scan; it was never going to be adequate for two.
+
+### Changes (`docker/crontab`)
+- **`flock -w 5400 /tmp/sb-heavy-scan.lock`** on all four scan jobs (longterm wide, swing
+  wide, 16:30 Phase 2, 19:30 evening) → peak is `max(job)`, not `sum(jobs)`. Verified in
+  the container: flock forwards the child's exit status (42→42), still reports **137** on
+  SIGKILL so the `/$?` ping keeps working, genuinely blocks the second job, and returns 1
+  on timeout so a 90-min wait surfaces as a failure rather than silence.
+  **Deliberately NOT applied** to exit / `refresh_prices` / monitor jobs — a stop breach
+  must never queue behind a 60-minute discovery scan.
+- **Longterm wide scan moved `0 9` → `0 6` Monday.** At `0 9` a >60 min job was still
+  resident at 9:35. Behaviourally identical (daily bars, both pre-open ⇒ same last
+  complete bar). ⚠ **Requires a manual Healthchecks.io schedule update for
+  `HC_UUID_LONGTERM`**, or it reports a missed ping every Monday.
+- **Daytrade retired** (5 jobs, commented not deleted). This was already a decided-but-
+  unexecuted follow-up (§9). Not a no-op for trading: `--cron` calls
+  `scan_and_add_all_users()`, which admits any GOLD/PREMIUM signal *regardless of mode*,
+  so these lines did reach the live book. The project's own A/B (§7,
+  `daytrade_admission_ab.py`) measured removal at **B−A = +0.09 Sharpe** (favourable, just
+  under the +0.10 bar) with only 2 of 41 control-arm trades being daytrade.
+- **Momentum-watch monitor retired** (3 jobs) — a *consequence* of the above, not a
+  separate decision. `monitor_watch.py` defaults to `--mode daytrade` and reads
+  `momentum_watch_daytrade.txt`, whose only writer was the daytrade 9:35 job's
+  `--export-momentum-watch`. Leaving it enabled would have re-created §13's bug exactly:
+  a never-refreshed list re-alerting every 15 minutes. `--mode swing` is not a drop-in
+  fix — nothing exports `momentum_watch_swing.txt`.
+
+Active cron lines: **24 → 16**. Five new tests in `tests/test_crontab_parity.py`, each
+mutation-tested (revert one line ⇒ that one test fails). 564 pass.
+
+### Open
+- **`MarketData.clear_cache()` never clears `series_cache`** (`market_data.py:406-408`) —
+  an unbounded `(symbol, timeframe) → DataFrame` dict. Currently harmless: its only
+  callers (`orchestrator.py:369-374`) are gated on `TENSION_CONFIG['enabled']`, which is
+  `False`. It becomes a real leak the moment Tension Index is re-enabled.
+- Whether one wide scan alone fits in 1400m is still unconfirmed — the first clean
+  single-scan run is the datapoint. If it OOMs again, the box genuinely is too small
+  (t3.small = 1907 MiB usable vs the README's own 4 GB minimum) and t3.medium is the fix.
