@@ -1,6 +1,6 @@
 {
   "agent_invocations_cap": 60,
-  "agent_invocations_used": 10,
+  "agent_invocations_used": 11,
   "end_date": "2026-07-31",
   "note": "Cap and end_date bound the multi-day run. runner.py refuses to invoke an agent past either. Raise deliberately, not reflexively. [corrected 2026-07-25: was 14, but 12 ticks were session-limit failures that produced no work; runner no longer charges failed invocations]"
 }
