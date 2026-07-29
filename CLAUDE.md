@@ -1280,3 +1280,108 @@ Not wasted — t3.small was genuinely below the README's own 4 GB minimum and th
 working set is ~700 MiB–1 GiB — but it was **not** the fix, and the 2500m cap is now far
 larger than needed. Once this fix is confirmed in production, consider whether the cap can
 come back down.
+
+## 19. The leak under §18: every S3 read builds a new botocore client (2026-07-29)
+
+§18 fixed a real defect — replaying 858 archive files is wrong on correctness grounds
+alone — but it fixed the *symptom*. The per-file cost that made the replay fatal is a
+separate, still-live bug one layer down, and it is now measured rather than inferred.
+
+### Tooling built for this (all new, all off by default)
+- **`memory_trace.py`** — stdlib-only tracer (no psutil; the container is rebuilt from
+  `requirements.txt` and a debug tool that needs a new dependency is useless during an
+  incident). Inert unless `SB_MEM_TRACE=1`. RSS via `/proc` on Linux and `task_info` on
+  macOS; **also reports the cgroup charge**, which is what the OOM killer enforces and
+  which §17 showed diverges sharply from anon-RSS. `tracemalloc` is *separately* gated
+  behind `SB_MEM_TRACE_ALLOC=1` because it roughly doubles the footprint it measures.
+- **Marks wired into the OOM path** — `orchestrator.scan_watchlist` (per-symbol tick,
+  detection/earnings/missed-movers boundaries), `breakout_scanner.run_scan_mode` (stage
+  brackets around detection / enrichment / save / scan_and_add), and
+  `auto_portfolio.scan_and_add` (per-file tick reporting the four accumulators that grow
+  with files×rows). All no-ops when the env var is unset.
+- **`debug_memory_scan.py`** — three modes: `replay` (archive A/B, bounded vs unbounded,
+  **one process per arm** so one arm's unreleased arenas cannot inflate the other's
+  baseline), `scan` (real detection, subsampled), `finbert` (residency isolation).
+- **`tests/test_memory_trace.py`** — 18 tests, each mutation-verified. 587 pass overall.
+
+⚠ **The harness's first draft wrote a probe portfolio into the production S3 bucket**
+(`save_json` mirrors to S3 whenever AWS creds are present) and then read it back on the
+next arm, so arm A saw arm B's `processed_files` and loaded zero files — a silently
+invalid A/B. Deleted from the bucket; the sandbox is now pinned by a test.
+
+### The measurement that isolates it
+Same real signal CSV read 20 times from S3, macOS local:
+
+| arm | per-read growth | 20 reads |
+|---|---|---|
+| `utils._s3_fs()` per read (**current behaviour**) | **+12.8 MB, perfectly linear** | +256 MB |
+| one filesystem constructed once, reused | +13.4 MB once, then **+0.0 MB** | +13.4 MB |
+
+**Root cause: `utils.py:189`, `skip_instance_cache=True`.** That flag defeats fsspec's
+instance cache, so every S3 operation constructs a fresh `S3FileSystem` → a fresh
+aiobotocore/botocore client → botocore re-parses its S3 service-model JSON, and none of it
+is released. `tracemalloc` attribution on a 40-file replay names it outright:
+**`json/decoder.py:361  +410 MB across 5.5M blocks`**, with `botocore/loaders.py:307` and
+`botocore/model.py:777` immediately behind it. The flag was added deliberately (commit
+`4007cd0`) to dodge an AioSession kwarg bug in s3fs ≥2025 + aiobotocore ≥3.x — so the fix
+is to memoize the constructed filesystem, **not** to simply drop the flag.
+
+### Why this explains every earlier observation
+- **"Expands to fill whatever ceiling it is given."** 858 files × ~12.8 MB ≈ 11 GB of
+  demand. The process hits a 1400m cap ~107 files in and a 2500m cap ~191 files in — so
+  peak always equals the cap and never the demand. §15/§16/§17 each measured a ceiling.
+- **Kills landed 40+ min *after* the signals CSV was written** — that is the replay loop.
+- **The synthetic replay arm grew only +13.7 MB over 400 files**, because stubbing
+  `load_data` removes exactly this layer. The real-archive arm grew **+957 MB over 150
+  files**. That gap *is* the bug.
+- **§17's unexplained "~690 MiB held by the scan itself"** is very likely the same thing:
+  a normal scan still makes ~10–20 S3 calls (`list_files`, `save_data`, per-user portfolio
+  load/save), at ~12.8 MB each.
+
+### What is NOT the leak (measured, so stop suspecting these)
+- **Detection.** 400 symbols traced end to end: peak 150 MB, **net −55 MB**. Flat per
+  symbol. The missed-movers second data pass is also flat.
+- **FinBERT.** Reproduces §16 to the megabyte: +81.8 MB on import, **+695.5 MB on first
+  inference**, and **+0.0 MB for a 4× larger batch**. A large but *bounded, one-time*
+  residency — and confirmation that "score fewer headlines" saves nothing.
+- **The pipeline's own data structures.** `rejection_reasons`, the pooled DataFrames, and
+  the entry/split/price caches together account for ~14 MB per 400 files.
+
+### ⚠ §18's age bound does NOT make this safe on its own
+Counted against the real archive: the 7-day window still holds **31 files** (up to 10/day
+— several modes × several scans). A book with an empty or far-behind `processed_files` set
+therefore still makes **33 `_s3_fs()` calls ≈ 422 MB**, and five such books ≈ **2.06 GB —
+over the current 2500m cap**. Steady state (book current, ~5-10 new files/day) is ~40-65
+calls ≈ 510-830 MB per scan. So "confirm §18 in production" was never sufficient; the
+per-call term had to go too.
+
+### Fix APPLIED (2026-07-29, `utils.py`)
+`_s3_fs()` now memoizes one `S3FileSystem` per `(key, secret, region)` at module scope,
+under a lock. **`skip_instance_cache=True` is preserved** — the memo wraps *around*
+fsspec's instance cache rather than re-enabling it, so the `4007cd0` AioSession workaround
+still holds. All 7 call sites go through a new `_s3_call(op)` which, on any error, discards
+the cached filesystem, rebuilds, and retries **once** before letting the caller's existing
+local-disk fallback take over. Every op passed to it is a whole-object read, whole-object
+overwrite, or listing — all idempotent, so the retry is safe.
+
+`list_files` already called `invalidate_cache(prefix)` before every `ls`; that pre-existing
+call is exactly what makes reuse safe, since listings are the one thing fsspec caches
+across calls. It is now pinned by a test.
+
+Measured before → after:
+
+| measurement | before | after |
+|---|---|---|
+| 20 reads of one S3 object | +255.7 MB (12.8 MB each, linear) | **+0.7 MB total** |
+| …wall clock | 7.1 s | **1.7 s** |
+| `replay --real-archive --files 150` | **+957.3 MB**, verdict CLIMBING | **−48.0 MB**, verdict working set |
+
+Risk was tested, not assumed: survives repeated `asyncio.run()` boundaries (s3fs uses its
+own process-global IO loop, not the caller's), 8-16 concurrent threads share one instance
+with zero errors, object reads through the production shape (`fs.open` → `read_csv`) show
+no staleness across an overwrite of different size, the Streamlit branch is untouched, and
+a deliberately poisoned cached filesystem self-heals on the next call. 9 new tests
+(`tests/test_s3_fs_reuse.py`), each mutation-verified; **596 pass**.
+
+**Still to do:** re-verify on the box — every number here is macOS/Python 3.14. Once
+confirmed, the 2500m cap (§17) can very likely come back down.
