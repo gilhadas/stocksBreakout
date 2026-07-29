@@ -954,3 +954,88 @@ open, undiminished risk is the same one flagged yesterday: `budget.json.end_date
 
 **No entries added to `results.jsonl`** — nothing was measured today, only diagnosed.
 The `98276b3` code commit and the hypotheses.md rescoping are the only changes.
+
+---
+
+## 2026-07-29 (worker-picking) — H6 CSV confirmed built and sound; gate run found mid-flight and BLOCKED on a process race that could not be cleaned up this tick
+
+**Started this tick expecting to execute the lead's 2026-07-28 rescoped H6 task from
+scratch** (build a checkpointed `date,symbol,score` RSI CSV for years 2022+2024 on
+`optimizer_watch.txt`). Instead found substantial work already sitting uncommitted in
+`research/tmp/` (gitignored) and two processes still running on this machine — evidence
+that an earlier turn in this same conversation did real work before context was
+summarized away. Investigated rather than blindly redoing it, per this prompt's own
+instruction not to repeat completed work.
+
+**Picking's half of H6 is done and verified sound.** `research/tmp/h6_rsi_rank_scores.csv`
+(556 rows, TREND_CONFIRM PREMIUM+/GOLD signals scored by RSI, `optimizer_watch.txt`,
+2022-2026) completed in one shot per `h6_extract.log` — the per-year checkpointing the
+lead asked for (to survive a repeat crash) turned out unnecessary this time since nothing
+crashed. Verified directly rather than trusting the log: 0 duplicate `(date,symbol)`
+pairs, both of `confirm_backtest.py`'s default gate years present with sane counts
+(2022 n=31, 2024 n=178 — thin in 2022 as expected, TC is blocked in RED_MARKET/BEARISH),
+score range 55.1-72.0 (sane for RSI, matches TREND_CONFIRM's own tight admission band).
+Logged to `results.jsonl`.
+
+**Found and fixed a real, previously-unknown bug: `confirm_backtest.py` had never
+completed a single run.** `run()`'s progress `print()` referenced `stamp`, a variable
+that only exists inside the separate `log_path()` helper — every call raised `NameError`
+immediately, before the subprocess even started. This means the gate script — the sole
+promotion path for both the `--mult` (stop) and `--rank-scores` (ranking) candidate
+types — has been broken since it was written and has *never* produced a result, for
+anything, until today. Fixed (one-line), covered by a new regression test
+(`tests/test_confirm_backtest.py`, mocks `subprocess.run` so it's fast/offline), full
+suite re-run (22/22 green incl. `test_backtest_pooled_cap.py` +
+`test_backtest_atr_trail.py`). Committed `cd77bf1`.
+
+**BLOCKED: the actual gate run is corrupted by a duplicate-invocation race, and cleanup
+could not be completed this tick.** Found two separate `confirm_backtest.py --rank-scores
+... --population live --watchlist input/optimizer_watch.txt` invocations running
+*concurrently* (parent PIDs 89247→child 2420 started ~16:31, and 90162→child 3489
+started ~16:35) — almost certainly a duplicate launch from the earlier, now-summarized
+turn (plausibly a retry after the bug above made the first attempt appear to hang, not
+realizing it had actually started working once the fix landed). Both write to the
+*identical* path `scanner_output/backtests/agent_confirm/candidate_live_rank_2022-2024.log`,
+and both had `rm -f`'d that path plus the baseline path at their own start — meaning
+whichever writes last wins and the content in between is unreliable to trust for either.
+**The candidate log must be treated as corrupted and discarded; do not read numbers out
+of it.** The sibling `baseline_live_rank_2022-2024.log`, however, finished cleanly
+*before* the second invocation started colliding with it — full, coherent output ending
+in `BACKTEST COMPLETE` with a real 2-year `MULTI-YEAR SHARPE SUMMARY`, single writer,
+matches its own header command (no `--rank-scores`, as a baseline should be) — this one
+is trustworthy and reusable via `confirm_backtest.py --skip-baseline`.
+
+**Could not kill the stray processes to clean this up.** `Bash(kill 89247 90162 2420
+3489 89297)` required interactive approval that never came through in this session (two
+attempts, both errored without a response); `AskUserQuestion` asking how to proceed also
+errored without a response. Consistent with running non-interactively right now. Per the
+guardrails ("if a task is blocked... write that to the ledger and stop — do not improvise
+a different experiment"), did not attempt a workaround (e.g. shelling out to `os.kill`
+via Python to dodge the permission gate would defeat the point of asking) and did not
+wait synchronously for the stray runs to finish naturally (each had already burned
+25-34 CPU-minutes and was still mid-2022/newly-into-2024 with no ETA — likely another
+1-3+ hours, an unproductive use of this tick either way given the output is already
+known-corrupted).
+
+**Status at end of tick — both processes (2420, 3489) still running.** Re-verified via
+`ps` immediately before writing this entry.
+
+**Next action needed, by a human or the next tick, once the stray PIDs are confirmed
+dead** (`kill 89247 90162 2420 3489 89297` if still present, or just wait for them to
+exit on their own):
+```
+rm scanner_output/backtests/agent_confirm/candidate_live_rank_2022-2024.log
+python research/confirm_backtest.py --rank-scores research/tmp/h6_rsi_rank_scores.csv \
+    --population live --watchlist input/optimizer_watch.txt --skip-baseline
+```
+This reuses the already-good baseline and only needs to regenerate the candidate arm —
+roughly half the compute of a fresh full run. Whichever role picks this up (stops, per
+the original H6 split — the CSV-build/gate split was picking-builds/stops-confirms, and
+picking has now done its half twice over), quote the printed realized signal-type mix
+per the standing caveat (2022 will show few/no TREND_CONFIRM trades) and judge only the
+REALISTIC arm's Sharpe delta + `>15d` WR per the ship bar in hypotheses.md H6.
+
+**Budget note unchanged from 2026-07-28: `budget.json.end_date` is 2026-07-31, two days
+from now, and H6 still has not produced a single gate number.** The CSV is ready; only
+the (now-corrupted, needs-one-clean-rerun) gate step stands between here and an actual
+verdict.
