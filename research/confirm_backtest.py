@@ -108,7 +108,7 @@ def run(years: str, watchlist: str, tag: str, mult: float | None = None,
     if rank_scores:
         cmd += ['--rank-scores', rank_scores]
 
-    print(f"  running {tag} [{population}] {stamp} years={years} -> {log.name}", flush=True)
+    print(f"  running {tag} [{population}] years={years} -> {log.name}", flush=True)
     with log.open('w') as fh:
         fh.write(f"# {' '.join(cmd)}\n# started {datetime.now(timezone.utc).isoformat()}\n")
         fh.flush()
