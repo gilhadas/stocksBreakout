@@ -197,7 +197,10 @@ def scan_and_add(min_date: str | None = None,
     Returns summary dict with counts.
     """
     import pandas as pd
+    import memory_trace as memt   # no-op unless SB_MEM_TRACE=1
     from utils import list_files, load_data
+
+    memt.mark('scan_and_add:start', user=(user_id or 'default')[:8])
 
     pos_pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
     data      = load(user_id=user_id)
@@ -216,6 +219,8 @@ def scan_and_add(min_date: str | None = None,
     # list_files() returns newest-first; alphabetical sort gives oldest-first
     # for timestamped filenames and works for both local and S3.
     all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    memt.mark('scan_and_add:listed', archive=len(all_fnames),
+              processed=len(processed))
     if not all_fnames:
         return _build_result(added_syms, skipped_dup, skipped_cash, skipped_no_v9c, 0, data)
 
@@ -260,6 +265,12 @@ def scan_and_add(min_date: str | None = None,
             f"scan_and_add: retired {stale_retired} signal file(s) older than "
             f"{stale_cutoff} ({SIGNAL_MAX_AGE_DAYS}d) without loading them")
 
+    # The §18 checkpoint: `to_load` is what the age bound actually saved. If this
+    # is in the hundreds, the archive is being replayed and memory will track it.
+    memt.mark('scan_and_add:filtered',
+              to_load=sum(len(v) for v in files_by_date.values()),
+              retired=stale_retired, dates=len(files_by_date))
+
     for date_str in sorted(files_by_date.keys()):
         adds_this_scan = 0                                  # per-day cap
         date_files = files_by_date[date_str]
@@ -267,6 +278,13 @@ def scan_and_add(min_date: str | None = None,
         per_file_dfs = []
         for fname in date_files:
             files_scanned += 1
+            # Report the four accumulators that grow with (files × rows). If RSS
+            # tracks these rather than plateauing, the archive is being replayed.
+            memt.tick('signal_files', files_scanned, every=10,
+                      entry_cache=len(_ENTRY_PRICE_CACHE),
+                      split_cache=len(_SPLIT_CACHE),
+                      price_cache=len(_CURRENT_PRICE_CACHE),
+                      skipped_cash=len(data.get('skipped_cash', [])))
             df_raw = load_data(f"{_SIGNALS_DIR}/{fname}")
             if df_raw is None or df_raw.empty:
                 processed.add(fname)
@@ -620,6 +638,12 @@ def scan_and_add(min_date: str | None = None,
             run_health_check(data)
         except Exception as _e:
             _logger.warning(f"Health check failed: {_e}")
+
+    memt.mark('scan_and_add:end', loaded=files_scanned, added=len(added_syms),
+              entry_cache=len(_ENTRY_PRICE_CACHE),
+              split_cache=len(_SPLIT_CACHE),
+              price_cache=len(_CURRENT_PRICE_CACHE),
+              skipped_cash=len(data.get('skipped_cash', [])))
 
     return _build_result(added_syms, skipped_dup, skipped_cash,
                          skipped_no_v9c, files_scanned, data)
