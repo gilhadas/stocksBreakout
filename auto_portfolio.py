@@ -60,6 +60,26 @@ MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
 # regardless of caller. An explicit min_date= still overrides it, which is what
 # deliberate backfills use.
 SIGNAL_MAX_AGE_DAYS = 7        # calendar days; covers a weekend + holiday gap
+
+# How much older than the load window `processed_files` is allowed to get.
+#
+# `processed_files` used to accumulate forever — 860 filenames per book, the
+# dominant payload of a 29-64 KB book JSON that is written to S3 on every scan.
+# The bookmark had grown bigger than the data it bookmarks.
+#
+# Pruning is safe because the age bound above is the real backstop: a pruned
+# entry is by construction older than `stale_cutoff`, so on the next run it is
+# retired at the `date_str < stale_cutoff` branch WITHOUT being loaded. The
+# `fname in processed` check merely short-circuits that; it is an optimisation,
+# not the guard.
+#
+# ⚠ That guarantee INVERTS if anyone raises SIGNAL_MAX_AGE_DAYS: files pruned
+# under a 7-day bound become loadable again under a 14-day one, and weeks-old
+# signals would be admitted as fresh positions. Hence a margin rather than an
+# exact match, and `test_prune_window_exceeds_load_window` pins the relationship.
+# 7 + 23 = 30 days, matching cleanup_outputs.py's retention for signals/*.csv.
+PROCESSED_PRUNE_MARGIN_DAYS = 23
+
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
 MAX_ADDS_PER_SCAN  = 10        # Max new positions admitted per trading day (across all files for that day)
 MAX_PORTFOLIO_ATR_RISK = 0.12  # Max total portfolio risk as ATR% (12% = aggressive)
@@ -161,6 +181,93 @@ def _date_from_filename(fname: str) -> str:
         d = m.group(1)
         return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
     return datetime.now(_NY_TZ).strftime('%Y-%m-%d')
+
+
+# Per-run signal-file cache, owned by scan_and_add_all_users().
+#
+# scan_and_add() is called once per registered user, and each call independently
+# re-listed S3 and re-downloaded the same in-window files — N users meant N x the
+# same GETs for byte-identical content. This makes the archive read once per run.
+#
+# None = disabled (a lone scan_and_add call, a backtest, a test). A dict = an
+# active multi-user run. Deliberately not a module-lifetime cache: signal files
+# are appended to during the trading day, and a stale frame would silently make
+# a book miss the day's signals.
+_SCAN_FILE_CACHE: 'dict[str, pd.DataFrame | None] | None' = None
+
+
+def _load_signal_frame(fname: str):
+    """Load one signal CSV, through the per-run cache when one is active.
+
+    Always hands out a COPY. scan_and_add mutates what it gets — `df_raw.columns
+    = [c.strip() ...]` rewrites the columns in place — so sharing one frame
+    across users would let the first book's edits reach the second. That is
+    cross-user data corruption, not a performance detail.
+    """
+    from utils import load_data
+
+    path = f"{_SIGNALS_DIR}/{fname}"
+    if _SCAN_FILE_CACHE is None:
+        return load_data(path)
+    if fname not in _SCAN_FILE_CACHE:
+        _SCAN_FILE_CACHE[fname] = load_data(path)
+    df = _SCAN_FILE_CACHE[fname]
+    return None if df is None else df.copy()
+
+
+_NON_BREAKOUT_TYPES = ['BOUNCE', 'CONTINUATION', 'SMA20_CROSS', 'TREND_CONFIRM']
+
+
+def _v9h_mask(df, *, type_bypass: bool):
+    """The V9-H admission filter: GOLD/PREMIUM, plus a Minervini gate.
+
+    `type_bypass` is the one axis on which the two callers genuinely differ, and
+    it was previously an undocumented accident — two hand-written copies that had
+    drifted apart:
+
+      * ``scan_and_add`` (True): BOUNCE / CONTINUATION / SMA20_CROSS /
+        TREND_CONFIRM skip the Minervini gate, because those detectors never
+        compute a Minervini score. Without the bypass they would all be rejected.
+      * ``rebuild_skipped_cash`` (False): applies the gate to every row, so "missed
+        trades" is computed STRICTER than admission — a BOUNCE signal that would
+        have been admitted does not show up as missed.
+
+    That asymmetry is preserved here rather than silently fixed: changing it would
+    change what the UI reports, which is a product decision, not a refactor. It is
+    now visible in one place instead of implied by two divergent copies.
+
+    Note the third branch, which is live today: when `MinerviniScore` is absent
+    entirely, there is NO Minervini gate at all. Both of the newest signal files
+    (28 and 24 columns) take that branch.
+    """
+    import pandas as pd
+
+    mask = df['Quality'].isin(['GOLD', 'PREMIUM'])
+    if 'MinerviniScore' not in df.columns:
+        return mask
+
+    minervini_ok = (pd.to_numeric(df['MinerviniScore'], errors='coerce')
+                    .fillna(0) >= MIN_MINERVINI)
+    if type_bypass and 'Type' in df.columns:
+        is_breakout = ~df['Type'].isin(_NON_BREAKOUT_TYPES)
+        return mask & (minervini_ok | ~is_breakout)
+    return mask & minervini_ok
+
+
+def _prune_processed(processed: set[str]) -> list[str]:
+    """Bound `processed_files` to the window in which it can still do any work.
+
+    Anything older than the load window is unreachable — the age bound retires
+    it without a read whether or not it is remembered — so keeping it only
+    inflates the book JSON that gets written to S3 on every scan.
+
+    Returns a sorted list, ready to persist. See PROCESSED_PRUNE_MARGIN_DAYS for
+    why the window is deliberately wider than SIGNAL_MAX_AGE_DAYS.
+    """
+    cutoff = (datetime.now(_NY_TZ).date()
+              - timedelta(days=SIGNAL_MAX_AGE_DAYS + PROCESSED_PRUNE_MARGIN_DAYS)
+              ).isoformat()
+    return sorted(f for f in processed if _date_from_filename(f) >= cutoff)
 
 
 def _mode_from_filename(fname: str) -> str:
@@ -285,7 +392,7 @@ def scan_and_add(min_date: str | None = None,
                       split_cache=len(_SPLIT_CACHE),
                       price_cache=len(_CURRENT_PRICE_CACHE),
                       skipped_cash=len(data.get('skipped_cash', [])))
-            df_raw = load_data(f"{_SIGNALS_DIR}/{fname}")
+            df_raw = _load_signal_frame(fname)
             if df_raw is None or df_raw.empty:
                 processed.add(fname)
                 continue
@@ -296,18 +403,7 @@ def scan_and_add(min_date: str | None = None,
                 processed.add(fname)
                 continue
             # V9-H filter: GOLD or PREMIUM (Minervini bypass for non-breakout types)
-            mask = df_raw['Quality'].isin(['GOLD', 'PREMIUM'])
-            if 'MinerviniScore' in df_raw.columns and 'Type' in df_raw.columns:
-                is_breakout = ~df_raw['Type'].isin(
-                    ['BOUNCE', 'CONTINUATION', 'SMA20_CROSS', 'TREND_CONFIRM']
-                )
-                minervini_ok = (pd.to_numeric(df_raw['MinerviniScore'], errors='coerce')
-                                .fillna(0) >= MIN_MINERVINI)
-                mask = mask & (minervini_ok | ~is_breakout)
-            elif 'MinerviniScore' in df_raw.columns:
-                mask = mask & (pd.to_numeric(df_raw['MinerviniScore'], errors='coerce')
-                               .fillna(0) >= MIN_MINERVINI)
-            df_filtered = df_raw[mask].copy()
+            df_filtered = df_raw[_v9h_mask(df_raw, type_bypass=True)].copy()
 
             # Selective mode: stack a stricter filter on top of V9-H. Drops daytrade
             # entirely (canonical 5-yr data: ≤15d holds = net loss) plus per-row gates.
@@ -559,9 +655,7 @@ def scan_and_add(min_date: str | None = None,
             except Exception:
                 pass
 
-        processed.add(fname)
-
-    data['processed_files'] = sorted(processed)
+    data['processed_files'] = _prune_processed(processed)
 
     # Sort skipped list: best priority first so the UI surfaces top missed trades
     data['skipped_cash'].sort(key=lambda e: e.get('priority_score', 0), reverse=True)
@@ -1176,26 +1270,39 @@ def scan_and_add_all_users(min_date: str | None = None,
     from datetime import date as _date
     today = str(_date.today())
 
-    results = {}
-    for user in users:
-        try:
-            data = load(user_id=user.id)
-            # First-run guard: if user has no processed_files and no positions,
-            # only pick up signals from today onwards to avoid flooding them
-            # with all historical backfill files.
-            user_min_date = min_date
-            if not data.get('processed_files') and not data.get('positions'):
-                user_min_date = today
-                _log.info(f"scan_and_add [{user.email}]: new user — using min_date={today}")
+    # Every user sees the same signal files, so read each one once for the whole
+    # run instead of once per book. Scoped to this call and always cleared, so a
+    # later scan never sees a frame from an earlier one.
+    global _SCAN_FILE_CACHE
+    _SCAN_FILE_CACHE = {}
 
-            result = scan_and_add(min_date=user_min_date, position_pct=position_pct,
-                                  user_id=user.id)
-            added = result.get('added', 0)
-            _log.info(f"scan_and_add [{user.email}]: {added} position(s) added")
-            results[user.email] = result
-        except Exception as exc:
-            _log.error(f"scan_and_add [{user.email}]: {exc}")
-            results[user.email] = {'error': str(exc)}
+    results = {}
+    try:
+        for user in users:
+            try:
+                data = load(user_id=user.id)
+                # First-run guard: if user has no processed_files and no positions,
+                # only pick up signals from today onwards to avoid flooding them
+                # with all historical backfill files.
+                user_min_date = min_date
+                if not data.get('processed_files') and not data.get('positions'):
+                    user_min_date = today
+                    _log.info(f"scan_and_add [{user.email}]: new user — using min_date={today}")
+
+                result = scan_and_add(min_date=user_min_date, position_pct=position_pct,
+                                      user_id=user.id)
+                added = result.get('added', 0)
+                _log.info(f"scan_and_add [{user.email}]: {added} position(s) added")
+                results[user.email] = result
+            except Exception as exc:
+                _log.error(f"scan_and_add [{user.email}]: {exc}")
+                results[user.email] = {'error': str(exc)}
+    finally:
+        _cached = len(_SCAN_FILE_CACHE)
+        _SCAN_FILE_CACHE = None
+        if _cached:
+            _log.info(f"scan_and_add_all_users: {_cached} signal file(s) read once "
+                      f"for {len(users)} book(s)")
 
     return results
 
@@ -1552,9 +1659,13 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
 
 # ── Missed-trade discovery ───────────────────────────────────────────────────
 
-def rebuild_skipped_cash(user_id: str | None = None) -> dict:
+MISSED_TRADE_MAX_AGE_DAYS = 90    # a "missed trade" older than a quarter is not actionable
+
+
+def rebuild_skipped_cash(user_id: str | None = None,
+                         max_age_days: int = MISSED_TRADE_MAX_AGE_DAYS) -> dict:
     """
-    Re-scan every signal file (including already-processed ones) to find
+    Re-scan recent signal files (including already-processed ones) to find
     V9-C signals that were NEVER taken (not open, not closed).
 
     These represent missed opportunities — either due to insufficient cash
@@ -1563,30 +1674,48 @@ def rebuild_skipped_cash(user_id: str | None = None) -> dict:
     Rebuilds data['skipped_cash'] from scratch (de-duped by symbol,
     keeping the first occurrence).  Does NOT touch positions/closed/processed_files.
 
+    Bounded by `max_age_days`. This used to walk the ENTIRE archive TWICE with no
+    bound — the same defect §18 fixed in scan_and_add, still live here and reached
+    from a Streamlit button inside the 320 MiB dashboard container: 860 files x 2
+    reads = 1,720 S3 GETs, plus a yfinance quote per unique symbol. Pass
+    max_age_days=0 for the old unbounded behaviour.
+
     Returns {'found': count, 'data': data}
     """
-    import pandas as pd
-    from utils import list_files, load_data
+    from utils import list_files
 
     data      = load(user_id=user_id)
     taken_syms = ({p['symbol'] for p in data['positions']} |
                   {t['symbol'] for t in data['closed']})
 
     all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    if max_age_days:
+        cutoff = (datetime.now(_NY_TZ).date()
+                  - timedelta(days=max_age_days)).isoformat()
+        all_fnames = [f for f in all_fnames if _date_from_filename(f) >= cutoff]
 
-    # Collect all symbols that appear in signal files so we know which
-    # skipped_cash entries were sourced from CSVs vs. added via live
-    # BREAKOUT detection (feedback agent). Live entries are preserved —
-    # only signal-file-sourced entries are rebuilt.
+    # ONE pass over the window. The old first pass existed only to collect
+    # `signal_syms`, which is a subset of what the second pass already read, so
+    # every file was downloaded and parsed twice. Keep the filtered frame from
+    # this pass and reuse it below.
     signal_syms: set[str] = set()
+    per_file: list[tuple] = []          # (fname, date_str, file_mode, v9h_frame)
     for fname in all_fnames:
-        df = load_data(f"{_SIGNALS_DIR}/{fname}")
+        df = _load_signal_frame(fname)
         if df is None or df.empty:
             continue
         df.columns = [c.strip() for c in df.columns]
-        col = 'Symbol' if 'Symbol' in df.columns else ('symbol' if 'symbol' in df.columns else None)
-        if col:
-            signal_syms.update(str(s).strip().upper() for s in df[col] if str(s).strip().upper() != 'NAN')
+        if 'Symbol' not in df.columns and 'symbol' in df.columns:
+            df = df.rename(columns={'symbol': 'Symbol'})
+        if 'Symbol' in df.columns:
+            signal_syms.update(str(s).strip().upper() for s in df['Symbol']
+                               if str(s).strip().upper() != 'NAN')
+        if 'Quality' not in df.columns or 'Symbol' not in df.columns:
+            continue
+        # type_bypass=False — deliberately stricter than admission; see _v9h_mask.
+        per_file.append((fname, _date_from_filename(fname),
+                         _mode_from_filename(fname),
+                         df[_v9h_mask(df, type_bypass=False)]))
 
     # Keep live-breakout entries (not in any signal file) so they survive the rebuild.
     # Re-validate their stop/target in case the original scanner used bad price data.
@@ -1609,26 +1738,7 @@ def rebuild_skipped_cash(user_id: str | None = None) -> dict:
         _save(data, user_id=user_id)
         return {'found': len(data['skipped_cash']), 'data': data}
 
-    for fname in all_fnames:
-        date_str  = _date_from_filename(fname)
-        file_mode = _mode_from_filename(fname)
-
-        df = load_data(f"{_SIGNALS_DIR}/{fname}")
-        if df is None or df.empty:
-            continue
-
-        df.columns = [c.strip() for c in df.columns]
-        if 'Symbol' not in df.columns and 'symbol' in df.columns:
-            df = df.rename(columns={'symbol': 'Symbol'})
-        if 'Quality' not in df.columns or 'Symbol' not in df.columns:
-            continue
-
-        mask = df['Quality'].isin(['GOLD', 'PREMIUM'])
-        if 'MinerviniScore' in df.columns:
-            mask = mask & (pd.to_numeric(df['MinerviniScore'], errors='coerce')
-                           .fillna(0) >= MIN_MINERVINI)
-        v9h = df[mask]
-
+    for fname, date_str, file_mode, v9h in per_file:
         for _, row in v9h.iterrows():
             sym = str(row.get('Symbol', '')).strip().upper()
             if not sym or sym == 'NAN':

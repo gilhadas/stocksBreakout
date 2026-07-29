@@ -1385,3 +1385,84 @@ a deliberately poisoned cached filesystem self-heals on the next call. 9 new tes
 
 **Still to do:** re-verify on the box — every number here is macOS/Python 3.14. Once
 confirmed, the 2500m cap (§17) can very likely come back down.
+
+## 20. Signal ingestion, Phase 0: bound it (2026-07-29)
+
+§18 and §19 each fixed a symptom of one design problem: the S3 **file archive is used as a
+work queue**. This is the first of a planned two-step correction. Phase 0 adds no new
+components — it bounds what production reads. (Phase 1+, a derived SQLite index, is
+planned but deliberately **not** started until these numbers are confirmed in production.)
+
+### Measured, real archive (860 files, 2.1 MB)
+
+| Lever | Before | After |
+|---|---|---|
+| **S3 calls per `scan_and_add_all_users`** (3 books = production today) | 99 | **37** |
+| …5 books / 8 books | 165 / 264 | **41 / 47** |
+| **`processed_files` persisted per book** | 860 entries | **53** (30d window) |
+| **`rebuild_skipped_cash` archive reads** | **1,720** (walked twice) | **638** (90d, single pass) |
+
+Cost is now O(files + books) instead of O(files × books).
+
+### What changed
+- **`_prune_processed()`** — `processed_files` is persisted only for the window in which it
+  can still do work. Safe *because* the age bound is the real guard: a pruned entry is by
+  construction older than `stale_cutoff`, so the next run retires it at
+  `auto_portfolio.py:246-255` **without a read**. `PROCESSED_PRUNE_MARGIN_DAYS = 23`
+  (7+23=30, matching `cleanup_outputs.py`) — a margin, not an exact match, because the
+  guarantee **inverts if anyone raises `SIGNAL_MAX_AGE_DAYS`**: previously-pruned files
+  become loadable again and weeks-old signals get admitted at today's price. Pinned by
+  `test_prune_window_exceeds_load_window`.
+- **`_SCAN_FILE_CACHE`** — scoped to one `scan_and_add_all_users()` call, cleared in a
+  `finally`. ⚠ Hands out `.copy()`: `scan_and_add` rewrites `df_raw.columns` **in place**,
+  so a shared frame would let one book's edits reach another — cross-user corruption, not a
+  perf detail. Deliberately not module-lifetime: signal files are appended to during the
+  day, and a surviving frame would make a book miss that day's signals.
+- **`rebuild_skipped_cash`** — the unfixed §18 twin, reachable from a Streamlit button in
+  the **320 MiB** dashboard container. Now bounded (`MISSED_TRADE_MAX_AGE_DAYS = 90`,
+  `max_age_days=0` restores the old unbounded behaviour) and single-pass: the old first
+  walk existed only to collect `signal_syms`, a subset of what the second walk already
+  read.
+- **`_v9h_mask(df, *, type_bypass)`** — one filter replacing two hand-written copies that
+  had silently drifted. `scan_and_add` passes `True` (BOUNCE/CONTINUATION/SMA20_CROSS/
+  TREND_CONFIRM skip the Minervini gate — those detectors never compute a score);
+  `rebuild_skipped_cash` passes `False`, so "missed trades" is computed **stricter than
+  admission**. That asymmetry is preserved, not fixed — changing it changes what the UI
+  reports, which is a product decision. It is now visible in one place.
+- Removed a stray `processed.add(fname)` that sat outside the file loop on a leaked loop
+  variable — dead, and a landmine for exactly this refactor.
+
+### Retention decision: keep everything
+Archive growth is **7.3 files/day → 6.6 MB/year → 66 MB per decade**. Storage is not the
+cost; *walking* it is. Deleting history is irreversible and destroys the research
+substrate. **Do not prune S3.** Bound each consumer's read window instead — and note the
+repo currently has four inconsistent local windows (`SIGNAL_MAX_AGE_DAYS=7`,
+`scan_feedback_agent._KEEP_DAYS=7`, `cleanup_outputs.py=30`, `cron-setup.sh=90`) and no S3
+pruning at all.
+
+⚠ **`SIGNAL_MAX_AGE_DAYS` is a correctness bound, not a performance knob.** Entries are
+priced at *today's* price (HZ1), so widening it admits setups that already played out.
+
+### Traps found while measuring, worth remembering
+- **A sandbox that maps every user to one book hides this entire class of bug.** The first
+  A/B reported *zero* improvement because books 2..N read book 1's freshly-saved
+  `processed_files` and skipped everything. Per-user book paths are mandatory when
+  measuring multi-book behaviour.
+- **`rebuild_skipped_cash` fires a live 5-day yfinance fetch per symbol** whenever
+  `entry_price == price` (it reads that as "yfinance fell back to the CSV value"). A test
+  stub returning `(price, price)` turns a hermetic unit test into a network test — 31 s
+  vs 0.02 s.
+
+### Tests
+`tests/test_scan_file_cache.py` (7), `tests/test_rebuild_skipped_cash_bound.py` (4), and
+`tests/test_scan_add_stale_window.py` extended to 7. Five mutations verified (no prune, no
+`.copy()`, cache never cleared, rebuild unbounded, stale files loaded) — each fails only
+its own tests. **609 pass.**
+
+### Standing lesson
+**If peak == cap on every observation, you are measuring the ceiling, not the demand.**
+The only way out is a probe that reports growth *per unit of work consumed* while the
+process is still alive — which is what `SB_MEM_TRACE=1` now provides. Note also that the
+first verdict heuristic in `debug_memory_scan.py` called +575 MB then +232 MB a "plateau"
+because the ratio halved; a process still paying 3 MB per file has not stopped growing.
+Judge the per-item *rate*, not the ratio between halves.

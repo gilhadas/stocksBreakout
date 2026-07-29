@@ -678,9 +678,11 @@ def _render_auto_portfolio():
             st.rerun()
 
     with col_missed:
+        _missed_days = ap.MISSED_TRADE_MAX_AGE_DAYS
         if st.button("🔍 Find Missed Trades", key="ap_missed",
-                     help="Re-scan all signal files for V9-C signals never taken (missed opportunities)"):
-            with st.spinner("Scanning all signal files for missed trades..."):
+                     help=f"Re-scan the last {_missed_days} days of signal files for "
+                          f"V9-C signals never taken (missed opportunities)"):
+            with st.spinner(f"Scanning the last {_missed_days} days for missed trades..."):
                 result = ap.rebuild_skipped_cash(user_id=_user_id)
             data    = result['data']
             summary = ap.get_summary(data)
