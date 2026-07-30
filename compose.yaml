@@ -19,7 +19,11 @@
 
 # Memory limits (added 2026-07-23 after the box wedged for 7h)
 # ---------------------------------------------------------------------------
-# The VM is a t3.small: 2 GB RAM total, no swap, six containers, and until now
+# ⚠ OUTDATED AS WRITTEN — the box is a t3.medium (4 GiB, ~3900 MB usable) since
+# the §17 resize on 2026-07-28. The history below is kept because the FAILURE it
+# describes is still the reason these caps exist; only the machine changed.
+#
+# The VM was a t3.small: 2 GB RAM total, no swap, six containers, and until then
 # no per-container limit anywhere. With no cgroup limit the *host* OOM killer
 # picks its victims by badness score — on 2026-07-22 18:00 ET it took out the
 # network daemons rather than the scan that caused the pressure, so the box kept
@@ -33,8 +37,8 @@
 # brings back — while the tunnel and Tailscale survive and the box stays
 # reachable. oom_score_adj tells the host killer to avoid those two lifelines.
 # Caps are ceilings, not reservations, so they may sum above physical RAM.
-# These numbers assume the 2 GB t3.small + the 4 GB swapfile from
-# deploy/setup-swap.sh; revisit them if the box is resized or migrated.
+# Current numbers assume the t3.medium (~3900 MB usable) + the 4 GB swapfile
+# from deploy/setup-swap.sh; revisit them if the box is resized or migrated.
 
 # Log rotation (added 2026-07-23) — plain json-file has no rotation by default.
 # Found 9.6GB of stale Docker BUILD CACHE (not container logs) eating the 30GB
@@ -83,46 +87,47 @@ services:
     # loads FinBERT (~440 MB of weights + torch runtime) on the 16:30 ET swing
     # scan; it is the one that must die first if anything does.
     #
-    # 1024m → 1400m (2026-07-28, §15), then 1400m → 2500m (2026-07-28, §17).
+    # History: 1024m → 1400m (§15) → 2500m (§17) → 1500m (§21, current).
+    # The first three were all sized from TRUNCATED peaks — see the warning at
+    # the end of this block, which is the lesson worth keeping.
     #
-    # ⚠⚠ THIS VALUE REQUIRES t3.medium (4 GiB). DO NOT APPLY IT ON t3.small. ⚠⚠
-    # On the 1907 MiB t3.small, a 2500m cap is larger than the machine, so the
-    # cgroup limit can never bind — the *host* OOM killer fires instead, and it
-    # picks its own victim. That is precisely the failure mode the per-container
-    # caps were introduced to prevent after the 7 h outage (§9). If the box is
-    # still t3.small, keep 1400m.
-    #   Correct order: resize the instance FIRST, then `git pull` and
-    #   `docker compose up -d scanner-cron` to apply this file. A stop/start
-    #   alone restarts the containers with their OLD limits, so the pull+up is
-    #   what actually lands the change.
+    # Applying a change: `git pull` then `docker compose up -d scanner-cron`.
+    # A stop/start alone restarts containers with their OLD limits.
     #
-    # Why 1400m was not enough (measured 2026-07-28, §17): §15 sized it against a
-    # "measured peak" of ~1.01 GiB, but that figure was where the OOM killer
-    # intervened, not where demand stopped. With the §16 serialization in place, a
-    # single wide all.txt scan running completely ALONE on an idle box reached
-    # 1.361 GiB of the 1.367 GiB cap — 99.55% — and was SIGKILLed (rc=137) 72 min
-    # in. Composition at that peak: ~704 MiB is FinBERT resident (flat, measured:
-    # 12 MiB baseline → 115 on import → 704 on first inference, and identical for
-    # a 64-headline batch), leaving ~690 MiB held by the scan itself.
+    # Also measured and still true (§16/§17), so don't re-litigate them:
+    #   * FinBERT costs a FLAT ~704 MiB once the model loads — 12 MiB baseline →
+    #     115 on import → 704 on first inference, identical for a 64-headline
+    #     batch. Scoring fewer headlines saves nothing; it is residency, not
+    #     inference volume.
+    #   * Freeing the model after use returns only 132 MiB of 742 (18%); the
+    #     rest is torch/transformers runtime and allocator arenas that never
+    #     return to the OS. It also loads at the END of the scan, so freeing it
+    #     afterwards cannot lower peak.
+    #   * int8 dynamic quantization shifts FinBERT confidence by up to 0.32,
+    #     straddling the 0.80/0.88 FINBERT_PROMOTION thresholds — it would
+    #     silently change which positions are opened. Not a drop-in.
     #
-    # 2500m gives ~1.1 GiB over that observed peak. It is deliberately generous
-    # because true demand is still unknown — every measurement to date is a
-    # truncated one, taken at the moment the killer intervened.
+    # 2026-07-30: 2500m -> 1500m, sized from the FIRST measurement that was not
+    # truncated by the OOM killer. One instrumented wide all.txt scan (1363
+    # symbols, SB_MEM_TRACE=1) completed cleanly in 26 min at peak RSS 1013.6MB
+    # / cgroup 912.2MB — 36.5% of the 2500m cap. 1500m leaves ~64% headroom over
+    # that peak.
     #
-    # Caps then sum to 3524m against ~3900 MiB usable on t3.medium (90% worst
-    # case), but the §16 flock mutex guarantees only ONE scan is ever resident, so
-    # real concurrent usage stays far below that. cloudflared/tailscale keep
-    # oom_score_adj: -500 regardless.
+    # Why this is now safe when 1400m was not: every earlier figure was a
+    # CEILING, not demand. The process expanded to fill whatever cap it was
+    # given (died ~1.37GiB under 1400m, ~2.45GiB under 2500m) because
+    # utils._s3_fs() rebuilt a botocore client per S3 call, ~12.8MB each, never
+    # released — 858 archive files ≈ 11GB of demand (§19). With that fixed and
+    # ingestion bounded (§20), the same scan reads ONE file (to_load=1, "1
+    # signal file(s) read once for 3 book(s)") and peak is a real working set:
+    # ~704MB flat FinBERT residency + ~300MB scan.
     #
-    # This is a headroom fix, not a root-cause fix. ~1.4 GiB for one scan is still
-    # unreasonable and will creep as the universe grows. The two software levers
-    # measured so far: freeing the model after use returns only 132 MiB of 742
-    # (18% — the rest is torch/transformers runtime and allocator arenas that
-    # never return), and int8 dynamic quantization shifts FinBERT confidence by up
-    # to 0.32, which straddles the 0.80/0.88 FINBERT_PROMOTION thresholds and so
-    # would silently change live admissions. The open lead is the ~690 MiB the
-    # scan still holds after detection has finished.
-    mem_limit: 2500m
+    # ⚠ Peak == cap on every observation means unbounded growth, not
+    # under-provisioning. If a scan ever again peaks near this limit, RAISING it
+    # is the wrong move — that is the signature of a leak, and it cost three
+    # wrong diagnoses (§15 raised the cap, §17 resized the box, §18 found the
+    # replay) before §19 measured the real per-call term.
+    mem_limit: 1500m
 
   # ── Mobile API server ──────────────────────────────────────────────────────
   api:
