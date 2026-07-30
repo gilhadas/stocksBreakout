@@ -1527,13 +1527,39 @@ retry is idempotent like every other op `_s3_call` takes. Test covers both the b
 half (one stale-pool failure survived, dead filesystem discarded) and the structural half
 (no `_s3_fs().put` anywhere in the file).
 
+### The in-situ half of the gate — PASSED (2026-07-30 09:35 ET scan)
+
+One instrumented wide `all.txt` scan (1363 symbols, `SB_MEM_TRACE=1`), completed cleanly:
+
+| probe | pre-fix | measured |
+|---|---|---|
+| `to_load=` (files pulled per book) | 858 | **1** |
+| files read for 3 books | ~2,600 loads | **1, read once for 3 books** |
+| `STAGE 4-scan_and_add_all_users` | 40+ min, climbing → SIGKILL | **12.6 s, Δ +27.3 MB** |
+| `STAGE 1-detection` | — | +18.3 MB in 1459 s |
+| peak RSS | filled whatever cap existed | **1013.6 MB** |
+| **cgroup peak vs cap** | **~98% of cap, 13 times** | **912.2 MB / 2500 MB = 36.5%** |
+| outcome | rc=137 | **completed, 26 min** |
+
+The last row is the proof. Peak had always equalled the cap (1.37 GiB under 1400m, 2.45 GiB
+under 2500m) — the leak signature. It now sits at **36.5%** and finishes. Composition is a
+real working set: ~704 MB flat FinBERT residency + ~300 MB scan.
+
+⚠ **Read the probes from `scanner_output/logs/scanner_YYYYMMDD.log`, not `cron_*.log`.**
+`breakout_scanner.py:1715` sets the *stderr* handler to `ERROR`, so INFO — which is every
+`[MEM]` line — goes only to the dated FileHandler. The cron log captures errors alone. A
+watcher pointed at `cron_swing.log` reported "no probes found" while 501 `[MEM]` lines sat
+in the other file, i.e. a successful run looked like a failed measurement.
+
+### Cap lowered 2500m → 1500m (`61d80cb`)
+Sized from the untruncated peak above: ~64% headroom over 912 MB. Caps now sum to **2524m**
+against ~3900 MB usable, down from 3524m. `compose.yaml`'s self-contradictory comments are
+fixed too — the header had still described the box as a t3.small, and the cap rationale
+still named "the ~690 MiB the scan holds after detection" as the open lead, which §19
+identified as the same s3fs per-call leak. `SB_MEM_TRACE` removed from the box's `.env`
+(restored from `.env.bak.20260730`), tracing verified off.
+
 ### Still open
-- **The in-situ half of the gate**: one instrumented wide scan (`SB_MEM_TRACE=1` is set in
-  the box's `.env`, backed up to `.env.bak.20260730`; **remove it once read**). Watch
-  `STAGE 4-scan_and_add_all_users`, `scan_and_add:filtered … to_load=` (hundreds ⇒ still
-  replaying), and the cgroup peak against the 2500m cap.
-- **Lowering the cap** (§17/§18/§19) — blocked on the above, and must be sized from that
-  measured peak. ⚠ If peak ≈ cap again, the fix is incomplete; do not raise it.
 - **Phase 1** — recommendation is now **defer, and build Parquet not SQLite if ever**:
   Phase 0 already took the hot path to ~1–2 CSV GETs of ~11 steady-state S3 ops; the index
   would be 6–10 MB over a 2.1 MB corpus; and expressing `_v9h_mask` in SQL would re-fork the
@@ -1544,3 +1570,82 @@ half (one stale-pool failure survived, dead filesystem discarded) and the struct
   real bottleneck there, not S3), and close the `min_date` hole at
   `auto_portfolio.py:346-348`, which bypasses **both** the `processed` bookmark and
   `stale_cutoff` — a correctness gap, since entries price at today's price.
+
+## 22. Three production bugs found while shipping §21 (2026-07-30)
+
+All three were found by *using* the system rather than reading it, and all three share a
+shape: **a check or a config that fails silently, so the broken state looks like a normal
+one.**
+
+### 22.1 The verification harness lied where it was developed (`076e1dd`)
+`debug_memory_scan.py --real-archive` needs AWS credentials for `utils._is_cloud()`, but
+nothing on its import path loads `.env` — it imports `auto_portfolio` and `utils`, neither
+of which imports `config`, which is where `load_dotenv()` normally happens. Locally that
+made `_is_cloud()` False, `list_files` fall back to an empty local dir, and **both** A/B
+arms load zero files. It then printed *"The age bound avoided 0 file loads and −2.6MB of
+growth"* and **exited 0**. Invisible in the container, where compose's `env_file: .env`
+supplies credentials as real env vars — the tool worked where it was deployed and lied
+where it was developed. Fixed: `load_dotenv()` at import, plus the unbounded arm loading 0
+files now exits 1 loudly (that arm exists to load everything; zero is an environment fault,
+never a finding).
+
+⚠ **Trap for the mutation-testing method itself.** Verifying that guard means flipping
+`return 1` → `return 0` — **byte-length-identical**, so the `.pyc` validity check
+(mtime-second, size) does not trip and stale bytecode serves the old code. It masked the
+*restore* and briefly made a working guard look broken. **`touch` the file after every
+mutation and after the restore.**
+
+### 22.2 `orchestrator`'s signal-CSV upload never self-healed (`6bfa62f`)
+`save_results` mirrored the day's signals to S3 via a bare `_s3_fs().put()` — the only
+`_s3_fs()` call site outside `utils.py`, so the only S3 access that did **not** go through
+§19's `_s3_call` drop-rebuild-retry. `scanner-cron` runs for days (a stale idle pool is
+exactly what reuse introduces), it sits on the write path every consumer reads, and its
+`except` only logs a warning — so the failure mode is *the day's signals silently never
+reaching S3 while the scan reports success*.
+
+### 22.3 `portfolio.json` positions always reported `days_held=0` (`575b000`)
+Found from a daily Telegram exit alert naming 24 positions. 14 of them live in
+`portfolio.json`, opened 2026-05-07 (84 days), yet every run reported `DaysHeld 0` — so
+"Max hold period reached" could never fire for that book. The tell was an asymmetry in one
+log: auto_portfolio positions in the *same* evaluation correctly showed 92/113/99 days.
+Cause: both books feed one exit run but their dicts are built in different places —
+`breakout_scanner.py` sets `entry_date` explicitly, `Portfolio.get_positions_as_exit_format()`
+omitted it. `orchestrator.evaluate_exits` does `pos.get('entry_date', '')` and leaves
+`days_held` at 0, so the omission produced no error, no warning — just a rule that never
+fired for half its input.
+
+**Two related things NOT fixed, both needing a human decision:** `portfolio.json` is never
+touched by `refresh_prices` (only `auto_portfolio.json` books are), so its stops never trail
+and its breaches never auto-close — which is why those 14 re-alert daily, several genuinely
+deep below their stops (ASTS −18%, AMZN −11%). And all 14 carry `target: 0`, which is the
+`TP: $0.0` and the meaningless negative R:R in the notification.
+
+### 22.4 Streamlit Cloud login: settings were read from the environment only (`ef8ea65`, `ec3d938`)
+Reported as "streamlit stopped working with google auth"; the pasted error was
+`HTTPConnectionPool(host='127.0.0.1', port=8000) … Errno 111`.
+
+**`Errno 111` is Linux's ECONNREFUSED — macOS is 61.** That single digit ruled out the Mac
+and pointed at a Linux host with no `API_BASE_URL`.
+
+Two distinct defects, and the first fix was **not sufficient**:
+1. `app.py` used one URL for two consumers. `api_base` is server-side (in the container,
+   `http://api:8000` over the compose network) but the Google button renders a **link the
+   browser follows**, and `http://api:8000` is a Docker-internal name no browser resolves.
+   The old code papered over this with
+   `api_base.replace('127.0.0.1:8000', 'gilhadas-stocks.com')`, which only fires when
+   `api_base` is the *default* — it worked on the retired Mac deployment and became a silent
+   no-op the moment `API_BASE_URL` was set, i.e. from the §9 cutover onward. Its result was
+   assigned to a `redirect_uri` local that was never read. → added `PUBLIC_API_BASE_URL`.
+2. **The actual cause:** every setting was read with `os.getenv()`. **Streamlit Cloud has no
+   way to set an OS environment variable** — its config lives in `st.secrets`, and `.env`
+   does not exist in the Cloud checkout. So setting the secret could not have helped; the
+   code was not looking there. `GOOGLE_CLIENT_ID` had the same defect with a quieter
+   symptom: it resolved to `''`, so the Google button rendered "not configured yet" rather
+   than failing visibly. → added `_setting()`: `st.secrets` → `os.getenv` → default,
+   mirroring `utils._is_cloud()`'s precedence (including the try/except, since `st.secrets`
+   raises when no secrets file exists — the normal case in the container).
+
+Three deployments now resolve correctly, each pinned by a test: container (env), Streamlit
+Cloud (secret), secret-beats-env, and neither → default.
+**Streamlit Cloud still needs `API_BASE_URL = "https://api.gilhadas-stocks.com"` set in its
+own Secrets** — a console change no commit can make.
