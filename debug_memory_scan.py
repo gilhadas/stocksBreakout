@@ -71,6 +71,19 @@ from pathlib import Path
 # Tracing must be on before the pipeline modules read the env var.
 os.environ.setdefault('SB_MEM_TRACE', '1')
 
+# --real-archive needs AWS credentials for utils._is_cloud() to return True.
+# In the container those arrive as real env vars (compose `env_file: .env`), but
+# a local run gets them only from .env — and nothing on this import path loads it
+# (auto_portfolio and utils do not import config, which is where load_dotenv()
+# normally happens). Without this the arm silently lists ZERO files and reports
+# "avoided 0 file loads", which reads like a benign result rather than a broken
+# measurement. Loaded here, before any module reads the credentials.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Python 3.14 compatibility: create the event loop before anything imports
 # ib_insync, or eventkit raises at import time. Same guard as breakout_scanner.
 try:
@@ -375,6 +388,26 @@ def cmd_replay(args) -> int:
     logger.info(f"  The age bound avoided "
                 f"{unbounded['files_loaded'] - bounded['files_loaded']} file loads "
                 f"and {unbounded['growth'] - bounded['growth']:+.1f}MB of growth.")
+
+    # A null measurement must fail loudly, not read as a benign result.
+    # The unbounded arm exists precisely to load everything, so zero files there
+    # is definitionally broken — yet it prints as "avoided 0 file loads and
+    # -2.6MB", which looks like an answer. Every realistic cause is an
+    # environment fault, not a finding: no AWS credentials (_is_cloud() False,
+    # so --real-archive silently falls back to an empty local dir), an empty
+    # archive, or a bad prefix. §19 records the sibling trap of an A/B that was
+    # invalid but looked fine; this is the guard that class of bug needs.
+    if unbounded['files_loaded'] == 0:
+        logger.error('')
+        logger.error('  ✗ INVALID MEASUREMENT — the unbounded arm loaded 0 files.')
+        logger.error('    Nothing was measured; the numbers above are import overhead.')
+        if args.real_archive:
+            logger.error('    --real-archive needs AWS credentials. Check that .env is')
+            logger.error('    present and readable, and that utils._is_cloud() is True.')
+        else:
+            logger.error('    The synthetic archive failed to build — check --files/--rows.')
+        logger.error('=' * 78)
+        return 1
 
     if args.csv and unbounded['curve']:
         import csv as _csv

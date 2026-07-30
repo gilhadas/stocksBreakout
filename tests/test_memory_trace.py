@@ -270,3 +270,66 @@ def test_harness_stubs_remove_every_network_call(tmp_path, monkeypatch):
     # per candidate from the portfolio-balance check.
     assert sentiment.get_sector_for_ticker('SY0001') == 'Technology'
     assert ap._ENTRY_PRICE_CACHE and ap._SPLIT_CACHE, 'stubs must fill the real caches'
+
+
+def _fake_arm(name, files_loaded):
+    """One arm's result dict, in the shape _spawn_arm() returns."""
+    return {'name': name, 'files_loaded': files_loaded, 'growth': 0.0,
+            'rss_before': 137.0, 'rss_after': 137.0, 'entry_cache': 0,
+            'split_cache': 0, 'added': 0, 'curve': []}
+
+
+def _replay_args(**over):
+    import argparse
+    args = argparse.Namespace(files=150, rows=20, age=7, real_archive=True,
+                              verbose=False, csv=None)
+    for k, v in over.items():
+        setattr(args, k, v)
+    return args
+
+
+def test_replay_fails_loudly_when_nothing_was_measured(monkeypatch, caplog):
+    """A null A/B must exit non-zero, not read as a benign result.
+
+    Found 2026-07-30 running the §19 verification locally: debug_memory_scan
+    never called load_dotenv(), so `utils._is_cloud()` was False, `--real-archive`
+    silently fell back to an empty local dir, and BOTH arms loaded zero files.
+    The run then printed "The age bound avoided 0 file loads and -2.6MB of
+    growth" and exited 0 — a broken measurement wearing the costume of an answer.
+    The unbounded arm exists to load everything, so zero files there is
+    definitionally an environment fault, never a finding.
+    """
+    import logging
+    import debug_memory_scan as dbg
+
+    monkeypatch.setattr(dbg, '_spawn_arm',
+                        lambda name, age, *a, **k: _fake_arm(name, 0))
+
+    with caplog.at_level(logging.ERROR, logger='debug_memory_scan'):
+        rc = dbg.cmd_replay(_replay_args())
+
+    assert rc == 1, 'a measurement that loaded nothing must not exit 0'
+    assert 'INVALID MEASUREMENT' in caplog.text
+    assert 'AWS credentials' in caplog.text, 'must name the real-archive cause'
+
+
+def test_replay_succeeds_when_the_unbounded_arm_loaded_files(monkeypatch, caplog):
+    """The other half: the guard must not fire on a genuine measurement.
+
+    Arm A legitimately loads 0 — the harness replays the OLDEST files, which are
+    all past the 7-day bound and get retired without a read. Only arm B's count
+    can distinguish "the bound worked" from "nothing ran".
+    """
+    import logging
+    import debug_memory_scan as dbg
+
+    def _arms(name, age, *a, **k):
+        return _fake_arm(name, 0 if age >= 0 else 150)
+
+    monkeypatch.setattr(dbg, '_spawn_arm', _arms)
+
+    with caplog.at_level(logging.ERROR, logger='debug_memory_scan'):
+        rc = dbg.cmd_replay(_replay_args())
+
+    assert rc == 0, 'a valid A/B with a bounded arm at 0 files must still pass'
+    assert 'INVALID MEASUREMENT' not in caplog.text
