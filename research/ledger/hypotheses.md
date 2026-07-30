@@ -293,3 +293,20 @@ until after the current budget `end_date`. That would require a human decision t
   the current production system and there is no evidence of a live-money impact; flagged
   here so it isn't lost, and worth a one-line human check on whether signals were actually
   being generated (just not archived) during that window.
+- **HZ5 — new, found 2026-07-30, CONTAINED (checked against H4/H5/H6, no impact).**
+  `build_panel.py` emits one row per (signal_date, mode, symbol) by design, and
+  `is_episode_start`/`episode_id` are grouped by `['symbol','mode']` — so the same
+  market event gets counted as two separate "episode starts" when a symbol fires in
+  both `swing` and `longterm` mode on the same day (confirmed: only `mode`/`source_file`
+  differ between such row pairs, `entry_used`/`mae_pct`/`ret_30d` are identical). This
+  inflates TREND_CONFIRM's reported frozen n by **1.69×** (1459 raw vs 865 unique
+  (symbol,signal_date) pairs); BOUNCE (1.02×) and CONTINUATION (1.05×) are barely
+  affected. Re-ran H5's ≤15d/>15d WR split on deduped data: gap is 46.7pp (vs reported
+  43.8pp), z=−13.85 (vs −16.85) — **larger gap, still overwhelming significance. H4/H5/
+  H6's conclusions are unaffected**; their stated n/z should be read as mildly-inflated
+  upper bounds, not wrong verdicts. Recommend the standard panel-loading recipe in the
+  guardrails/prompts add `drop_duplicates(subset=['symbol','signal_date'])` so future
+  work doesn't silently inherit the inflated count. Unchased open question for a human:
+  does `auto_portfolio.py` dedupe same-day swing+longterm admissions for one symbol, or
+  does live actually open two positions? Full writeup: `decisions.md` 2026-07-30
+  (worker-stops).

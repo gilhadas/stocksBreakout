@@ -1095,3 +1095,93 @@ guidance applies to promising results, not to ones that already fail).
 **Next: H6 should be marked `status: closed-null` in hypotheses.md** and the "TOP
 PRIORITY — next tick" flag removed so the runner's next tick picks up a fresh task
 instead of re-attempting this.
+
+---
+
+## 2026-07-30 (worker-stops) — new data check + Sector-cohort coverage + new hazard (HZ5)
+
+**Panel state check first.** New raw signal files have landed (panel now 10085 rows,
+through 2026-07-30), but the **frozen (`bars_available>=30`) episode-start set — the
+only set any stops analysis can validly use — is unchanged: still 1675 rows, 41 dates,
+capped at 2026-06-08.** HZ4's ~4-week archive gap (2026-06-10→07-05) is still the
+binding constraint; nothing new is statistically usable for this role yet.
+
+**All four stops-owned hypotheses (H1, H3, H5, H6) are closed.** Rather than invent an
+unrelated experiment, closed the one gap H1's own brief named but its closure never
+covered: **Sector** as a cohort dimension (worker_stops.md step 1 lists "signal `Type`,
+`Quality`, `Sector`, and behaviour bins"; H1's 2026-07-26 closeout only tested Type/
+Quality). This is coverage-completion of an already-open brief, not reopening a
+verdict — no status change made to H1.
+
+### Sector-cohort stop-distance sweep, within TREND_CONFIRM (n≥30 per sector)
+8 sectors have n≥30 within TC. **7 of 8 replicate H1's null** (optimum sits inside its
+own no-stop bootstrap CI95): Consumer, Energy, Finance, Healthcare, Industrial, Real
+Estate, Technology. The null generalizes across Sector the same way it already did
+across Type/Quality (H1) and behaviour bins (H3).
+
+**Materials is the one exception.** exp_nostop = **−4.92%** (CI95 [−8.54, −1.27]) vs a
+4%-stop expectancy of **−0.27%** — delta **+4.64pp**, outside its own CI. This is the
+first cohort on the whole board whose apparent stop optimum is NOT explained by noise
+under H1's own kill-condition test.
+
+**Verified this is not a fluke before reporting it — two checks, both survived:**
+1. **Not a duplicate-row artifact (see HZ5 below):** raw n=112 → deduped n=64 on
+   proper (symbol, signal_date) keys; the effect *strengthens* (+4.01pp → +4.64pp),
+   it doesn't evaporate.
+2. **Correlated-cluster risk is real but doesn't erase the signal:** 45% of the 64
+   deduped rows land on just 3 dates (2026-04-14 n=12, 04-08 n=10, 04-01 n=7), the
+   worst names dominated by metals/mining tickers (AEM, GFI, KGC, AU, AAUC, HYMC, MUX,
+   NEM, AGI, RGLD, WPM, FNV, BVN, IAG) — the exact correlated-sector-move mechanism
+   CLAUDE.md §10 (Feb-2026 NORMAL cluster) and §11 (`plus.txt` 2022 EXPANSION bucket)
+   already documented elsewhere. The naive row-level bootstrap CI likely understates
+   the true standard error given this cross-sectional correlation, so the CI above is
+   optimistic, not conservative.
+
+**Verdict: flagged, not actionable this tick.** Did **not** escalate to
+`confirm_backtest.py` — n=64 is thin, nearly half the sample is one correlated cluster
+event (true independent n is smaller than 64), the panel has no ATR column (couldn't
+convert the 4% distance to an ATR-multiple as the brief's Q2 asks), and it's a fixed-%
+finding on a no-sustained-bear window subject to 30-bar truncation flattery — three of
+the guardrails' explicit reasons not to promote a sweep result. If revisited, the
+correct next step is a block-bootstrap by `signal_date` (not by row) to get an honest
+CI before considering escalation, not a straight rerun.
+
+### HZ5 (new data hazard) — cross-mode duplicate episode rows inflate TREND_CONFIRM's n by 1.69×
+Investigating the Materials finding surfaced something bigger. `build_panel.py`
+deliberately emits one row per **(signal_date, mode, symbol)** (its own docstring says
+so), and `is_episode_start`/`episode_id` are computed grouped by `['symbol','mode']`.
+So when the same symbol fires TREND_CONFIRM in **both** `swing` and `longterm` mode on
+the same day, both rows count as separate "episode starts" — even though they share
+identical `entry_used`/`mae_pct`/`ret_30d` (verified: the only differing columns are
+`mode` and `source_file`). This is not a bug in the sense of wrong values — it's HZ3's
+"repeated signals aren't independent observations" guidance applying to a case its own
+worded example (consecutive-day re-flags) didn't cover.
+
+**Scope:** TREND_CONFIRM raw frozen n=1459 vs **865 unique (symbol, signal_date) pairs
+— a 1.69× inflation** (swing 820 / longterm 639 rows). BOUNCE (134→131, 1.02×) and
+CONTINUATION (62→59, 1.05×) are barely affected — they're almost entirely swing-only.
+
+**Checked whether this changes anything already shipped — it doesn't.** Reran H5's
+exact ≤15d/>15d WR split on deduped data: gap **46.7pp** (487 le15d @20.7% vs 378 gt15d
+@67.5%), z=**−13.85** — versus the originally-reported 43.8pp/z=−16.85. The gap is
+slightly *larger*, not smaller, after the fix, and remains overwhelming. **H4, H5, and
+H6's conclusions all stand unchanged** — their stated n/z should just be read as
+(mildly) inflated upper bounds, not wrong verdicts.
+
+**Recommendation for the lead:** add a `drop_duplicates(subset=['symbol','signal_date'])`
+step to the standard panel-loading recipe referenced in the guardrails/prompts, so
+future tickets don't silently inherit the inflated TC count. Separate, unchased
+question worth a human's attention: does `auto_portfolio.py` actually open two
+positions for the same symbol on the same day when both swing and longterm scans fire
+it, or does live already dedupe at admission time? If live already dedupes, this is a
+research-panel statistics issue only, not a trading issue — not investigated this tick
+(out of scope for stops, and budget/time-limited with `end_date` tomorrow).
+
+Scratch scripts: `research/tmp/h1_sector_analysis.py`, `h1_dup_check.py`,
+`h1_dedup_scope.py`, `h1_sector_dedup_rerun.py`, `h5_dedup_recheck.py` (all gitignored,
+not committed — kept locally for reproducibility this session only).
+
+**No further stops task identified this tick.** All four owned hypotheses remain
+closed; the one new observation (Materials) is filed as flagged-not-actionable; the one
+new hazard (HZ5) doesn't change any existing verdict. Budget `end_date` is tomorrow
+(2026-07-31) — nothing else queued for this role.
