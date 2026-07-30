@@ -1383,8 +1383,7 @@ no staleness across an overwrite of different size, the Streamlit branch is unto
 a deliberately poisoned cached filesystem self-heals on the next call. 9 new tests
 (`tests/test_s3_fs_reuse.py`), each mutation-verified; **596 pass**.
 
-**Still to do:** re-verify on the box — every number here is macOS/Python 3.14. Once
-confirmed, the 2500m cap (§17) can very likely come back down.
+~~**Still to do:** re-verify on the box~~ → **CONFIRMED ON THE BOX 2026-07-30**, see §21.
 
 ## 20. Signal ingestion, Phase 0: bound it (2026-07-29)
 
@@ -1466,3 +1465,82 @@ process is still alive — which is what `SB_MEM_TRACE=1` now provides. Note als
 first verdict heuristic in `debug_memory_scan.py` called +575 MB then +232 MB a "plateau"
 because the ratio halved; a process still paying 3 MB per file has not stopped growing.
 Judge the per-item *rate*, not the ratio between halves.
+
+## 21. §19 + §20 deployed and confirmed on the box (2026-07-30)
+
+Closes the gate that §19 ("re-verify on the box") and §20 ("Phase 1 … deliberately not
+started until these numbers are confirmed in production") both blocked on. Deployed via
+PR #2 → `14ecc2a`; box rebuilt with `docker compose up -d --build` (all app services, not
+just `scanner-cron` — `utils.py` is shared, and `sb-api` had been up 42 h holding exactly
+the kind of idle pool §19's memoization introduces).
+
+### The replay A/B, run inside `sb-scanner-cron` on Linux
+
+| | pre-fix (recorded §19) | **measured on the box 2026-07-30** |
+|---|---|---|
+| `replay --real-archive --files 150` | +957.3 MB, **CLIMBING** | **+40.1 MB, "working set"** |
+| per-item rate, 1st half | ~6.4 MB/item | **+0.01 MB/item** |
+| per-item rate, 2nd half | still climbing | **+0.00 MB/item** |
+
+~600× reduction in the per-file cost. The +40 MB is one-time working set (111 entry/split
+cache entries plus pandas), not growth. Arm A loads 0 files, which is correct rather than a
+null result: the harness replays the *oldest* files, all long past the 7-day bound, so they
+are retired without a read — §18's age bound doing its job.
+
+**Judged on the per-item rate, not the totals.** The macOS totals were unstable run to run
+(−44.9 MB, then +5.8 MB, for the identical command) because RSS totals move with allocator
+behaviour. The rate is the stable, decisive figure — §20's own standing lesson, and the
+reason the earlier ratio-based verdict heuristic was wrong.
+
+### ⚠ The harness reported a broken measurement as a benign result (`076e1dd`)
+
+Running §19's own verification locally produced `files loaded 0` in **both** arms and
+printed *"The age bound avoided 0 file loads and −2.6MB of growth"* — then exited 0.
+
+Root cause: `debug_memory_scan.py` never called `load_dotenv()`. It imports
+`auto_portfolio` and `utils`, neither of which imports `config` (where `load_dotenv()`
+normally happens), so locally `utils._is_cloud()` was False, `list_files` fell back to an
+empty local dir, and nothing was measured. Invisible in the container, where compose's
+`env_file: .env` supplies the credentials as real env vars — which is precisely why it
+survived: the tool works where it is deployed and lies where it is developed.
+
+Fixed both halves: `load_dotenv()` at import, and the unbounded arm loading 0 files now
+exits 1 with a diagnostic. That arm exists to load everything, so zero is definitionally an
+environment fault, never a finding.
+
+⚠ **Trap for the mutation-testing method itself.** Verifying that guard means flipping
+`return 1` → `return 0` — **byte-length-identical**, so the `.pyc` validity check
+(mtime-second, size) does not trip and a stale bytecode cache silently serves the old
+code. It masked the *restore* here and briefly looked like the guard was broken. **`touch`
+the file after every mutation and after the restore**, or the mutation test can pass or
+fail for reasons unrelated to the change.
+
+### `orchestrator`'s signal-CSV upload never self-healed (`6bfa62f`)
+
+`save_results` mirrored the signals CSV to S3 via a bare `_s3_fs().put()` — the only
+`_s3_fs()` call site outside `utils.py`, so the only S3 access that did **not** go through
+`_s3_call`'s drop-rebuild-retry after §19. Worse than the count suggests: `scanner-cron`
+runs for days, it sits on the write path for the signal CSVs every consumer reads, and its
+`except` only logs a warning — so a stale pool means the day's signals silently never reach
+S3 while the scan reports success. Now wrapped; `put()` overwrites a whole object, so the
+retry is idempotent like every other op `_s3_call` takes. Test covers both the behavioural
+half (one stale-pool failure survived, dead filesystem discarded) and the structural half
+(no `_s3_fs().put` anywhere in the file).
+
+### Still open
+- **The in-situ half of the gate**: one instrumented wide scan (`SB_MEM_TRACE=1` is set in
+  the box's `.env`, backed up to `.env.bak.20260730`; **remove it once read**). Watch
+  `STAGE 4-scan_and_add_all_users`, `scan_and_add:filtered … to_load=` (hundreds ⇒ still
+  replaying), and the cgroup peak against the 2500m cap.
+- **Lowering the cap** (§17/§18/§19) — blocked on the above, and must be sized from that
+  measured peak. ⚠ If peak ≈ cap again, the fix is incomplete; do not raise it.
+- **Phase 1** — recommendation is now **defer, and build Parquet not SQLite if ever**:
+  Phase 0 already took the hot path to ~1–2 CSV GETs of ~11 steady-state S3 ops; the index
+  would be 6–10 MB over a 2.1 MB corpus; and expressing `_v9h_mask` in SQL would re-fork the
+  filter §20 just unified — where a missing `MinerviniScore` column means *no gate at all*
+  (`auto_portfolio.py:246-247`), so getting it wrong changes live admissions. Cheaper
+  follow-ups instead: hoist the per-book archive LIST into `_SCAN_FILE_CACHE` (the only fix
+  whose benefit grows with the archive), batch `rebuild_skipped_cash`'s yfinance calls (the
+  real bottleneck there, not S3), and close the `min_date` hole at
+  `auto_portfolio.py:346-348`, which bypasses **both** the `processed` bookmark and
+  `stale_cutoff` — a correctness gap, since entries price at today's price.
