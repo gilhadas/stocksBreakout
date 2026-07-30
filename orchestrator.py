@@ -24,6 +24,7 @@ from exit_evaluator import ExitEvaluator
 from level2_analyzer import Level2Analyzer
 from utils import classify_market_regime, get_smoothed_regime, check_regime_cooldown
 from sentiment import get_sector_buzz, get_sector_for_ticker
+import memory_trace as memt   # no-op unless SB_MEM_TRACE=1
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,8 @@ class ScannerOrchestrator:
         """
         # Clear rejection reasons from previous scan to prevent memory leak
         self.detector.rejection_reasons.clear()
+
+        memt.mark('scan_watchlist:start', symbols=len(watchlist), mode=mode)
 
         # Get market context
         if mode != 'scalping':
@@ -225,8 +228,13 @@ class ScannerOrchestrator:
                 )
 
                 await asyncio.sleep(SCAN_DELAY)
+                # Per-symbol probe: if RSS tracks idx, detection is accumulating
+                # something it never releases (rejection_reasons, adapter caches).
+                memt.tick('detect', idx, len(watchlist),
+                          rej=len(self.detector.rejection_reasons))
                 return result
-        
+
+        memt.mark('scan_watchlist:context_ready', regime=regime)
         tasks = [_scan_one((i, sym)) for i, sym in enumerate(watchlist, 1)]
         results_raw = await asyncio.gather(*tasks, return_exceptions=True)
         results = []
@@ -235,6 +243,8 @@ class ScannerOrchestrator:
                 logger.warning(f"Symbol scan failed: {r}")
             elif r:
                 results.append(r)
+        memt.mark('scan_watchlist:detection_done', signals=len(results),
+                  rej=len(self.detector.rejection_reasons))
 
         # SURGE cap: keep top N signals by score, stamp surge metadata
         if regime == 'SURGE' and SURGE_DAY_CONFIG.get('enabled'):
@@ -287,13 +297,17 @@ class ScannerOrchestrator:
                 pass  # Earnings data unavailable — proceed with normal sizing
 
         print()  # Clear progress line
+        memt.mark('scan_watchlist:earnings_done')
 
         # Missed-movers summary: log symbols that moved ≥5% but were not signaled
         signaled_symbols = {r['Symbol'] for r in results}
         missed_movers = []
-        for symbol in watchlist:
+        for _mm_i, symbol in enumerate(watchlist, 1):
             if symbol in signaled_symbols:
                 continue
+            # This loop re-fetches history for EVERY unsignaled symbol — a second
+            # full data pass over the watchlist, for a log line. Probe it.
+            memt.tick('missed_movers', _mm_i, len(watchlist))
             try:
                 df = await self.market_data.get_historical_data(symbol, timeframe)
                 if df is not None and len(df) >= 2:
@@ -318,6 +332,7 @@ class ScannerOrchestrator:
             for sym, pct, price, vol in missed_movers[:15]:
                 logger.warning(f"   {sym:8} +{pct:.1f}%  ${price:.2f}  vol={vol:.1f}x")
 
+        memt.mark('scan_watchlist:end', signals=len(results))
         return results
     
     async def _scan_symbol(self, symbol: str, mode: str, timeframe: str,
@@ -653,12 +668,23 @@ class ScannerOrchestrator:
         df = pd.DataFrame(results)
         df.to_csv(filepath, index=False)
 
-        # Mirror to S3 so mobile app / Streamlit Cloud stay in sync
+        # Mirror to S3 so mobile app / Streamlit Cloud stay in sync.
+        #
+        # Goes through _s3_call, not a bare _s3_fs(): §19 memoized the filesystem
+        # for the life of the process, so a long-lived container (scanner-cron
+        # runs for days) can hold a connection pool that has gone stale while
+        # idle. _s3_call discards and rebuilds it on error, then retries once.
+        # This was the only _s3_fs() call site outside utils.py, and it sits on
+        # the write path for the signal CSVs themselves — with the except below
+        # only logging a warning, a stale pool here means the day's signals never
+        # reach S3, silently. put() overwrites a whole object, so the retry is
+        # idempotent like every other op _s3_call takes.
         try:
-            from utils import _is_cloud, _s3_fs
+            from utils import _is_cloud, _s3_call
             if _is_cloud():
                 s3_key = f"{OUTPUT_DIR}/{subdir}/{filename}"
-                _s3_fs().put(filepath, f"stocks-breakout-scanner-s3-bucket/{s3_key}")
+                _s3_call(lambda fs: fs.put(
+                    filepath, f"stocks-breakout-scanner-s3-bucket/{s3_key}"))
                 logger.info(f"↑ S3 sync: {s3_key}")
         except Exception as _e:
             logger.warning(f"S3 sync skipped: {_e}")

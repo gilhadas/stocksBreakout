@@ -41,6 +41,7 @@ from utils import (
     _QUIET_LIBS,
 )
 from scan_event_log import attach_scan_csv_handler
+import memory_trace as memt   # no-op unless SB_MEM_TRACE=1
 from orchestrator import ScannerOrchestrator
 from notifier import Notifier
 from mock_trader import MockIBConnection, MockTrader, SimulationMode
@@ -98,18 +99,21 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         return []
     
     logger.info(f"Loaded {len(watchlist)} symbols from {args.file}")
-    
+
     # Scan watchlist
-    results = await orchestrator.scan_watchlist(
-        watchlist=watchlist,
-        mode=args.mode,
-        timeframe=args.timeframe,
-        vol_thresh=args.vol,
-        atr_mult=args.atr,
-        lookback=args.lookback,
-        detect_bounces=getattr(args, 'bounce', False)
-    )
-    
+    with memt.stage('1-detection', symbols=len(watchlist)):
+        results = await orchestrator.scan_watchlist(
+            watchlist=watchlist,
+            mode=args.mode,
+            timeframe=args.timeframe,
+            vol_thresh=args.vol,
+            atr_mult=args.atr,
+            lookback=args.lookback,
+            detect_bounces=getattr(args, 'bounce', False)
+        )
+    memt.census('after-detection')
+    memt.alloc_diff('after-detection')
+
     # Add sector name to every signal
     if results:
         from sentiment import get_sector_for_ticker
@@ -142,6 +146,8 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         _quality_sigs = list(results)
     else:
         _quality_sigs = [s for s in results if s.get('Quality') in ('HIGH', 'PREMIUM', 'GOLD')]
+
+    memt.mark('2-enrichment:start', quality_sigs=len(_quality_sigs))
 
     # ── 1. Alpaca headline prefetch (primary source for FinBERT) ─────────────
     if _quality_sigs:
@@ -202,7 +208,12 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             _fb_syms = [s for s in _fb_syms if s]
             if _fb_syms:
                 logger.info(f"FinBERT sentiment: analysing {len(_fb_syms)} HIGH+ signal(s)…")
+                # §16 measured this at a FLAT ~704 MiB regardless of batch size:
+                # the cost is model residency, not inference volume. The two
+                # marks bracket exactly that step.
+                memt.mark('2-enrichment:finbert_before', syms=len(_fb_syms))
                 _fb_results = _fb_batch(_fb_syms, max_headlines=8, max_age_hours=24)
+                memt.mark('2-enrichment:finbert_after')
                 for sig in results:
                     sym = sig.get('Symbol') or sig.get('symbol', '')
                     if sym in _fb_results:
@@ -513,10 +524,12 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         logger.info(f" {args.mode.upper()} SIGNALS FOUND: {len(results)}")
         logger.info(f"{'='*70}\n")
 
+        memt.mark('3-save:start', signals=len(results))
         df = pd.DataFrame(results).sort_values(by='Vol', ascending=False)
         print(df.to_string(index=False))
 
         output_file = orchestrator.save_results(results, args.mode, 'signals')
+        memt.mark('3-save:csv_written')
 
         # Auto-append to positions file if requested.
         # Regime filtering via centralized filter_signals_by_regime() in utils.py.
@@ -537,9 +550,14 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         # /portfolio/recalculate call — which is destructive on any deployment
         # missing older signal files (see recalculate()'s backup/warning logic).
         if args.cron:
+            # §18: every OOM kill happened HERE, 40+ min after the CSV above was
+            # written — the archive replay, not detection. Keep it bracketed.
             try:
                 import auto_portfolio as _ap
-                _summary = _ap.scan_and_add_all_users()
+                with memt.stage('4-scan_and_add_all_users'):
+                    _summary = _ap.scan_and_add_all_users()
+                memt.census('after-scan_and_add')
+                memt.alloc_diff('after-scan_and_add')
                 _added = sum(r.get('added', 0) for r in _summary.values() if isinstance(r, dict))
                 if _added:
                     logger.info(f"scan_and_add_all_users: added {_added} position(s) across {len(_summary)} user(s)")
@@ -1973,4 +1991,12 @@ Examples:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # SB_MEM_TRACE=1 turns the whole pipeline into a memory trace. Costs one
+    # cheap probe per mark; entirely inert otherwise. See memory_trace.py.
+    memt.alloc_start()
+    memt.start_sampler(interval=float(os.getenv('SB_MEM_TRACE_INTERVAL', '5')))
+    try:
+        asyncio.run(main())
+    finally:
+        memt.stop_sampler()
+        memt.report()

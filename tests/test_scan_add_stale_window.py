@@ -73,10 +73,18 @@ def test_stale_files_are_never_loaded(monkeypatch, tmp_path):
         assert f in loaded, f"fresh file was skipped: {f}"
 
 
-def test_stale_files_are_retired_into_processed_files(monkeypatch):
+def test_stale_files_are_retired_without_being_loaded(monkeypatch):
     """
-    Retiring (not merely skipping) is what lets a far-behind book self-heal in one
-    pass — otherwise every future run re-walks hundreds of filenames forever.
+    Retiring without loading is the real invariant — the one that bounds memory.
+
+    This test used to also assert every stale file was *persisted* into
+    `processed_files`. That is no longer true, and deliberately so: the list is
+    now pruned to the window in which it can still do work (see
+    `test_processed_files_stays_bounded` below). What must never change is that a
+    stale file is skipped *before* an S3 read, which is what makes the second
+    assertion here the discriminating one — the loop also marks a file processed
+    when load_data() returns empty, so "is in processed_files" alone would pass
+    even with the age bound removed.
     """
     old = [_fname(_days_ago(n)) for n in (365, 90, 20)]
     fresh = [_fname(_days_ago(0))]
@@ -97,14 +105,52 @@ def test_stale_files_are_retired_into_processed_files(monkeypatch):
 
     ap.scan_and_add()
 
-    processed = set(saved.get('processed_files', book.get('processed_files', [])))
     for f in old:
-        # BOTH halves matter, and the second is what makes this test
-        # discriminating: the loop also marks a file processed when load_data()
-        # returns empty, so "is in processed_files" alone passes even with the
-        # age bound removed. Retired-WITHOUT-loading is the real invariant.
-        assert f in processed, f"stale file not retired, will be re-walked forever: {f}"
         assert f not in loaded, f"stale file was retired only AFTER an S3 load: {f}"
+
+
+def test_prune_window_exceeds_load_window():
+    """The safety argument for pruning depends on this ordering.
+
+    Pruning is safe only because anything dropped is already older than
+    `stale_cutoff`, so it is re-retired for free on the next run. Raise
+    SIGNAL_MAX_AGE_DAYS past the prune window and that inverts: previously
+    pruned files become *loadable* again, and weeks-old signals get admitted as
+    fresh positions at today's price.
+    """
+    assert ap.PROCESSED_PRUNE_MARGIN_DAYS > 0
+    prune_window = ap.SIGNAL_MAX_AGE_DAYS + ap.PROCESSED_PRUNE_MARGIN_DAYS
+    assert prune_window > ap.SIGNAL_MAX_AGE_DAYS
+
+
+def test_processed_files_stays_bounded(monkeypatch):
+    """`processed_files` must not grow without limit.
+
+    It reached 860 filenames per book in production — the dominant payload of a
+    29-64 KB JSON rewritten to S3 on every scan. Entries beyond the window are
+    unreachable (the age bound retires them without a read regardless), so
+    keeping them buys nothing.
+    """
+    ancient = [_fname(_days_ago(n)) for n in (400, 200, 120, 60)]
+    recent = [_fname(_days_ago(n)) for n in (20, 1, 0)]
+
+    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: ancient + recent)
+    monkeypatch.setattr(utils, 'load_data', lambda p: None)
+
+    book = ap._empty()
+    # Seed the book the way production looked: a long tail of consumed history.
+    book['processed_files'] = list(ancient)
+    monkeypatch.setattr(ap, 'load', lambda **k: book)
+    saved = {}
+    monkeypatch.setattr(ap, '_save', lambda d, **k: saved.update(d))
+
+    ap.scan_and_add()
+
+    persisted = set(saved['processed_files'])
+    for f in ancient:
+        assert f not in persisted, f"unreachable entry kept, state still grows: {f}"
+    for f in recent:
+        assert f in persisted, f"in-window entry dropped — file would be re-read: {f}"
 
 
 def test_a_book_with_positions_but_empty_processed_is_still_bounded(monkeypatch):
