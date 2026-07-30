@@ -668,12 +668,23 @@ class ScannerOrchestrator:
         df = pd.DataFrame(results)
         df.to_csv(filepath, index=False)
 
-        # Mirror to S3 so mobile app / Streamlit Cloud stay in sync
+        # Mirror to S3 so mobile app / Streamlit Cloud stay in sync.
+        #
+        # Goes through _s3_call, not a bare _s3_fs(): §19 memoized the filesystem
+        # for the life of the process, so a long-lived container (scanner-cron
+        # runs for days) can hold a connection pool that has gone stale while
+        # idle. _s3_call discards and rebuilds it on error, then retries once.
+        # This was the only _s3_fs() call site outside utils.py, and it sits on
+        # the write path for the signal CSVs themselves — with the except below
+        # only logging a warning, a stale pool here means the day's signals never
+        # reach S3, silently. put() overwrites a whole object, so the retry is
+        # idempotent like every other op _s3_call takes.
         try:
-            from utils import _is_cloud, _s3_fs
+            from utils import _is_cloud, _s3_call
             if _is_cloud():
                 s3_key = f"{OUTPUT_DIR}/{subdir}/{filename}"
-                _s3_fs().put(filepath, f"stocks-breakout-scanner-s3-bucket/{s3_key}")
+                _s3_call(lambda fs: fs.put(
+                    filepath, f"stocks-breakout-scanner-s3-bucket/{s3_key}"))
                 logger.info(f"↑ S3 sync: {s3_key}")
         except Exception as _e:
             logger.warning(f"S3 sync skipped: {_e}")

@@ -28,6 +28,7 @@ These tests never touch the network: they stub `s3fs.S3FileSystem`.
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 import threading
 import types
@@ -153,6 +154,46 @@ def test_a_persistent_failure_propagates_to_the_local_fallback(fake_s3fs):
     with pytest.raises(OSError):
         utils._s3_call(always_fails)
     assert len(fake_s3fs) == 2, 'should have tried exactly twice'
+
+
+def test_the_signal_csv_upload_self_heals_on_a_stale_pool(fake_s3fs, tmp_path,
+                                                          monkeypatch):
+    """orchestrator's S3 mirror must retry through _s3_call, not a bare _s3_fs().
+
+    This was the only _s3_fs() call site outside utils.py, so it was the only S3
+    access that did NOT self-heal after §19 memoized the filesystem for the life
+    of the process. It matters more than the count suggests: scanner-cron runs
+    for days (a stale idle pool is exactly the failure reuse introduces), this
+    sits on the write path for the signal CSVs themselves, and its `except` only
+    logs a warning — so the failure mode is the day's signals silently never
+    reaching S3, with a successful-looking scan.
+    """
+    import orchestrator
+
+    puts = []
+    fail_first = {'n': 0}
+
+    def put(self, local, remote):
+        fail_first['n'] += 1
+        if fail_first['n'] == 1:
+            raise OSError('connection pool is closed')   # the stale-pool shape
+        puts.append((local, remote))
+
+    monkeypatch.setattr(type(utils._s3_fs()), 'put', put, raising=False)
+    utils._drop_s3_fs()
+    fake_s3fs.clear()          # ignore the instance built just to reach the type
+
+    src = tmp_path / 'signals_swing_20260730_0935.csv'
+    src.write_text('Symbol,Quality\nAAPL,PREMIUM\n')
+
+    utils._s3_call(lambda fs: fs.put(str(src), 'bucket/scanner_output/signals/x.csv'))
+
+    assert len(puts) == 1, 'the upload did not survive one stale-pool failure'
+    assert len(fake_s3fs) == 2, 'a failed put must discard and rebuild the filesystem'
+
+    # The structural half: no S3 access anywhere may bypass the retry wrapper.
+    src_text = pathlib.Path(orchestrator.__file__).read_text()
+    assert '_s3_fs().put' not in src_text, 'orchestrator bypasses _s3_call again'
 
 
 def test_a_successful_op_never_rebuilds(fake_s3fs):
