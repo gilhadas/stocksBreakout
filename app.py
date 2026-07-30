@@ -31,6 +31,34 @@ if _env_file.exists():
                 value = value.split('#')[0].strip().strip('"').strip("'")  # strip inline comments
                 os.environ.setdefault(key.strip(), value)
 
+
+def _setting(name: str, default: str) -> str:
+    """Resolve a setting from Streamlit secrets, then the environment, then default.
+
+    Order matters and both sources are required, because the three deployments
+    configure themselves in three different ways:
+
+      * Streamlit Cloud — there is no way to set an OS environment variable.
+        Config lives in st.secrets, and .env does not exist in the repo checkout.
+        Reading only os.getenv() is why login failed there with the default
+        http://127.0.0.1:8000: nothing listens on that port inside the Streamlit
+        Cloud container, giving 'Connection refused' (Errno 111).
+      * the sb-dashboard container — real env vars via compose `env_file: .env`
+        plus its `environment:` block; no secrets.toml exists in the image.
+      * a local run — the .env loader above.
+
+    Secrets are checked first so a Cloud deployment can override a value baked
+    into a committed .env. Mirrors utils._is_cloud()'s precedence, including the
+    try/except: st.secrets raises when no secrets file exists at all, which is
+    the normal case in the container.
+    """
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
 st.set_page_config(
     page_title="Breakout Scanner",
     page_icon="chart_with_upwards_trend",
@@ -80,8 +108,8 @@ def check_auth():
     #
     # Defaults to api_base so a single-host deployment (Streamlit Cloud pointing
     # straight at the public API) needs only API_BASE_URL set.
-    api_base = os.getenv('API_BASE_URL', 'http://127.0.0.1:8000')
-    public_api_base = os.getenv('PUBLIC_API_BASE_URL', api_base)
+    api_base = _setting('API_BASE_URL', 'http://127.0.0.1:8000')
+    public_api_base = _setting('PUBLIC_API_BASE_URL', api_base)
 
     col1, col2 = st.columns(2)
 
@@ -121,7 +149,7 @@ def check_auth():
                 st.error(f"Login failed: {e}")
 
     st.divider()
-    google_client_id = os.getenv('GOOGLE_CLIENT_ID', '')
+    google_client_id = _setting('GOOGLE_CLIENT_ID', '')
     if google_client_id:
         st.markdown("### Or login with Google")
         if st.button("🔑 Login with Google", use_container_width=True):

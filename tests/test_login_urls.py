@@ -56,7 +56,7 @@ def test_oauth_link_uses_the_public_base_not_the_internal_one(source):
 def test_public_base_falls_back_to_api_base(source):
     """A single-host deploy (Streamlit Cloud) should need only API_BASE_URL."""
     assert re.search(
-        r"public_api_base\s*=\s*os\.getenv\(\s*['\"]PUBLIC_API_BASE_URL['\"]\s*,\s*api_base\s*\)",
+        r"public_api_base\s*=\s*_setting\(\s*['\"]PUBLIC_API_BASE_URL['\"]\s*,\s*api_base\s*\)",
         source), 'PUBLIC_API_BASE_URL must default to api_base'
 
 
@@ -86,3 +86,75 @@ def test_compose_gives_the_dashboard_a_public_url():
     assert 'PUBLIC_API_BASE_URL:' in compose, (
         'dashboard has API_BASE_URL=http://api:8000 with no public override, '
         'so its Google login link would point at an unresolvable host')
+
+
+def test_settings_are_not_read_from_the_environment_alone(source):
+    """Streamlit Cloud cannot set OS env vars — config lives in st.secrets.
+
+    Reading only os.getenv() is what left API_BASE_URL unresolved there, so
+    api_base fell back to http://127.0.0.1:8000 and login failed with
+    'Connection refused' (Errno 111 — Linux, i.e. the Cloud container).
+    """
+    for name in ('API_BASE_URL', 'PUBLIC_API_BASE_URL', 'GOOGLE_CLIENT_ID'):
+        assert not re.search(rf"=\s*os\.getenv\(\s*['\"]{name}['\"]", source), (
+            f'{name} is read via os.getenv only; Streamlit Cloud sets secrets, '
+            'not environment variables')
+        assert re.search(rf"_setting\(\s*['\"]{name}['\"]", source), (
+            f'{name} should be resolved through _setting()')
+
+
+class TestSettingResolution:
+    """_setting() must satisfy all three deployments at once."""
+
+    @staticmethod
+    def _load(monkeypatch, secrets, env):
+        """Exec just _setting() against a stubbed streamlit + env."""
+        import types
+
+        fake = types.ModuleType('streamlit')
+
+        class Secrets(dict):
+            def __contains__(self, k):
+                if secrets is None:      # no secrets file at all -> raises
+                    raise RuntimeError('no secrets file')
+                return dict.__contains__(self, k)
+
+        fake.secrets = Secrets(secrets or {})
+        monkeypatch.setitem(sys.modules, 'streamlit', fake)
+
+        import os as _os
+        for k in ('API_BASE_URL',):
+            monkeypatch.delenv(k, raising=False)
+        for k, v in (env or {}).items():
+            monkeypatch.setenv(k, v)
+
+        src = APP.read_text()
+        start = src.index('def _setting(')
+        end = src.index('\n\n', src.index('return os.getenv(name, default)'))
+        ns = {'st': fake, 'os': _os}
+        exec(src[start:end], ns)
+        return ns['_setting']
+
+    DEFAULT = 'http://127.0.0.1:8000'
+
+    def test_container_uses_the_env_var(self, monkeypatch):
+        """No secrets.toml in the image, so st.secrets raises; env must win."""
+        f = self._load(monkeypatch, None, {'API_BASE_URL': 'http://api:8000'})
+        assert f('API_BASE_URL', self.DEFAULT) == 'http://api:8000'
+
+    def test_streamlit_cloud_uses_the_secret(self, monkeypatch):
+        """The reported bug: secret set, no env var. Must NOT fall back."""
+        f = self._load(monkeypatch,
+                       {'API_BASE_URL': 'https://api.gilhadas-stocks.com'}, {})
+        assert f('API_BASE_URL', self.DEFAULT) == 'https://api.gilhadas-stocks.com'
+
+    def test_secret_takes_precedence_over_env(self, monkeypatch):
+        """A Cloud deploy must be able to override a value baked into .env."""
+        f = self._load(monkeypatch,
+                       {'API_BASE_URL': 'https://api.gilhadas-stocks.com'},
+                       {'API_BASE_URL': self.DEFAULT})
+        assert f('API_BASE_URL', self.DEFAULT) == 'https://api.gilhadas-stocks.com'
+
+    def test_falls_back_to_default_when_nothing_is_configured(self, monkeypatch):
+        f = self._load(monkeypatch, None, {})
+        assert f('API_BASE_URL', self.DEFAULT) == self.DEFAULT
