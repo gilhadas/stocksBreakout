@@ -152,7 +152,19 @@ using a data source that does NOT require waiting on H2's blocked panel-growth t
 
 ---
 
-## H6 — Does an RSI-conditioned TREND_CONFIRM admission rule survive real multi-regime history?  ·  owner: picking → stops  ·  status: active  ·  **TOP PRIORITY — next tick**
+## H6 — Does an RSI-conditioned TREND_CONFIRM admission rule survive real multi-regime history?  ·  owner: picking → stops  ·  status: **closed-null (2026-07-30)**
+
+**CLOSED 2026-07-30 — REJECTED.** Gate run (`optimizer_watch.txt`, years 2022/2024,
+`--population live`): REALISTIC no-swap 2yr avg Sharpe delta **−0.08** (needs ≥+0.10),
+2022 wash (0.00, TC blocked in bear so trade-for-trade identical), **2024 −0.15**
+(the only year that actually exercises TREND_CONFIRM — outside the ±0.05 kill-condition
+band on the negative side). >15d WR essentially flat (87.1%→86.9%). Full result in
+`decisions.md` 2026-07-30 entry. No broader-universe confirmation run — narrow result
+already misses the ship bar decisively. RSI as a panel diagnostic (H2's prescreen) is
+not invalidated by this; specifically rejected is RSI raw value as a pooled-cap
+tiebreak rank-score. H2's blocked multivariate retry remains the only path to a more
+definitive answer on RSI as a feature, gated on panel data past ~mid-to-late August
+2026 (past the current budget `end_date`).
 
 **Opened 2026-07-27.** H5 confirmed the ≤15d/>15d drag is large and highly significant
 within TREND_CONFIRM (live's dominant type). H2's own prescreen named RSI as the

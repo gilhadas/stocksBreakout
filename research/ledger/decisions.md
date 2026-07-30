@@ -1039,3 +1039,59 @@ REALISTIC arm's Sharpe delta + `>15d` WR per the ship bar in hypotheses.md H6.
 from now, and H6 still has not produced a single gate number.** The CSV is ready; only
 the (now-corrupted, needs-one-clean-rerun) gate step stands between here and an actual
 verdict.
+
+---
+
+## 2026-07-30 (human + assistant, out-of-band) — H6 gate resolved: REJECTED
+
+**Stray race processes (89247/90162/2420/3489/89297) had exited on their own** by the
+time this was picked up (verified via `ps -p` — none present). Removed the corrupted
+`candidate_live_rank_2022-2024.log` and reran exactly the command the 2026-07-29 entry
+specified:
+```
+python research/confirm_backtest.py --rank-scores research/tmp/h6_rsi_rank_scores.csv \
+    --population live --watchlist input/optimizer_watch.txt --skip-baseline
+```
+Ran clean, single writer, full `BACKTEST COMPLETE` output. Full log: `/tmp/h6_gate_rerun.log`.
+
+### Result — REALISTIC no-swap arm (the only one the ship bar judges)
+
+| Year | Baseline Sharpe | Candidate (RSI rank) Sharpe | Δ | Baseline >15d WR | Candidate >15d WR |
+|------|-----------------|------------------------------|-----|-------------------|---------------------|
+| 2022 (bear) | 0.18 | 0.18 | **0.00** | 90.3% (31 tr) | 90.3% (31 tr) — trade-for-trade identical |
+| 2024 (bull) | 3.03 | 2.88 | **−0.15** | 87.1% (62 tr) | 86.9% (61 tr) |
+| **2yr avg** | **+1.61** | **+1.53** | **−0.08** | — | — |
+
+Realized signal-type mix (both arms): BOUNCE 95.0%, TREND_CONFIRM 3.9%, SMA20_CROSS
+1.1% — the standing caveat applies (2022 can't exercise TC at all; it's identical by
+construction since TC is blocked in RED_MARKET/BEARISH). **2024 is the only year that
+actually tests this rule**, and there it is negative outside the ±0.05 wash band, not
+just a null.
+
+**Verdict: REJECTED, closing as closed-null (borderline closed-negative in 2024, the
+only year that tests the rule).** 2yr avg −0.08 is decisively short of the +0.10 ship
+bar and in the wrong direction. Per H6's own kill condition ("if the Sharpe delta is
+within ±0.05 in every full year tested... close as closed-null") — 2022 is a wash
+(0.00, expected since TC can't fire) but 2024 is −0.15, outside the ±0.05 band on the
+negative side. >15d WR does not shrink materially (87.1%→86.9%, −0.2pp, one fewer
+trade) — RSI-as-rank-score isn't destructive to the edge, it's simply inert-to-slightly-
+harmful as an admission-time score at this scope.
+
+**Read alongside H2's prescreen:** the panel-measured RSI correlation to hold-duration
+(H2's diagnostic, rho 0.29→0.45 within April, but weaker in May/June) does not survive
+being turned into a rank-score and tested on real multi-regime history — consistent
+with H2's own flagged risk that a single-regime-dominated in-sample finding might not
+generalize. This does not by itself invalidate RSI as a *feature*; it specifically
+rejects RSI *raw value as a pooled-cap tiebreak score* on this scope
+(optimizer_watch.txt, years 2022/2024). H2's blocked multivariate walk-forward retry
+(needs panel data past mid-to-late August 2026, i.e. past the current `budget.json`
+end_date of 2026-07-31) remains the only path to a more definitive answer — unchanged
+from the 2026-07-27 budget note.
+
+**No broader-universe/more-year confirmation run** was performed since the narrow
+result already misses the ship bar decisively (§13.5's "confirm before promoting"
+guidance applies to promising results, not to ones that already fail).
+
+**Next: H6 should be marked `status: closed-null` in hypotheses.md** and the "TOP
+PRIORITY — next tick" flag removed so the runner's next tick picks up a fresh task
+instead of re-attempting this.
