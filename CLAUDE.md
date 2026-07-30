@@ -1198,6 +1198,31 @@ the same class of bug as the daytrade CSVs that burned 12 invocations, which had
 special-casing modes rather than by fixing the mechanism.
 
 `tests/test_research_runner.py` is now 21 tests covering all of the above.
+
+### §14.3 Lead's daily schedule fired 7 hours too early — StartCalendarInterval is local time, not ET (2026-07-30)
+
+The lead's launchd plist comment said "18:47 ET-ish daily: after the close, after the day's
+scans have landed" — but `StartCalendarInterval` `Hour`/`Minute` are always the **machine's
+local system timezone**, not whatever timezone a comment claims. The Mac runs IDT (UTC+3,
+confirmed via the commit that authored the file being timestamped `+0300` and via
+`research_lead.log`'s own mtimes matching 18:47 local exactly). 18:47 IDT = **11:47 AM ET**
+— mid-trading-day, before `docker/crontab`'s 16:30/19:30/20:30 ET jobs (Phase 2 re-eval,
+evening scan, `validate_signals.py`) had run. Symptom was hiding in plain sight: repeated
+`tick N: 0 new signal file(s)` lines in the lead's own log — it was frequently auditing an
+empty day because it ran before that day's data existed. (The panel builder itself was never
+the problem — `update_panel.py` reads straight from S3 via `utils.list_files`, S3-first, so
+it sees same-day EC2 output immediately; only the lead's own fire time was wrong.)
+
+**Fix:** `StartCalendarInterval` moved to **04:00 IDT** (≈ 21:00 ET at the usual 7h offset —
+comfortably after 20:30 ET `validate_signals`, with margin for the few weeks/year the
+US/Israel DST transitions don't align and the offset drifts to 6h or 8h). Applied to both
+`research/launchd/com.stocksbreakout.research-lead.plist` and the installed
+`~/Library/LaunchAgents/` copy, reloaded via `launchctl bootout` + `bootstrap`, verified
+loaded with `Hour=4` via `launchctl print`. Next fire: 2026-07-31 04:00 IDT (no double-fire
+risk — both the old 18:47 slot and new 04:00 slot were already past-due-for-today at the
+time of the fix, 12:31 IDT). The runner's own 30-min-interval ticks were unaffected — only
+the daily lead invocation used clock time.
+
 ## 15. `swing-close` DOWN — cgroup OOM kills masked by `&& curl … || true` (2026-07-28)
 
 ### Symptom

@@ -11,10 +11,19 @@
     <string>--force</string>
   </array>
   <key>WorkingDirectory</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout</string>
-  <!-- 18:47 ET-ish daily: after the close, after the day's scans have landed.
-       Off-the-hour on purpose. -->
+  <!-- FIXED 2026-07-30: was Hour=18/Minute=47, written as if it were ET but
+       StartCalendarInterval Hour/Minute are the MACHINE'S LOCAL TIME (IDT,
+       UTC+3), not ET (UTC-4 in summer). That made this fire at 18:47 IDT =
+       11:47 AM ET — mid-trading-day, before docker/crontab's 16:30/19:30/20:30
+       ET jobs (Phase 2 re-eval, evening scan, validate_signals) had run.
+       Confirmed via research_lead.log's own mtimes and repeated "0 new signal
+       file(s)" ticks — the lead was frequently starved of that day's data.
+       04:00 IDT ≈ 21:00 ET (with the usual 7h offset), comfortably after
+       20:30 ET validate_signals even in the few weeks/year the US/Israel DST
+       transitions don't align (offset drifts to 6h or 8h). Off-the-hour on
+       purpose. -->
   <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>47</integer></dict>
+  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
   <key>RunAtLoad</key><false/>
   <key>StandardOutPath</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout/scanner_output/logs/research_lead.log</string>
   <key>StandardErrorPath</key><string>/Users/gilhadas/Documents/GitHub/stocksBreakout/scanner_output/logs/research_lead.err</string>
