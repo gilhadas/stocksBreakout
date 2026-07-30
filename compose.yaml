@@ -145,7 +145,12 @@ services:
     # replaces the anchor's entirely, so HF_HOME must be repeated here or the
     # container falls back to the root-ownership pitfall on ~/.cache.
     environment:
+      # Server-side calls stay on the compose network (no tunnel round trip).
       API_BASE_URL: http://api:8000
+      # Handed to the BROWSER for the Google OAuth link, so it must be publicly
+      # resolvable — http://api:8000 is a Docker-internal name no browser can
+      # reach, which is exactly how Google login broke here. See app.py.
+      PUBLIC_API_BASE_URL: https://api.gilhadas-stocks.com
       HF_HOME: /app/scanner_output/.hf_cache
     ports:
       # Loopback only — reach it with: ssh -L 8501:localhost:8501 <vm>

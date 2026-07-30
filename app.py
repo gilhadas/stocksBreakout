@@ -62,7 +62,26 @@ def check_auth():
 
     st.markdown("## Breakout Scanner")
 
+    # Two different URLs, because they are consumed by two different clients:
+    #
+    #   api_base        — server-side; this Python process calls it. In the
+    #                     container that is http://api:8000 over the compose
+    #                     network (fast, no tunnel round trip).
+    #   public_api_base — handed to the BROWSER as a link. It must be publicly
+    #                     resolvable, so http://api:8000 is useless here: a
+    #                     Docker-internal hostname no browser can resolve.
+    #
+    # Conflating them broke Google login on the containerised dashboard: the
+    # button rendered a link to http://api:8000/auth/google. The old code tried
+    # to paper over it with api_base.replace('127.0.0.1:8000', ...), which only
+    # fires when api_base is the DEFAULT — i.e. it worked only on the retired Mac
+    # deployment and silently did nothing once API_BASE_URL was set. It also
+    # assigned the result to a `redirect_uri` variable that was never used.
+    #
+    # Defaults to api_base so a single-host deployment (Streamlit Cloud pointing
+    # straight at the public API) needs only API_BASE_URL set.
     api_base = os.getenv('API_BASE_URL', 'http://127.0.0.1:8000')
+    public_api_base = os.getenv('PUBLIC_API_BASE_URL', api_base)
 
     col1, col2 = st.columns(2)
 
@@ -106,8 +125,8 @@ def check_auth():
     if google_client_id:
         st.markdown("### Or login with Google")
         if st.button("🔑 Login with Google", use_container_width=True):
-            redirect_uri = f"{api_base.replace('127.0.0.1:8000', 'gilhadas-stocks.com')}/auth/google/callback"
-            oauth_url = f"{api_base}/auth/google"
+            # public_api_base, not api_base — the browser follows this link.
+            oauth_url = f"{public_api_base}/auth/google"
             st.markdown(f"[Click here to login with Google]({oauth_url})")
     else:
         st.info("Google OAuth not configured yet")
