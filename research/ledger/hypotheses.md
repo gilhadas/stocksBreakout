@@ -306,7 +306,10 @@ until after the current budget `end_date`. That would require a human decision t
   H6's conclusions are unaffected**; their stated n/z should be read as mildly-inflated
   upper bounds, not wrong verdicts. Recommend the standard panel-loading recipe in the
   guardrails/prompts add `drop_duplicates(subset=['symbol','signal_date'])` so future
-  work doesn't silently inherit the inflated count. Unchased open question for a human:
-  does `auto_portfolio.py` dedupe same-day swing+longterm admissions for one symbol, or
-  does live actually open two positions? Full writeup: `decisions.md` 2026-07-30
-  (worker-stops).
+  work doesn't silently inherit the inflated count. **Live-side question CHECKED
+  2026-08-01 (human): `auto_portfolio.py:323-325` already runs
+  `v9h.drop_duplicates(subset=['Symbol'], keep='first')` on the pooled, priority-sorted
+  frame *before* any position is opened — same-day swing+longterm duplicates collapse
+  to the higher-priority row. Live never opens two positions for one symbol/day.
+  HZ5 is confirmed panel-measurement-only, zero live-trading impact.** Full writeup:
+  `decisions.md` 2026-07-30 (worker-stops).
