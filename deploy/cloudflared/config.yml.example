@@ -12,6 +12,11 @@
 #     cloudflared tunnel route dns stocksbreakout-server gilhadas-stocks.com
 #     cloudflared tunnel route dns stocksbreakout-server api.gilhadas-stocks.com
 # Leave expenses.gilhadas-stocks.com on the Mac's original tunnel.
+#
+# ⚠ `cloudflared tunnel route dns <name> <hostname>` can silently resolve <name>
+# to the WRONG tunnel via a loose prefix match against other tunnel names in the
+# account (hit this 2026-08-02: "stocksbreakout-oracle" matched "stocksbreakout").
+# Always pass the full tunnel UUID to `route dns`, never the name, to sidestep it.
 
 tunnel: stocksbreakout-server
 credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_UUID.json
@@ -31,6 +36,16 @@ ingress:
   # Trade Journal SPA (compose service `journal`, nginx).
   - hostname: journal.gilhadas-stocks.com
     service: http://journal:80
+
+  # Streamlit admin/scanning dashboard (compose service `dashboard`). Reached
+  # over the internal Docker network via service name, independent of the
+  # dashboard's `127.0.0.1:8501:8501` host port binding — that loopback bind
+  # stays in place as a second access path (`ssh -L 8501:localhost:8501 <vm>`)
+  # for when the tunnel itself is down. Has its own app-level login
+  # (email/password + Google OAuth in app.py's check_auth()), so this is not
+  # bypassing authentication — just adding a public entrypoint to the same gate.
+  - hostname: dashboard.gilhadas-stocks.com
+    service: http://dashboard:8501
 
   # Catch-all — required last rule.
   - service: http_status:404
