@@ -5,6 +5,11 @@
 # https://docs.docker.com/go/build-context-dockerignore/
 
 **/.DS_Store
+# AppleDouble sidecars. macOS `tar` emits one `._<name>` per file carrying the
+# com.apple.provenance xattr, so any Mac->Linux tar/scp of the build context (e.g.
+# shipping the gitignored mobile/dist) silently doubles the file count and bakes
+# the junk into the image, where StaticFiles would serve it.
+**/._*
 **/__pycache__
 **/.venv
 **/venv
