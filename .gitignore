@@ -34,3 +34,10 @@ _bmad/
 # SQLite databases (real user data — canonical path is scanner_output/users.db,
 # a Docker named volume in production; never belongs in the git working tree)
 *.db
+
+# research/ only exists as tracked content on branch research/auto-agents (its own
+# research/.gitignore handles the specifics there). On any other branch its panel
+# data + scratch scripts are just orphaned untracked files — ignore the whole dir
+# here rather than duplicate that branch's ignore rules. Remove/narrow this if
+# research/auto-agents is ever merged into main.
+/research/
