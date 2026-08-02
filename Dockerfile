@@ -58,12 +58,22 @@ RUN adduser \
 # on requirements.txt: with two indexes both serving `torch`, pip picks by
 # version and the CUDA build can win. Installing it first makes requirements.txt
 # a no-op for torch (>=2.0.0 already satisfied) and the choice deterministic.
+# Constrained by deploy/constraints-ec2-20260802.txt — freezes every version to
+# EC2's exact x86 build so the Oracle ARM rebuild changes only architecture, not
+# 6 weeks of unpinned requirements.txt drift on top of it. The bind mount below
+# requires this file to exist (it's a tracked exception to .gitignore, not a
+# fallback path) — a plain `pip install -r requirements.txt` with no -c would
+# silently reintroduce the confound this migration is trying to rule out.
+# TODO(post-migration): remove this constraint once the Oracle cutover is
+# validated — it should not freeze dependencies on ordinary future builds.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+    --mount=type=bind,source=deploy/constraints-ec2-20260802.txt,target=/tmp/constraints.txt \
+    python -m pip install --index-url https://download.pytorch.org/whl/cpu -c /tmp/constraints.txt torch
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=requirements.txt,target=requirements.txt \
-    python -m pip install -r requirements.txt
+    --mount=type=bind,source=deploy/constraints-ec2-20260802.txt,target=/tmp/constraints.txt \
+    python -m pip install -c /tmp/constraints.txt -r requirements.txt
 
 # ── Application source ────────────────────────────────────────────────────────
 # --chown ensures appuser can write to scanner_output/ at runtime.
