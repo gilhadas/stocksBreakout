@@ -160,5 +160,14 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     if client_type == 'mobile':
         # Native app: custom scheme intercepted by openAuthSessionAsync
         return RedirectResponse(f"stocksbreakout://oauth-callback?token={token}")
+    if client_type == 'dashboard':
+        # Streamlit dashboard is a SEPARATE origin (dashboard.gilhadas-stocks.com)
+        # from this callback (gilhadas-stocks.com) — unlike the mobile web app's
+        # relative "/?token=" below, a relative redirect here would resolve
+        # against THIS host and land the user back on the mobile app instead.
+        # Must be absolute. app.py's check_auth() picks up ?token= the same way
+        # _layout.tsx does.
+        dashboard_url = os.getenv('DASHBOARD_PUBLIC_URL', 'https://dashboard.gilhadas-stocks.com')
+        return RedirectResponse(f"{dashboard_url}/?token={token}")
     # Web browser: redirect to root with token param; _layout.tsx useEffect catches it
     return RedirectResponse(f"/?token={token}")

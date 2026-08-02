@@ -154,7 +154,10 @@ def check_auth():
         st.markdown("### Or login with Google")
         if st.button("🔑 Login with Google", use_container_width=True):
             # public_api_base, not api_base — the browser follows this link.
-            oauth_url = f"{public_api_base}/auth/google"
+            # client=dashboard tags the OAuth state so the callback redirects
+            # back to this app's own host, not the mobile web app's root
+            # (the un-tagged 'web' default) — see auth_routes.py's callback.
+            oauth_url = f"{public_api_base}/auth/google?client=dashboard"
             st.markdown(f"[Click here to login with Google]({oauth_url})")
     else:
         st.info("Google OAuth not configured yet")

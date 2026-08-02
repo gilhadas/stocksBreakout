@@ -46,7 +46,7 @@ def source() -> str:
 
 def test_oauth_link_uses_the_public_base_not_the_internal_one(source):
     """The browser follows this link, so it must not be built from api_base."""
-    m = re.search(r'oauth_url\s*=\s*f"\{(\w+)\}/auth/google"', source)
+    m = re.search(r'oauth_url\s*=\s*f"\{(\w+)\}/auth/google(?:\?[^"]*)?"', source)
     assert m, 'could not find the oauth_url construction in app.py'
     assert m.group(1) == 'public_api_base', (
         f'oauth_url is built from {m.group(1)!r}; the browser cannot resolve '
@@ -78,6 +78,44 @@ def test_server_side_login_still_uses_the_internal_base(source):
     assert calls, 'could not find the /auth/login calls'
     assert set(calls) == {'api_base'}, (
         f'/auth/login should be called via api_base, found {set(calls)}')
+
+
+def test_dashboard_oauth_link_tags_its_client_type(source):
+    """Reported 2026-08-02: Google login on the dashboard landed back on the
+    mobile web app's root (gilhadas-stocks.com) instead of the dashboard.
+
+    The callback only knows which app to return to via the 'client' query
+    param captured into _oauth_states — an untagged link falls into the
+    'web' default and gets the mobile app's relative "/?token=" redirect,
+    which resolves against the CALLBACK's host (gilhadas-stocks.com), not
+    dashboard.gilhadas-stocks.com. Without this tag the bug is silent: the
+    login still "succeeds", just on the wrong origin.
+    """
+    assert re.search(r'/auth/google\?client=dashboard', source), (
+        "the dashboard's oauth_url must pass client=dashboard so the "
+        "callback knows to redirect back to this app's own host")
+
+
+@pytest.fixture(scope='module')
+def auth_routes_source() -> str:
+    return (Path(__file__).parent.parent / 'api' / 'auth_routes.py').read_text()
+
+
+def test_dashboard_callback_redirect_is_absolute(auth_routes_source):
+    """Companion to the app.py tag above: the backend must special-case
+    client_type == 'dashboard' with an ABSOLUTE redirect. A relative
+    "/?token=" (the 'web' branch, correct for the mobile app which IS
+    gilhadas-stocks.com) would resolve against this callback's own host
+    and land back on the mobile app instead of the dashboard.
+    """
+    m = re.search(
+        r"client_type == 'dashboard':\s*\n(?:.*\n){0,8}?\s*return RedirectResponse\(f?\"([^\"]*)\"",
+        auth_routes_source)
+    assert m, "no client_type == 'dashboard' branch found in the callback"
+    redirect = m.group(1)
+    assert redirect.startswith('http://') or redirect.startswith('https://') or '{' in redirect, (
+        f"dashboard redirect {redirect!r} is not absolute — it will resolve "
+        "against gilhadas-stocks.com (this callback's host), not the dashboard")
 
 
 def test_compose_gives_the_dashboard_a_public_url():
