@@ -156,7 +156,8 @@ def check_auth():
             # public_api_base, not api_base — the browser follows this link.
             # client=dashboard tags the OAuth state so the callback redirects
             # back to this app's own host, not the mobile web app's root
-            # (the un-tagged 'web' default) — see auth_routes.py's callback.
+            # (the un-tagged 'web' default) — see
+            # trading_api_kit/auth_routes.py's google_callback().
             oauth_url = f"{public_api_base}/auth/google?client=dashboard"
             st.markdown(f"[Click here to login with Google]({oauth_url})")
     else:

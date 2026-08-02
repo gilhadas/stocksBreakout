@@ -202,5 +202,14 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
 
     if client_type == "mobile":
         return RedirectResponse(f"{app_scheme}://oauth-callback?token={token}")
+    if client_type == "dashboard":
+        # A second web frontend can live on its OWN origin (e.g. a Streamlit
+        # dashboard on a different subdomain than this callback). The relative
+        # "/?token=" redirect below resolves against THIS callback's host, so
+        # it would silently land such a frontend back on the wrong app instead.
+        # DASHBOARD_PUBLIC_URL must be an absolute URL; if unset, fall through
+        # to the same relative redirect as "web" (safe no-op default).
+        dashboard_url = os.getenv("DASHBOARD_PUBLIC_URL", "")
+        return RedirectResponse(f"{dashboard_url}/?token={token}")
     # Web: redirect to root — frontend picks up ?token= in useEffect
     return RedirectResponse(f"/?token={token}")

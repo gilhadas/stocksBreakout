@@ -28,6 +28,7 @@ what we can assert cheaply and directly.
 Run:
     python -m pytest tests/test_login_urls.py -v
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -98,7 +99,22 @@ def test_dashboard_oauth_link_tags_its_client_type(source):
 
 @pytest.fixture(scope='module')
 def auth_routes_source() -> str:
-    return (Path(__file__).parent.parent / 'api' / 'auth_routes.py').read_text()
+    return (Path(__file__).parent.parent / 'trading_api_kit' / 'auth_routes.py').read_text()
+
+
+def test_no_dead_shadow_auth_routes_file():
+    """Reported 2026-08-02: the dashboard OAuth fix was applied to
+    api/auth_routes.py, deployed, and verified in isolation — but that file
+    was DEAD CODE. api/server.py builds its app via
+    trading_api_kit.create_app(), which wires up trading_api_kit/auth_routes.py
+    instead; api/auth_routes.py was never imported anywhere. The fix had zero
+    effect on production for hours before this was caught. Guards against ever
+    recreating a second, unwired copy of this file.
+    """
+    assert not (Path(__file__).parent.parent / 'api' / 'auth_routes.py').exists(), (
+        'api/auth_routes.py exists again — the real /auth/* routes are served '
+        'by trading_api_kit/auth_routes.py via api/server.py\'s create_app(); '
+        'a second copy here is dead code that invites fixing the wrong file')
 
 
 def test_dashboard_callback_redirect_is_absolute(auth_routes_source):
@@ -109,13 +125,36 @@ def test_dashboard_callback_redirect_is_absolute(auth_routes_source):
     and land back on the mobile app instead of the dashboard.
     """
     m = re.search(
-        r"client_type == 'dashboard':\s*\n(?:.*\n){0,8}?\s*return RedirectResponse\(f?\"([^\"]*)\"",
+        r'client_type == "dashboard":\s*\n(?:.*\n){0,8}?\s*return RedirectResponse\(f?"([^"]*)"',
         auth_routes_source)
-    assert m, "no client_type == 'dashboard' branch found in the callback"
+    assert m, 'no client_type == "dashboard" branch found in the callback'
     redirect = m.group(1)
     assert redirect.startswith('http://') or redirect.startswith('https://') or '{' in redirect, (
         f"dashboard redirect {redirect!r} is not absolute — it will resolve "
         "against gilhadas-stocks.com (this callback's host), not the dashboard")
+
+
+def test_mobile_app_scheme_matches_app_json():
+    """Found alongside the dashboard bug, same function, same root cause: the
+    trading_api_kit extraction made MOBILE_APP_SCHEME configurable with a
+    generic 'myapp' default, but no .env here was ever updated to override it
+    — so native Google login redirects to myapp://oauth-callback, which
+    mobile/app.json's registered scheme ("stocksbreakout") never intercepts.
+    """
+    app_json = json.loads((Path(__file__).parent.parent / 'mobile' / 'app.json').read_text())
+    scheme = app_json['expo']['scheme']
+    example = (Path(__file__).parent.parent / 'deploy' / '.env.example').read_text()
+    assert re.search(rf'^MOBILE_APP_SCHEME={re.escape(scheme)}$', example, re.MULTILINE), (
+        f"deploy/.env.example must set MOBILE_APP_SCHEME={scheme} to match "
+        "mobile/app.json's scheme, or native Google login silently breaks")
+
+
+def test_dashboard_public_url_documented():
+    example = (Path(__file__).parent.parent / 'deploy' / '.env.example').read_text()
+    assert 'DASHBOARD_PUBLIC_URL=' in example, (
+        'DASHBOARD_PUBLIC_URL must be documented in deploy/.env.example — '
+        "without it in .env, the dashboard OAuth branch falls back to the "
+        "same relative redirect as 'web' and the bug reappears silently")
 
 
 def test_compose_gives_the_dashboard_a_public_url():
