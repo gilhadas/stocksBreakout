@@ -16,6 +16,9 @@ __pycache__/
 !COMPLETE_BUILDOUT.txt
 !requirements.txt
 !requirements-ci.txt
+# Frozen dependency sets captured from a running box, used with `pip install -c`
+# to hold deps constant while some other variable (arch, base image) changes.
+!deploy/constraints-*.txt
 /credentials/
 /backtests
 .claude/scheduled_tasks.lock
