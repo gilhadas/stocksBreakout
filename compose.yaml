@@ -127,7 +127,38 @@ services:
     # is the wrong move — that is the signature of a leak, and it cost three
     # wrong diagnoses (§15 raised the cap, §17 resized the box, §18 found the
     # replay) before §19 measured the real per-call term.
-    mem_limit: 1500m
+    #
+    # 2026-08-02: 1500m -> 2048m for the Oracle aarch64 box (§23). This IS the
+    # "peak == cap" case the warning above forbids raising for — so it was only
+    # raised after proving the growth is FLAT, by two independent measurements.
+    #
+    #   (a) FinBERT residency isolated on ARM, across a 256x workload range:
+    #       baseline 9.3MB -> import 114.8MB -> 1st inference 923.1MB
+    #       -> 16 headlines 923.1MB -> 64: 923.1MB -> 256: 923.1MB
+    #       Unchanged at every batch size — the same flat signature §16 found on
+    #       x86 (704.4MB). aarch64 model residency is +218.7MB.
+    #
+    #   (b) THE DECISIVE ONE — two full all.txt scans, same flags, cap the only
+    #       difference:
+    #         1500m: completed 1846s, peak RSS 1231.8MB, cgroup 1500.0/1500=100%
+    #         2048m: completed 1794s, peak RSS 1002.2MB, cgroup  887.6/2048=43.3%
+    #       Peak went DOWN when given a bigger cap — the exact inverse of the
+    #       §15/§17 pathology, where the process expanded to fill whatever cap it
+    #       was given (~1.37GiB under 1400m, ~2.45GiB under 2500m). With headroom
+    #       the working set settles instead of thrashing against the ceiling.
+    #
+    #   ⚠ Corrects an over-attribution made mid-diagnosis: run (b)'s 1231.8MB was
+    #   largely a PRESSURE ARTIFACT of being pinned at the cap, not a genuine ARM
+    #   cost. The real aarch64 working set (1002.2MB) is within 1.1% of the x86
+    #   baseline (§21: 1013.6MB). FinBERT's +218.7MB is real but does not
+    #   propagate to whole-scan peak — peak is a high-water mark, not a sum.
+    #
+    #   2048m leaves ~104% headroom over the 1002.2MB natural peak, still binds
+    #   hard (17% of the box's 11927MB, so the cgroup killer always fires before
+    #   the host killer — the inversion that is the whole point of these caps),
+    #   and still trips on a 2x regression.
+    #   Do NOT raise further without an equivalent flat-vs-growing measurement.
+    mem_limit: 2048m
 
   # ── Mobile API server ──────────────────────────────────────────────────────
   api:
