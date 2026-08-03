@@ -1359,22 +1359,13 @@ def _close_basis_history(hist: 'pd.DataFrame', now_et: 'datetime') -> 'pd.DataFr
 
     The champion exit is CLOSE-based (an intraday dip below the trail must NOT
     exit — low-based triggering gave 2022 −24.8% in the restore isolation).
-    yfinance history fetched during market hours includes today's *partial* bar,
-    whose Close is really the live price; deciding exits on it makes the live
-    system low-based whenever refresh runs intraday (the 10:00 ET cron).
-
-    Rule: drop today's partial bar unless we're in the late window (>= 15:30 ET,
-    where the near-close price is a fair proxy for today's close — the 15:45
-    cron) or the session is over (>= 16:00 ET, bar is final).
+    Thin wrapper over ``utils.close_basis_history`` — kept here (rather than
+    inlined) so existing imports/tests of this name are unaffected; the
+    logic itself is shared with ``orchestrator.evaluate_exits``, which has
+    the same partial-bar problem for its rule-based exit checks.
     """
-    if hist is None or hist.empty:
-        return hist
-    last_ts = hist.index[-1]
-    last_date = last_ts.date() if hasattr(last_ts, 'date') else last_ts
-    in_late_window = (now_et.hour, now_et.minute) >= (15, 30)
-    if last_date == now_et.date() and now_et.hour < 16 and not in_late_window:
-        return hist.iloc[:-1]
-    return hist
+    from utils import close_basis_history
+    return close_basis_history(hist, now_et)
 
 
 def refresh_prices(user_id: str | None = None) -> dict:

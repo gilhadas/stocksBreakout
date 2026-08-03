@@ -22,7 +22,7 @@ from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
 from level2_analyzer import Level2Analyzer
-from utils import classify_market_regime, get_smoothed_regime, check_regime_cooldown
+from utils import classify_market_regime, get_smoothed_regime, check_regime_cooldown, close_basis_history
 from sentiment import get_sector_buzz, get_sector_for_ticker
 import memory_trace as memt   # no-op unless SB_MEM_TRACE=1
 
@@ -609,7 +609,20 @@ class ScannerOrchestrator:
             if df is None or len(df) < 30:
                 logger.warning(f"No data for {symbol}")
                 continue
-            
+
+            # Close-based basis for daily bars: a mid-session fetch includes
+            # today's still-forming bar (Close = live price, not an actual
+            # close), which makes exit_evaluator's close-based rules (e.g.
+            # "Trend broken") fire on intraday noise instead of an actual
+            # close. Mirrors auto_portfolio.refresh_prices' _close_basis_history.
+            # Intraday timeframes (daytrade/scalping) are exempt — there is no
+            # analogous "partial bar" concept for a 15-min/1-min candle.
+            if 'min' not in timeframe.lower() and 'hour' not in timeframe.lower():
+                df = close_basis_history(df, datetime.now(ZoneInfo('America/New_York')))
+                if df is None or len(df) < 30:
+                    logger.warning(f"No data for {symbol} after close-basis trim")
+                    continue
+
             # Compute days held from entry_date (if available)
             days_held = 0
             entry_date_str = pos.get('entry_date', '')

@@ -953,6 +953,36 @@ def check_regime_cooldown(cooldown_hours: float) -> tuple:
     return False, 0.0
 
 
+def close_basis_history(hist, now_et) -> Optional[pd.DataFrame]:
+    """
+    Trim a daily OHLCV history to the basis usable for close-based decisions.
+
+    A daily bar fetched mid-session (yfinance ``ticker.history()``, or the IB/
+    yfinance blend behind ``MarketDataHandler.get_historical_data``) includes
+    today's still-forming bar, whose Close is really the live/intraday price
+    — not an actual close. Deciding a close-based rule (a trend/stop check
+    that intraday noise must not trigger) off that row makes the check
+    low-based instead of close-based whenever it runs intraday.
+
+    Rule: drop today's partial bar unless we're in the late window (>= 15:30
+    ET, where the near-close price is a fair proxy for today's close) or the
+    session is over (>= 16:00 ET, bar is final).
+
+    Shared by ``auto_portfolio.refresh_prices`` (ATR-trail stop/trail) and
+    ``orchestrator.evaluate_exits`` (rule-based ``ExitEvaluator`` checks,
+    e.g. "Trend broken"). Only meaningful for daily bars — callers must not
+    apply this to intraday timeframes.
+    """
+    if hist is None or hist.empty:
+        return hist
+    last_ts = hist.index[-1]
+    last_date = last_ts.date() if hasattr(last_ts, 'date') else last_ts
+    in_late_window = (now_et.hour, now_et.minute) >= (15, 30)
+    if last_date == now_et.date() and now_et.hour < 16 and not in_late_window:
+        return hist.iloc[:-1]
+    return hist
+
+
 def setup_logging(log_file: str = None, debug: bool = False):
     """
     Setup logging configuration with output to nested folder
