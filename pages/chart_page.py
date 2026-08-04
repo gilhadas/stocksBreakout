@@ -5,6 +5,8 @@ import yfinance as yf
 import streamlit.components.v1 as components
 from streamlit_lightweight_charts import renderLightweightCharts
 
+from utils import drop_incomplete_bars
+
 
 def _tv_advanced_chart(symbol: str, interval: str = 'D', height: int = 520) -> None:
     """Embed TradingView Advanced Chart widget (free public widget, no API key needed).
@@ -51,6 +53,9 @@ def _fetch_chart_data(symbol, period='1y'):
     df = ticker.history(period=period)
     if df.empty:
         return None
+    df = drop_incomplete_bars(df)
+    if df.empty:
+        return None
     df = df.reset_index()
     df['time'] = df['Date'].dt.strftime('%Y-%m-%d')
     return df
@@ -66,6 +71,11 @@ def _build_chart_config(df, symbol, signal=None):
     # Volume data
     volume_data = []
     for _, row in df.iterrows():
+        # A bar can carry NaN Volume even with valid OHLC; int(nan) raises.
+        # Skip the point rather than fabricating a zero, matching how the SMA
+        # series below skips rows it cannot plot.
+        if pd.isna(row['Volume']):
+            continue
         color = 'rgba(38,166,154,0.5)' if row['Close'] >= row['Open'] else 'rgba(239,83,80,0.5)'
         volume_data.append({
             'time': row['time'],

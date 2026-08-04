@@ -989,6 +989,35 @@ def check_regime_cooldown(cooldown_hours: float) -> tuple:
     return False, 0.0
 
 
+def drop_incomplete_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows whose OHLC is not fully populated.
+
+    yfinance emits a **trailing placeholder bar** for the most recent period
+    with NaN Open/High/Low/Close — often with Volume already filled in, so an
+    ``.empty`` or Volume-based check does not catch it. Measured 2026-08-04:
+    every symbol tested, SPY included, carried exactly one such row at the end
+    of a ``period='1y'`` fetch.
+
+    That row breaks two things downstream:
+
+    1. ``json.dumps`` serialises NaN as a bare ``NaN`` token, which is not
+       valid JSON — the browser throws ``SyntaxError: Unexpected token 'N'``
+       and the chart never renders (issue #4).
+    2. ``int(row['Volume'])`` raises ``ValueError`` when Volume is NaN too.
+
+    Applied at fetch time so every consumer of the frame is covered, rather
+    than at each render site. Distinct from :func:`close_basis_history`, which
+    drops a *complete but still-forming* bar for a different reason (its Close
+    is a live price, not a close); this one drops bars that have no data at all.
+    """
+    if df is None or df.empty:
+        return df
+    cols = [c for c in ('Open', 'High', 'Low', 'Close') if c in df.columns]
+    if not cols:
+        return df
+    return df.dropna(subset=cols)
+
+
 def close_basis_history(hist, now_et) -> Optional[pd.DataFrame]:
     """
     Trim a daily OHLCV history to the basis usable for close-based decisions.
