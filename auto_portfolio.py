@@ -163,6 +163,69 @@ def _save(data: dict, user_id: str | None = None):
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+# Deleted users' books are moved here, never removed. A book is the only record
+# that a user ever traded — §20's "bound the read window, never prune" rule
+# applies to it at least as much as to the signal archive.
+_DELETED_DIR = 'scanner_output/portfolio/_deleted'
+
+
+def archive_user_portfolio(user_id: str) -> dict:
+    """Move a user's portfolio files out of the live namespace.
+
+    The users DB holds identity only — a single ``users`` table, no portfolio
+    rows — so a user's book is stored solely as JSON under
+    ``scanner_output/portfolio/<user_id>/`` and *nothing cascades* when the row
+    is deleted. Left alone the directory keeps looking exactly like a live book
+    that no user owns, which is how two orphans with ~$99k of open positions
+    each survived long enough to be misread as production state.
+
+    Each file is copied to ``_deleted/<user_id>/`` and the original removed only
+    after the copy reads back. A file that cannot be read or verified is left in
+    place: an unmoved book is recoverable, a lost one is not.
+
+    Idempotent — safe to re-run after a partial failure, and a user with no
+    directory is a no-op success.
+
+    Raises:
+        RuntimeError: if any file could not be archived. The caller must treat
+            this as fatal and leave the user row intact, so the operation stays
+            retryable instead of silently orphaning the book.
+    """
+    from utils import list_files, load_json, save_json, delete_file
+
+    src_dir = f'scanner_output/portfolio/{user_id}'
+    dst_dir = f'{_DELETED_DIR}/{user_id}'
+
+    archived, failed = [], []
+    for name in sorted(list_files(src_dir, '*.json')):
+        src, dst = f'{src_dir}/{name}', f'{dst_dir}/{name}'
+        try:
+            payload = load_json(src)
+            if payload is None:
+                failed.append(f'{name}: unreadable')
+                continue
+            save_json(payload, dst)
+            # save_json swallows S3 errors, so the write is not proof of a copy.
+            # Read it back before removing the only remaining original.
+            if load_json(dst) is None:
+                failed.append(f'{name}: copy not verified at {dst}')
+                continue
+            delete_file(src)
+            archived.append(name)
+        except Exception as exc:
+            failed.append(f'{name}: {exc}')
+
+    result = {'user_id': user_id, 'dest': dst_dir,
+              'archived': archived, 'failed': failed}
+
+    if failed:
+        raise RuntimeError(
+            f'archive_user_portfolio({user_id}): archived {len(archived)} file(s), '
+            f'{len(failed)} failed — {"; ".join(failed)}'
+        )
+    return result
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def available_cash(data: dict) -> float:

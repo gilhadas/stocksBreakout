@@ -1649,3 +1649,112 @@ Three deployments now resolve correctly, each pinned by a test: container (env),
 Cloud (secret), secret-beats-env, and neither → default.
 **Streamlit Cloud still needs `API_BASE_URL = "https://api.gilhadas-stocks.com"` set in its
 own Secrets** — a console change no commit can make.
+
+## 23. Deleting a user orphaned their book; and two manual-scan traps (2026-08-04)
+
+Started from an ordinary question — "I ran a manual longterm scan from Streamlit, how do I
+use it in auto portfolio?" — and turned up three unrelated defects, each of the same shape
+as §22's: **state that looks live but isn't, and nothing that says so.**
+
+### 23.1 Portfolios are files keyed by path; the DB has no portfolio table
+The users DB is a **single `users` table** (`trading_api_kit/models.py`; `api/models.py` is
+one of the shadow duplicates — `api/server.py:18` imports from the kit). A portfolio lives
+*only* as JSON at `scanner_output/portfolio/<user_id>/`, keyed by user id in the **path**,
+so `db.delete(user)` cascades to nothing.
+
+`delete_user` (`trading_api_kit/admin_routes.py`) was, in full, `db.delete(user);
+db.commit()`. Every deletion therefore left a book behind that is indistinguishable from a
+live one. Two such orphans — **16 and 17 open positions, ~$99k deployed each** — survived
+long enough to be read back mid-investigation and reported as "the live books." The data
+was fine; what it *meant* was wrong. The user's actual book was empty, which is what
+Streamlit was correctly showing all along.
+
+**Fixed:** the kit gained a `register_user_delete_hook` registry — it owns identity and
+must not know about `scanner_output/`. Hooks run **before** `db.delete(user)` and a failure
+aborts with a 500, because once the id is gone nothing ties the files to a person and
+cleanup becomes archaeology (exactly how the two orphans became unattributable).
+`api/server.py` registers `auto_portfolio.archive_user_portfolio()`, which moves each file
+to `portfolio/_deleted/<user_id>/` and removes the original **only after reading the copy
+back** — `save_json` swallows S3 errors, so a successful-looking write is not proof of a
+copy. Archive, never delete: a book is the only record a user ever traded (§20's rule).
+`utils.delete_file()` added as the missing half of the local+S3 pair; its existence check
+sits *inside* the `_s3_call` op so the rebuild-and-retry cannot turn "already gone" into an
+error, and unlike `save_json` it does **not** swallow S3 failures.
+
+Backfilled the same day: 5 directories archived (2 orphans, avivss's book, and the
+`__test_recalc_fix__` / `__test_scan_add_isolation__` probes that had leaked into the
+production bucket — the §19 trap again), positions verified 16/16, 17/17, 16/16 after the
+move. Empty leftovers removed from the box (`0c6edf84…/`, `_prerefresh_backup_/`) and the
+Mac. `tests/test_user_delete_cleanup.py` — 11 tests, each mutation-verified.
+
+⚠ **One of those mutations caught a bug in the test, not the code.** The "host app
+registers the hook" test grepped `inspect.getsource(api.server)` for
+`register_user_delete_hook` and **passed with the call deleted**, because the *import*
+line contains the same string. Rewritten to import the module and assert the registered
+hook actually reaches `archive_user_portfolio`. A substring assertion cannot distinguish
+using a name from importing it.
+
+**Identity facts worth not re-deriving:** production has exactly **two** users
+(`cf699841…` = gil.hadas@gmail.com, `6cf6c4a5…` = gil.hadas+1@gmail.com). `users.db` is
+**per-box and never synced to S3** (`api/database.py`), so the repo's local copy is a stale
+Mac artifact — always read the box's. There is **no default
+`scanner_output/portfolio/auto_portfolio.json`** in production; `scan_and_add_all_users()`
+writes per-user books only, so an unauthenticated Streamlit session (`user_id=None`) loads
+an empty legacy book and correctly reports "No open positions."
+
+### 23.2 A manual Streamlit scan is not a small cron scan
+`pages/scan_page.py::_run_scan` calls `orchestrator.scan_watchlist` + `save_results`
+**directly**, so the signals CSV lands in S3 like any other and `scan_and_add` — which is
+mode-agnostic (`signals_*.csv`) — consumes it on the next `--cron` run. Nothing needs
+importing. But the manual path skips two things that only exist in the CLI:
+
+- **`MAX_SIGNALS_PER_SCAN = 20`** and the same-day symbol dedup live in
+  `breakout_scanner.py:497`. Measured 2026-08-04: manual longterm = **187 rows / 109
+  GOLD+PREMIUM**, vs a cron file's 20 rows / ≤19. Since the pooled cap groups by *date*, an
+  ad-hoc scan's GOLD rows outrank the day's swing signals for the same 10 slots.
+
+- ⚠ **Never admit premarket.** `_fetch_entry_and_current` fetches **daily bars**; before
+  the open today's bar does not exist, `hist` is empty, and it returns
+  `(csv_price, csv_price)` — falling back to the exact column the system deliberately
+  distrusts (HZ1: ~32% of scanner rows carry impossible prices). Clicking "Scan Signals"
+  premarket, or adding a premarket cron line, removes the book's price insulation. This is
+  a correctness regression, not a timing preference. To admit earlier, add a standalone
+  `scan_and_add_all_users()` cron line at ~9:40 ET (today's earliest is ~10:05, because the
+  call is a *tail* of the 9:35 scan and that scan takes ~26 min).
+
+### 23.3 The pooled ranking trusts an R:R a later guard can invalidate — issue #3
+`scan_and_add`'s priority sort ranks on the CSV's `R:R` column, but the stop-distance guard
+(`auto_portfolio.py:562`) can rewrite the stop afterwards. CAPR on 2026-08-04: csv price
+$4.20 / stop $2.47 / target $23.73 → **R:R 11.27**, which won it slot 9 of 10 ahead of
+every other PREMIUM. Real close was $3.85, putting the stop **35.8%** below entry — over
+the 30% guard — so the stop becomes `entry × 0.95` and the admitted position's R:R is
+nothing like 11.27. **Systematic, not a one-off:** the guard fires precisely on the
+widest-stop signals, which are exactly the ones a raw `(target−entry)/(entry−stop)`
+flatters most, so the ranking preferentially promotes the candidates whose R:R is most
+fictitious — deep-dip BOUNCE rows (Dist −80%+, RSI < 20), the falling-knife shape §12
+already flagged. Filed as issue #3; the fix changes admission order, so per §11 it must be
+judged on the `--realistic-sizing` arm with the >15d WR halt criterion.
+
+### 23.4 A correlated-cluster warning that did not survive checking
+Initial read of the manual longterm file was that its 8 GOLD rows would fill a fresh $100k
+book with a §10-style correlated cohort. Checking the sectors overturned it: Energy,
+Healthcare, Technology ×2, Finance ×2 (+ STEL, banking), Industrial — RSI 60–72, Dist +2%
+to +18% (all inside the 25% tiebreak cap), volume 1.8–4.5×. Textbook Stage-2 continuation
+across six sectors, i.e. the *opposite* of the Feb-2026 crypto-beta cluster the concern was
+extrapolated from. The two genuinely weak rows (CAPR, LII) turned out self-limiting: both
+end up on tight stops (CAPR's rewritten to 5% by the guard above, LII's 2.4% away), bounding
+combined downside near ~$500 on a $100k book. **Verdict: no action** — blocking the file
+would have discarded 8 good signals to avoid 2 bounded ones. Lesson: §10's correlated-cluster
+finding is about *thematic concentration*, not about filling the cap; check the sector spread
+before invoking it.
+
+⚠ Note `QUALITY_SIZING` is **2.0× for GOLD *and* PREMIUM**, so the 5% base becomes 10% per
+position — right at `max_single_position_pct`. Ten slots is therefore the **entire** book,
+not half of it: a fresh account goes 0 → fully deployed in one morning, making one day's
+prices its whole cost basis. That is designed behaviour and matches §11's realistic-sizing
+arm, but the backtests spread entries over many days and never concentrate this way.
+
+### Still open
+- The Oracle migration (2026-08-02) still has no section of its own; §9 describes the
+  retired EC2 deployment. Section numbering here does not reserve a slot for it.
+- Issue #3 (R:R ranking) unfixed by design — needs a validated backtest arm.

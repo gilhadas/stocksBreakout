@@ -413,6 +413,42 @@ def save_json(data, local_path: str, s3_path: str = None):
             logger.warning(f"S3 JSON write failed for {s3_path}: {e}")
 
 
+def delete_file(local_path: str, s3_path: str = None) -> bool:
+    """Delete a file locally and on S3. Returns True if either side removed it.
+
+    Idempotent by design: a path that does not exist is a success, not an error.
+    That matters for the retry inside ``_s3_call`` — the existence check lives
+    *inside* the op, so a rebuild-and-retry cannot turn "already gone" into a
+    raised FileNotFoundError. It also makes the caller safe to re-run after a
+    partial failure, which is the whole point of archive-then-delete flows.
+
+    Unlike ``save_json``, an S3 failure is NOT swallowed. Callers delete only
+    after verifying a copy exists elsewhere, so a silent failure here would
+    orphan the original — the exact bug this helper exists to prevent.
+    """
+    if s3_path is None:
+        s3_path = _to_s3_key(local_path)
+
+    removed = False
+
+    abs_path = _to_local_abs(local_path)
+    if os.path.exists(abs_path):
+        os.remove(abs_path)
+        removed = True
+
+    if _is_cloud():
+        def _rm(fs):
+            fs.invalidate_cache(s3_path)
+            if fs.exists(s3_path):
+                fs.rm(s3_path)
+                fs.invalidate_cache(s3_path)
+                return True
+            return False
+        removed = _s3_call(_rm) or removed
+
+    return removed
+
+
 # ─── File listing (glob) ───────────────────────────────────────────────────
 
 def list_files(local_dir: str, pattern: str = "*",

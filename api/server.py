@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ── trading_api_kit provides: auth, admin, push, user management ──────────────
 from trading_api_kit import create_app, get_current_user
+from trading_api_kit.admin_routes import register_user_delete_hook
 from trading_api_kit.models import User
 from trading_api_kit.push_registry import register_token
 
@@ -25,6 +26,17 @@ app = create_app(
     version="2.0",
     static_dir=Path(__file__).resolve().parent / "static",
 )
+
+
+# A user's portfolio lives only as JSON under scanner_output/portfolio/<user_id>/
+# — the users DB has no portfolio table, so deleting a row cascades to nothing.
+# Without this the book stays behind indistinguishable from a live one.
+def _archive_portfolio_on_delete(user_id: str, email: str) -> None:
+    from auto_portfolio import archive_user_portfolio
+    archive_user_portfolio(user_id)
+
+
+register_user_delete_hook(_archive_portfolio_on_delete)
 
 
 def _clean(obj):
