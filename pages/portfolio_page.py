@@ -751,8 +751,23 @@ def _render_auto_portfolio():
     with col_reset:
         if st.button("🗑️ Reset", key="ap_reset",
                      help="Clear all auto-portfolio positions and history"):
+            st.session_state['ap_confirm_reset'] = True
+
+    if st.session_state.get('ap_confirm_reset'):
+        n_open = len(data.get('positions', []))
+        st.warning(
+            f"This will immediately clear all {n_open} open position(s), capital, "
+            f"and history for this account's auto-portfolio. This cannot be undone. "
+            f"Are you sure?"
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("Yes, reset it", key="ap_reset_yes", type="primary"):
             ap.reset(user_id=_user_id)
+            st.session_state['ap_confirm_reset'] = False
             st.toast("Auto portfolio reset.")
+            st.rerun()
+        if c2.button("Cancel", key="ap_reset_cancel"):
+            st.session_state['ap_confirm_reset'] = False
             st.rerun()
 
     st.divider()
