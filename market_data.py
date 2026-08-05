@@ -404,8 +404,9 @@ class MarketDataHandler:
         return vix
 
     def clear_cache(self):
-        """Clear SPY performance cache"""
+        """Clear all per-session caches (SPY performance + Tension Index series)."""
         self.spy_cache.clear()
+        self.series_cache.clear()
 
 
 def check_liquidity(df: pd.DataFrame, min_dollar_volume: float = 5_000_000) -> bool:
