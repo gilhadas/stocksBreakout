@@ -1799,3 +1799,122 @@ checked. §9 split SWING and VALIDATE by name because those were the ones that h
 alarmed; MONITOR shared the identical structural flaw (three cron lines, one UUID) from
 day one and simply hadn't been caught yet. When a bug shape is identified, grep for every
 other instance of the shape, not just the ones already reported.
+
+## 25. Production migrated off EC2 onto the Oracle box (2026-08-02)
+
+Written 2026-08-05 to close the gap MEMORY.md has flagged since the cutover — §9 above
+still describes the retired EC2 deployment in the present tense. This section documents
+the box actually running production today, verified directly rather than recalled.
+
+### What changed
+Production moved from the AWS EC2 instance (§9, `i-015657f7d29bb673e`) to the **Oracle
+Cloud VM already referenced — and explicitly called "unrelated" — throughout §9's own
+text**: `82.70.210.194` (`il-jerusalem-1`, hostname `instance-20260615-1424`), which since
+2026-06-15 has independently run the separate `daytrade` engine/web/IB-Gateway/Caddy
+stack. That box now runs **both** systems side by side as two independent
+`docker compose` projects:
+
+```
+NAME             STATUS         CONFIG FILES
+daytrade         running(3)     /opt/daytrade/docker-compose.yml
+stocksbreakout   running(6)     /home/ubuntu/stocksBreakout/compose.yaml
+```
+
+`stocksbreakout`'s six containers: `sb-scanner-cron`, `sb-api`, `sb-cloudflared`,
+`sb-tailscale`, `sb-journal` (Trade Journal SPA), and — new since the cutover —
+`sb-dashboard` (the Streamlit admin/scan UI, previously loopback-only via SSH tunnel, now
+also public at `dashboard.gilhadas-stocks.com`, commit `6f631cd`). `deploy/README.md` and
+`deploy/OPERATIONS.md` still describe the old three-container EC2 layout and its IP —
+**both are stale and unrewritten**; treat this section and direct box inspection as
+authoritative until they're updated.
+
+**The EC2 box is stopped, not terminated** — `t3.medium`, `eu-central-1b`, confirmed via
+`aws ec2 describe-instances`. Its `StateTransitionReason` shows a brief manual
+start-then-stop on 2026-08-04 (09:27→09:30 GMT); cause not recorded. Its two CloudWatch
+alarms (`stocksbreakout-instance-check-failed-reboot`,
+`stocksbreakout-system-check-failed-recover`) are both sitting in `ALARM` state, which is
+expected and harmless — their actions (`ec2:reboot`, `ec2:recover`) are no-ops on a
+stopped instance, they do not start it — but it means the AWS console will show red for
+this instance indefinitely, which reads as an active incident to anyone who doesn't know
+the history. Worth an explicit disable or a note if that alarm noise ever gets confusing.
+MEMORY.md's `project_server_deployment_cutover_jul2026` describes the T+7-soak-then-decide
+plan but the follow-through (terminate, or downgrade the instance type, or keep as a cold
+fallback) isn't recorded as done.
+
+### Why Oracle, not just fixing EC2
+Not stated in any commit message, so this is inference, not a documented decision: EC2 had
+just come through three consecutive memory firefighting rounds (§15 OOM-killed cron jobs,
+§16 concurrency, §17 resize to t3.medium) and the Oracle box was already paid for, already
+running, and — per `free -h` on 2026-08-05 — sitting on 11 GiB RAM with under 2 GiB in use,
+roughly 3× the headroom t3.medium ever had. If the actual reason was something else, it
+isn't written down anywhere this session found.
+
+### Architecture is a bigger change than "same containers, new host"
+Oracle's VM is **aarch64**, EC2's was **x86_64** — this was a cross-architecture rebuild,
+not a redeploy. Chain of build fixes, all in git:
+- `eb83fcd` — snapshotted EC2's exact 133-package dependency set
+  (`deploy/constraints-ec2-20260802.txt`) so the ARM rebuild wasn't *also* a 6-week
+  dependency upgrade — two confounded variables at once otherwise.
+- `d63347f` / `26f4264` — wired the constraints into the Dockerfile, then fixed it: the
+  first pass fed the full constraint file to the `torch` install step, whose
+  `--index-url` is scoped to `download.pytorch.org` and can't serve `fsspec` (a torch
+  dependency) at all — `ResolutionImpossible`. Fixed by extracting just the torch line as
+  an explicit target; the full constraint still applies to the normal-PyPI-index step.
+- `5a1bd70` — macOS `tar` had been embedding `._*` AppleDouble sidecars (the
+  `com.apple.provenance` xattr) into the transferred mobile web build; 40 files became
+  105. `.dockerignore` covered `.DS_Store` but not `._*`; they would have been baked into
+  the image and served by `StaticFiles`. Found only because the file count looked wrong.
+- `c8d7140` — the scanner memory cap needed its own re-measurement rather than reusing
+  x86's number, and the result reads as a warning about trusting "peak" under a tight
+  cap (§18–§21's own standing lesson, reconfirmed here): the first ARM run at a 1500m cap
+  measured 1231.8 MB peak; raising the cap to 2048m dropped the *measured* peak to
+  1002.2 MB — the process wasn't using more under pressure, it was thrashing against the
+  ceiling. Real aarch64 working set is within 1.1% of x86's (§21: 1013.6 MB). FinBERT
+  residency is architecture-sensitive on its own (+218.7 MB vs x86, isolated
+  independently across a 256× headline-batch range and flat at every size) but that delta
+  doesn't propagate to whole-scan peak, because peak is a high-water mark, not a sum.
+  Cap landed at 2048m — ~104% headroom over measured peak, still 17% of the box's 11 GiB
+  so the cgroup killer still wins the race against the host killer.
+
+### Access differs from the EC2 playbook — do not carry that guidance over
+§9's EC2 access notes (Tailscale-only, zero-inbound security group, `stocksbreakout-key.pem`)
+**do not apply here**. This session connected all day via plain
+`ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194` on the public IP — Oracle Cloud's
+security list is not configured zero-inbound the way EC2's was. `sb-tailscale` is present
+and running on the box regardless; unclear whether it's load-bearing for anything now that
+direct SSH works, or a carried-over lifeline from the compose file. Two independent SSH
+keys now exist for what is, from the shell's perspective, one machine:
+`~/.ssh/daytrade_oracle` (used throughout this session) and possibly others provisioned
+for the original daytrade deployment — didn't enumerate further, not this task's scope.
+
+### Operational state, verified 2026-08-05
+- **Tunnel**: `deploy/cloudflared/config.yml` on the box routes `gilhadas-stocks.com`,
+  `api.gilhadas-stocks.com`, `journal.gilhadas-stocks.com`, and
+  `dashboard.gilhadas-stocks.com` to their respective compose services over the internal
+  Docker network. A cloudflared footgun is documented inline in `6f631cd`'s commit body:
+  `route dns <name> <hostname>` can silently match the wrong tunnel via a loose prefix
+  match against other tunnels in the account (`stocksbreakout-oracle` matched
+  `stocksbreakout`) — always pass the full UUID, never the name.
+- **Disk alerting exists and was missed by earlier "still open" notes** — §9 and §17 both
+  listed "Docker log-size caps + disk alert" as outstanding. `deploy/disk-alert.sh` (host
+  cron, hourly, `HC_UUID_DISK`) already covers the disk half — confirmed both by the
+  script's existence and a live `up` status on Healthchecks (`disk-space`, last ping
+  2026-08-05T10:00). Docker log-size caps specifically are still unconfirmed.
+- **Swap**: 2 GiB `/swapfile`, created 2026-08-02 — smaller than EC2's `setup-swap.sh` 4 GiB,
+  proportionate to Oracle's much larger base RAM.
+- **Headroom**: 11 GiB RAM (1.6 GiB used), 45 GB disk (17 GB used, 37%) — both far looser
+  than any constraint that drove §15–§21's tuning on EC2. Don't assume that tuning
+  transfers; it was sized for a box with 4–5× less to work with.
+- All Healthchecks monitors for the scanner schedule are green as of this write-up
+  (confirmed while fixing §24) except transient "new" status on the just-created
+  MONITOR_OPEN/MONITOR_CLOSE checks, expected until their first daily ping.
+
+### Still open
+- `deploy/README.md` and `deploy/OPERATIONS.md` describe the retired EC2 layout — need a
+  rewrite for the Oracle box, the two-project coexistence with daytrade, and the six (not
+  three) stocksBreakout containers.
+- EC2's disposition (terminate / downsize / keep as cold fallback) — not decided in
+  writing anywhere this session found.
+- Whether `sb-tailscale` still does anything on Oracle, given direct SSH already works.
+- Docker log-size caps, specifically — disk *space* is covered, log growth is not
+  confirmed either way.
