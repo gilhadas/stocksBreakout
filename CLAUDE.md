@@ -1261,9 +1261,14 @@ Stale files are *retired* into `processed_files` without ever being loaded — n
 which also lets a far-behind book self-heal in a single pass. An explicit `min_date=` still
 overrides, so deliberate backfills are unaffected.
 
-This is a **correctness** fix as much as a performance one: auto_portfolio prices entries at
-TODAY's price (it deliberately distrusts the CSV's `Price` column — HZ1), so admitting a
-weeks-old signal opens a position on a setup that already played out.
+This is a **correctness** fix as much as a performance one. ⚠ Corrected 2026-08-05: this was
+originally written as "entries are priced at TODAY's price" — verified false by a direct call
+(`_fetch_entry_and_current('LSCC', '2026-04-27', ...)` → entry_price=119.23, the 04-27 close,
+vs current_price=138.0 today). Entries backdate to the close on the signal's own date
+(deliberately distrusting the CSV's `Price` column — HZ1); the real correctness risk is that
+`date_added` being backdated makes `days_held` large the instant the position exists, and the
+stop/target are sized off stale volatility. The conclusion — don't admit weeks-old signals —
+still holds, just not for the originally-stated reason.
 
 `tests/test_scan_add_stale_window.py` — 5 tests, mutation-verified (removing the bound fails
 3, including the production shape: positions present + processed_files far behind).
@@ -1439,8 +1444,10 @@ repo currently has four inconsistent local windows (`SIGNAL_MAX_AGE_DAYS=7`,
 `scan_feedback_agent._KEEP_DAYS=7`, `cleanup_outputs.py=30`, `cron-setup.sh=90`) and no S3
 pruning at all.
 
-⚠ **`SIGNAL_MAX_AGE_DAYS` is a correctness bound, not a performance knob.** Entries are
-priced at *today's* price (HZ1), so widening it admits setups that already played out.
+⚠ **`SIGNAL_MAX_AGE_DAYS` is a correctness bound, not a performance knob.** (Corrected
+2026-08-05 — see §18's correction above: entries backdate to the signal's own date, not
+today's; widening the window still admits setups that already played out, via a stale
+`date_added`/`days_held` and stale stop/target sizing, not via a mispriced entry.)
 
 ### Traps found while measuring, worth remembering
 - **A sandbox that maps every user to one book hides this entire class of bug.** The first

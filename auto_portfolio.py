@@ -43,9 +43,18 @@ MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
 # Never admit a signal older than this, and never even load the file.
 # Two reasons, and the correctness one matters more than the performance one:
 #   1. CORRECTNESS — a signal from weeks ago describes a setup that no longer
-#      exists. auto_portfolio prices the entry at TODAY's price (it deliberately
-#      does not trust the CSV's Price column, see HZ1), so admitting a stale
-#      signal opens a position on a breakout that already played out.
+#      exists. Entries are NOT priced at today's price — _fetch_entry_and_current
+#      backdates entry_price to the close on the signal's own date (deliberately
+#      not trusting the CSV's Price column, see HZ1), which is the right price
+#      for that day but the wrong day to be opening a position on: the stop/
+#      target are sized off stale volatility, current_price already reflects
+#      weeks of unrelated drift, and date_added being backdated means days_held
+#      is large from the instant the position is created — a signal that would
+#      have been stopped out weeks ago shows up today as if it just triggered,
+#      possibly already past a MAX_HOLD_BARS threshold on the very next exit
+#      check. Verified 2026-08-05: LSCC signal dated 2026-04-27 backfilled
+#      today resolves entry_price=119.23 (the 04-27 close) vs current_price=
+#      138.0 (today's) — a stale entry wearing today's date, not today's price.
 #   2. COST — scan_and_add's file loop is bounded ONLY by `processed_files`.
 #      list_files() reads S3, so a book whose processed_files is empty or far
 #      behind re-downloads and parses the ENTIRE archive on every run. On

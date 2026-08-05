@@ -18,10 +18,16 @@ The caller-side guard in `scan_and_add_all_users()` does not cover this: it fire
 only when `processed_files` AND `positions` are both empty, so any book holding a
 position falls straight through it.
 
-There is a correctness half too, which outlives the memory issue: auto_portfolio
-prices entries at TODAY's price (it deliberately distrusts the CSV's Price column
-— HZ1), so admitting a weeks-old signal opens a position on a setup that has
-already played out.
+There is a correctness half too, which outlives the memory issue. Entries are NOT
+priced at today's price — _fetch_entry_and_current backdates entry_price to the
+close on the signal's own date (deliberately distrusting the CSV's Price column
+— HZ1), which is the right price for that day but the wrong day to be opening a
+position on: date_added being backdated means days_held is large from the
+instant the position exists, and it can already be past a MAX_HOLD_BARS
+threshold on the very next exit check. See auto_portfolio.py's SIGNAL_MAX_AGE_DAYS
+comment (corrected 2026-08-05, verified against a live yfinance call) for the
+mechanism in full — this docstring previously repeated the same "priced at
+today" misstatement.
 """
 from __future__ import annotations
 
