@@ -1758,3 +1758,44 @@ arm, but the backtests spread entries over many days and never concentrate this 
 - The Oracle migration (2026-08-02) still has no section of its own; §9 describes the
   retired EC2 deployment. Section numbering here does not reserve a slot for it.
 - Issue #3 (R:R ranking) unfixed by design — needs a validated backtest arm.
+- Issue #4 (chart NaN serialization) — fixed same day, `cb40ab1`, deployed.
+
+## 24. `monitor` healthcheck was the SWING/VALIDATE bug a third time (2026-08-05)
+
+Found while working the standing todo list, not from a page. Healthchecks.io reported
+`monitor` down daily after 16:00 ET while supercronic logged every run as succeeded — the
+same disagreement §15 exists to explain, but §15's fix (the `/$?` ping shape) was already
+correctly in place here. This was a different bug wearing the same symptom.
+
+**Root cause:** one UUID (`HC_UUID_MONITOR`) fed three differently-timed crontab lines —
+a single 9:45 ping, a `*/15 10-15` block (10:00–15:45), and a single 16:00 ping — but the
+Healthchecks schedule was `*/15 9-16 * * 1-5`, which expects a *uniform* 15-min cadence
+across the whole 9:00–16:45 range. No 5-field cron expression can say "boundary hours get
+one minute, middle hours get four," so the schedule was structurally unable to match
+reality: it wanted phantom pings at 9:00/9:15/9:30 (before any line fires) and
+16:15/16:30/16:45 (after the last line fires), and flipped down ~2h after every 16:00
+ping, every single day.
+
+This is §9's SWING/VALIDATE bug for the third time — "a shared UUID across genuinely
+different times can't be expressed without either false alarms or a grace window loose
+enough to miss a real outage" — just with three time-shapes sharing one UUID instead of
+two. `HC_UUID_MONITOR` was the one name from §9's original list that was never audited
+for this when the others were split.
+
+**Fix:** same pattern as SWING/SWING_CLOSE and VALIDATE/VALIDATE_LEARN. Split into
+`MONITOR_OPEN` (45 9 * * 1-5), `MONITOR` (retargeted to `*/15 10-15 * * 1-5` — the one
+block that already was a clean single expression), and `MONITOR_CLOSE` (0 16 * * 1-5).
+New UUIDs created via the Healthchecks API, added to the box's `.env` (not committed —
+secrets convention), `docker/crontab` updated, committed (`f12494e`), and deployed via
+`docker compose up -d --build scanner-cron` (env vars and the crontab are both baked into
+the image, so a bare restart would not have picked either up). Verified inside the
+running container, not just from the build log: `env | grep HC_UUID_MONITOR` shows all
+three, and `grep HC_UUID_MONITOR /app/docker/crontab` shows each line pointing at its own
+UUID. `tests/test_crontab_parity.py` has no hardcoded UUID names, so nothing there needed
+updating.
+
+**Lesson:** a fix applied to two instances of a bug does not imply the third instance was
+checked. §9 split SWING and VALIDATE by name because those were the ones that had already
+alarmed; MONITOR shared the identical structural flaw (three cron lines, one UUID) from
+day one and simply hadn't been caught yet. When a bug shape is identified, grep for every
+other instance of the shape, not just the ones already reported.
