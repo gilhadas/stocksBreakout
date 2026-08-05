@@ -4,7 +4,8 @@
 #
 # Secrets are read from environment variables (pass via --env-file .env or compose.yaml):
 #   HC_UUID_LONGTERM, HC_UUID_SWING, HC_UUID_SWING_CLOSE, HC_UUID_DAYTRADE,
-#   HC_UUID_MONITOR, HC_UUID_VALIDATE, HC_UUID_VALIDATE_LEARN
+#   HC_UUID_MONITOR, HC_UUID_MONITOR_OPEN, HC_UUID_MONITOR_CLOSE,
+#   HC_UUID_VALIDATE, HC_UUID_VALIDATE_LEARN
 # Healthcheck pings are skipped silently when UUIDs are not set.
 #
 # PING SHAPE — `cmd >> log 2>&1; curl ".../${UUID}/$?"` (note the `;`, not `&&`).
@@ -21,6 +22,14 @@
 # schedule — a shared UUID across two different times can't be expressed without
 # either false "missed ping" alerts or a grace window loose enough to miss a real
 # outage. See CLAUDE.md section 9 (2026-07-23 reliability pass).
+#
+# MONITOR hit the same bug a third time (found 2026-08-05, CLAUDE.md §24): its
+# single UUID fed THREE differently-timed lines (one ping at 9:45, a 15-min
+# block 10:00-15:45, one ping at 16:00). No single 5-field cron expression can
+# say "boundary hours get one minute, middle hours get four" — HC's schedule
+# expected phantom pings at 9:00/9:15/9:30 and 16:15/16:30/16:45 that no line
+# ever sends, so it went down every day after the last real ping. Split into
+# _OPEN / (bare, now intraday-only) / _CLOSE, same fix as SWING/VALIDATE above.
 #
 # SERIALIZATION — every wide/re-evaluation scan runs under
 #   flock -w 5400 /tmp/sb-heavy-scan.lock
@@ -169,13 +178,13 @@
 30 9 * * 1-5 mv /app/scanner_output/.monitor_alerts.txt /app/scanner_output/.monitor_alerts_$(date +%Y%m%d).txt 2>/dev/null || true
 
 # Weekdays 9:45 AM — First check after open
-45 9 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}/$?" > /dev/null 2>&1 || true
+45 9 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR_OPEN}/$?" > /dev/null 2>&1 || true
 
 # Weekdays 10:00 AM – 3:45 PM — Continuous monitoring every 15 minutes
 */15 10-15 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}/$?" > /dev/null 2>&1 || true
 
 # Weekdays 4:00 PM — Final check at close
-0 16 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR}/$?" > /dev/null 2>&1 || true
+0 16 * * 1-5 cd /app && python3 breakout_scanner.py /dev/null --monitor-portfolio --monitor-auto-portfolio --live --cron --notify >> scanner_output/logs/cron_monitor.log 2>&1; curl -fsS -m 10 --retry 3 "https://hc-ping.com/${HC_UUID_MONITOR_CLOSE}/$?" > /dev/null 2>&1 || true
 
 
 # ============================================================================
