@@ -5,6 +5,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import 'react-native-reanimated';
 import { configure, saveToken } from '../lib/api';
+import { BookProvider } from '../lib/book';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -53,20 +54,22 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={DarkTheme}>
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="login" />
-        <Stack.Screen name="(tabs)" />
-        <Stack.Screen
-          name="buy"
-          options={{
-            headerShown: true,
-            title: 'Add Position',
-            headerStyle: { backgroundColor: '#0f0f23' },
-            headerTintColor: '#fff',
-            presentation: 'modal',
-          }}
-        />
-      </Stack>
+      <BookProvider>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="login" />
+          <Stack.Screen name="(tabs)" />
+          <Stack.Screen
+            name="buy"
+            options={{
+              headerShown: true,
+              title: 'Add Position',
+              headerStyle: { backgroundColor: '#0f0f23' },
+              headerTintColor: '#fff',
+              presentation: 'modal',
+            }}
+          />
+        </Stack>
+      </BookProvider>
     </ThemeProvider>
   );
 }

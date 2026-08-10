@@ -63,7 +63,10 @@ def _portfolio(skipped_overrides=None, position_overrides=None):
 
 
 def _run(monkeypatch, portfolio, notify=False):
-    monkeypatch.setattr(auto_portfolio, 'load', lambda user_id=None: portfolio)
+    # **kwargs, not a fixed signature: load() now also takes `book`, and a stub
+    # that pins today's exact parameter list turns any future signature change
+    # into a TypeError inside the code under test rather than a real failure.
+    monkeypatch.setattr(auto_portfolio, 'load', lambda *a, **k: portfolio)
     return auto_portfolio.suggest_swaps(notify=notify)
 
 

@@ -133,8 +133,19 @@ def _sandbox(tmpdir: str, allow_s3_reads: bool = False) -> None:
     else:
         utils._is_cloud = lambda: False      # no S3 read, no S3 write
 
-    book = os.path.join(tmpdir, 'auto_portfolio.json')
-    ap._portfolio_path_for = lambda user_id=None: book
+    # Mirror the real signature, including `book`. Two reasons this matters:
+    #   1. Every book variant must land on its OWN file inside the sandbox, or a
+    #      sandboxed run of the autoswap book silently reads and writes the
+    #      control book's probe file and the measurement is meaningless.
+    #   2. This is a permanent module-level reassignment, not a monkeypatch — it
+    #      is never restored. Under pytest that leaks into every later test in
+    #      the session, so a lambda pinned to yesterday's parameter list turns
+    #      unrelated tests into TypeErrors. (It did exactly that.)
+    def _sandboxed_path(user_id=None, book=ap.DEFAULT_BOOK):
+        suffix = ap.BOOKS[book or ap.DEFAULT_BOOK]['suffix']
+        return os.path.join(tmpdir, f'auto_portfolio{suffix}.json')
+
+    ap._portfolio_path_for = _sandboxed_path
     ap._ENTRY_CACHE_PATH = os.path.join(tmpdir, 'entry_price_cache.json')
     ap._ENTRY_PRICE_CACHE.clear()
     ap._SPLIT_CACHE.clear()

@@ -1925,3 +1925,146 @@ for the original daytrade deployment — didn't enumerate further, not this task
 - Whether `sb-tailscale` still does anything on Oracle, given direct SSH already works.
 - Docker log-size caps, specifically — disk *space* is covered, log growth is not
   confirmed either way.
+
+## 26. Live swap A/B: two books per user, control vs auto-swap (2026-08-10)
+
+### Why
+Reviewing the skipped-signals list, names like USAR/RDW/SATL/KTOS looked like
+better trades than what the book was holding. Investigation found the machinery
+to detect that already existed — `suggest_swaps()` (auto_portfolio.py) compares
+open positions against skipped signals and has a Telegram branch — but **nothing
+had ever called it on a schedule.** The only cron line was in the *retired*
+`cron_jobs.txt:255`; a fifth instance of the §13 drift class, invisible to
+`tests/test_crontab_parity.py` because `suggest_swaps` was not in `SEMANTIC_FLAGS`.
+
+Whether swapping actually pays is unsettled: §11 measured auto swap-on-skip in
+backtest at **−4.68 Sharpe** (all.txt 2026) with **0 swaps fired** in every
+`spy_plus`/`plus.txt` year — one strongly negative sample and no data elsewhere.
+So rather than ship on a hunch, this runs the experiment live.
+
+### Measured on the live book before building anything (`cf699841`, 14 pos / 62 skipped)
+- `suggest_swaps` returns 3 valid pairs at `fresh_days=30` (JHG→TAN, HOLX→TSEM,
+  STEL→AMRC, improvement ≈23) but **`[]` at the default `fresh_days=5`** — the
+  Aug-4 signals were 6 calendar days old.
+- **The ranking is degenerate.** All 62 skipped entries are `PREMIUM` with `R:R`
+  exactly `2.0`, so `_compute_priority_score` collapses to *pure volume ratio*.
+  USAR/RDW/SATL/KTOS rank **27th/30th/31st/48th of 62** (vol 1.23/1.21/1.18/0.89)
+  behind TAN/TSEM/AMRC/NNE/BETR tied at 65.0 (vol 2.0–2.9). The advisor would
+  never have surfaced the four names that prompted this.
+- `sector` is the literal string `'nan'` on all 62 (it is `str(float('nan'))`);
+  `missed_pnl_pct` is `0.0` on all 62 — written once at scan time, never refreshed.
+
+### Architecture: a `book` dimension beside `user_id`
+Books are FILES keyed by user_id in the path (§23.1 — no portfolio table), so a
+variant is a second filename in the same per-user directory, resolved by the one
+seam `_portfolio_path_for(user_id, book)`:
+
+```
+scanner_output/portfolio/<user_id>/auto_portfolio.json            # control  (UNCHANGED)
+scanner_output/portfolio/<user_id>/auto_portfolio_autoswap.json   # variant
+```
+
+`BOOKS` registry carries `suffix` / `label` / `auto_swap` / `max_swaps_per_day`.
+**The control book's suffix is `''`** — every caller that omits `book=` resolves
+to exactly the file it always did. `utils._to_s3_key` derives the S3 key from the
+path, so the variant mirrors to S3 with no extra wiring. `book` is threaded
+through ~19 functions; `get_summary(data)` stays pure and is the A/B primitive.
+
+### ⚠ Two landmines the book dimension exposed, both fixed
+1. **`recalculate` backed the book up onto itself.** The backup path was built by
+   `_portfolio_path_for(user_id).replace('auto_portfolio.json', 'pre_recalculate_…')`.
+   For any book NOT named `auto_portfolio.json` the substring is absent, `.replace`
+   is a no-op, `backup_path == live_path`, and the "backup" overwrites the book it
+   protects — immediately before an unrecoverable reset. Now derived from the
+   resolver, with an equality guard. Pinned by `test_recalculate_backup_path.py`.
+2. **`add_position_direct` bypasses `_save`** (it needs load/dedup/save inside one
+   lock) and re-derived the path itself. Unfixed, a swap would close in one book
+   and open its replacement in the other.
+
+### ⚠ Automated swaps are priced CLOSE-basis, human swaps stay LIVE
+`execute_swap` priced both legs with `_fetch_live_price` — the last row of a 2-day
+history, i.e. **today's partial bar** before 16:00 ET. Correct for a human
+clicking Swap (they intend a live fill); a confound for the automated arm, which
+would then differ from control in *how exits are priced* as well as *whether
+swaps happen* — reintroducing the intraday exit the champion validation rejected
+(§12 Task 1; restore isolation measured low-based at 2022 −24.8% vs −10.75%).
+New `price_basis` arg: `'live'` default, `'close'` for the automated path.
+
+### What was built
+- **`fork_books.py`** — clones control → variant so both arms start byte-identical,
+  stamps `fork` in both, refuses to overwrite without `--force` (a silent re-fork
+  would reset a running experiment undetectably). ⚠ **Run it on the production
+  box**: the local `users.db` is the stale Mac artifact and still lists a user
+  deleted 2026-08-04, so a local run would resurrect their book in live S3.
+- **Auto-swap stage** — tail of `scan_and_add`, branching on the registry:
+  control advises (Telegram), autoswap executes ≤3/day. Isolated in try/except —
+  the scan has already saved the day's signals and must not die for a swap bug.
+  Per-book daily stamp for dedup (Notifier's cache is a single global file keyed
+  on subject, so it would let one book suppress another).
+- **`_record_equity_point`** — the auto book had no time series at all. One point
+  per day per book, idempotent (refresh runs 10:00 and 15:45; duplicated days
+  deflate volatility and *inflate* Sharpe).
+- **`book_compare.py`** + `swap_ledger.jsonl` — per-swap counterfactual is the
+  **primary readout**: both books trade the same signals on the same days, so
+  their curves are highly correlated and the equity delta needs months. "Was THIS
+  swap right?" is readable in weeks.
+- **UI** — Streamlit book selector + `pages/compare_page.py` (new "Compare" page);
+  mobile `BookProvider` (the app's first React context) + segmented switcher +
+  Compare tab. Mobile comparison is deliberately a **numeric table**: no chart
+  library is installed and adding one to answer a question the numbers answer is
+  not worth the dependency.
+- **API** — `book` on every portfolio endpoint (query param on GETs, optional
+  Pydantic field on POSTs), plus `/portfolio/books` and `/portfolio/compare`.
+  An unknown book is a **400, never a silent fallback** — a typo'd
+  `?book=autoswapp` returning control data would be read as the variant.
+
+### Two unrelated bugs found and fixed on the way
+- **`api/server.py` never imported `os`** yet called `os.getenv` at two places →
+  `NameError` at runtime in `/analyze/chat` and `/analyze/llm-status`.
+- **`debug_memory_scan._sandbox` leaked across the pytest session.** It patches
+  by plain assignment (correct for a CLI run, wrong under pytest) and was never
+  restored, so its `_portfolio_path_for` stub survived into later suites and
+  failed them with a TypeError the moment the real function grew a parameter. It
+  also mapped every book to one probe file. Now signature-faithful and per-book,
+  with a restoring fixture in `tests/test_memory_trace.py`.
+
+### Tests: 728 pass (was 653 pass / 8 fail)
+7 new files, 63 new tests, each mutation-verified. Mutations confirmed to fail:
+drop `book=` from any `execute_swap` internal call · `add_position_direct`
+resolving without `book` · control suffix made non-empty · unknown book silently
+defaulting · equity point appending instead of overwriting · control set to
+auto-swap · automated path priced live · fork overwriting without `--force` ·
+swap cap ignored · swap-stage exception not isolated · the scan-skipped-nothing
+guard removed · `notify` ignored · the `.replace` backup landmine restored · a
+`suggest_swaps` line added to `docker/crontab`.
+
+⚠ **Two of these tests were vacuous on the first pass** and only caught by the
+mutations failing to fail: the error-isolation test never reached the swap stage
+(the guard needs `skipped_cap or skipped_cash` non-empty), and the
+scan-skipped-nothing test hit `scan_and_add`'s early return at the no-files
+branch instead. Both now assert the path was actually exercised —
+`files_scanned == 1`, `skipped_cash >= 1` — before asserting the behaviour.
+
+`tests/test_refresh_prices_all_users.py` was updated deliberately: the
+`*_all_users` contract genuinely changed to user × book, so its assertions had to
+encode the new contract rather than be worked around.
+
+### Deploy order (nothing is live until this runs)
+```bash
+ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194
+cd ~/stocksBreakout && git pull --ff-only && docker compose up -d --build api scanner-cron dashboard
+python3 fork_books.py --dry-run     # then without --dry-run
+```
+`--build` is mandatory — code is baked into the image (§5a).
+
+### Open
+- The degenerate ranking is **not fixed** — the advisor still ranks skipped
+  signals by volume alone when quality and R:R tie, which is the normal case.
+  Enriching `_compute_priority_score` (Dist/RSI/Minervini) was scoped and
+  deliberately deferred; it changes what is advised, not how the A/B works.
+- `skipped_cash` has no symbol dedup on append, so a symbol signalled on two days
+  appears twice. `used_skipped` dedups within a run, so suggestions are unaffected.
+- `missed_pnl_pct` is still frozen at write time — the momentum gate is inert for
+  same-day candidates (legitimately 0) and stale for older ones.
+- Notifier still has no per-user routing: every book lands in the same Telegram
+  chat. The daily stamp bounds it at 2 sends/book/day; more books need chat IDs.

@@ -219,7 +219,10 @@ def test_scan_and_add_is_silent_when_tracing_is_off(monkeypatch, caplog):
     import utils
 
     monkeypatch.setattr(utils, 'list_files', lambda *a, **k: [])
-    monkeypatch.setattr(ap, 'load', lambda user_id=None: ap._empty())
+    # **kwargs, not a fixed signature — load() also takes `book` now, and a stub
+    # pinned to today's parameter list fails as a TypeError inside the code under
+    # test rather than as a real assertion failure.
+    monkeypatch.setattr(ap, 'load', lambda *a, **k: ap._empty())
 
     with caplog.at_level(logging.DEBUG, logger='memtrace'):
         ap.scan_and_add(user_id='__unit_test__', notify=False)
@@ -232,7 +235,34 @@ def test_scan_and_add_is_silent_when_tracing_is_off(monkeypatch, caplog):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_harness_sandbox_blocks_s3_and_project_writes(tmp_path, monkeypatch):
+@pytest.fixture
+def restore_sandbox_patches():
+    """Undo `_sandbox`'s module-level reassignments after the test.
+
+    `debug_memory_scan._sandbox` patches by plain assignment, not monkeypatch —
+    correct for a standalone CLI run, but under pytest the patches survive into
+    every later test in the session. That leaked `_portfolio_path_for` stub into
+    unrelated suites and failed them with a TypeError as soon as the real
+    function grew a `book` parameter. Save and restore the attributes it owns.
+    """
+    import auto_portfolio as ap
+    import utils
+
+    saved = {
+        (ap, '_portfolio_path_for'): ap._portfolio_path_for,
+        (ap, '_ENTRY_CACHE_PATH'):   ap._ENTRY_CACHE_PATH,
+        (utils, '_is_cloud'):        utils._is_cloud,
+        (utils, 'save_json'):        utils.save_json,
+    }
+    try:
+        yield
+    finally:
+        for (mod, name), val in saved.items():
+            setattr(mod, name, val)
+
+
+def test_harness_sandbox_blocks_s3_and_project_writes(tmp_path, monkeypatch,
+                                                      restore_sandbox_patches):
     """The replay harness must not be able to touch S3 or scanner_output/.
 
     Reproduces the real failure: without this, `_save` mirrors the probe book to
@@ -253,8 +283,15 @@ def test_harness_sandbox_blocks_s3_and_project_writes(tmp_path, monkeypatch):
     assert 'scanner_output' not in book_path, 'probe book still lands in the project'
     assert str(tmp_path) in ap._ENTRY_CACHE_PATH
 
+    # Each book variant needs its own sandbox file, or a sandboxed run of one
+    # book silently reads and writes another's probe state.
+    paths = {b: ap._portfolio_path_for('any-user', b) for b in ap.BOOKS}
+    assert len(set(paths.values())) == len(paths), f'books share a probe file: {paths}'
+    assert all(str(tmp_path) in p for p in paths.values())
 
-def test_harness_stubs_remove_every_network_call(tmp_path, monkeypatch):
+
+def test_harness_stubs_remove_every_network_call(tmp_path, monkeypatch,
+                                                restore_sandbox_patches):
     """An arm that reaches yfinance measures latency, not memory — and never ends."""
     import auto_portfolio as ap
     import debug_memory_scan as dbg

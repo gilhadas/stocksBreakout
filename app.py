@@ -173,7 +173,7 @@ if not check_auth():
 st.sidebar.title("Breakout Scanner")
 
 # Handle programmatic page switches (from Chart/Back buttons)
-_pages = ["Portfolio", "Scan", "Signals", "Chart", "Backtest", "Watchlists"]
+_pages = ["Portfolio", "Compare", "Scan", "Signals", "Chart", "Backtest", "Watchlists"]
 _next = st.session_state.pop('_next_page', None)
 if _next and _next in _pages:
     st.session_state['nav_radio'] = _next
@@ -193,6 +193,9 @@ elif page == "Signals":
 elif page == "Portfolio":
     from pages.portfolio_page import render_portfolio_page
     render_portfolio_page()
+elif page == "Compare":
+    from pages.compare_page import render_compare_page
+    render_compare_page()
 elif page == "Chart":
     from pages.chart_page import render_chart_page
     render_chart_page()

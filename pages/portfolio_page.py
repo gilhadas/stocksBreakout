@@ -547,15 +547,48 @@ def _render_auto_portfolio():
         "Stops auto-close positions. No duplicates — each ticker enters once while open."
     )
 
-    data = ap.load(user_id=_user_id)
+    # ── Book selector (live control-vs-autoswap A/B) ──
+    # Everything below this line is book-scoped, so the widget sits above the
+    # metrics: changing it re-runs the page against the other book.
+    _book_names = list(ap.BOOKS)
+    if len(_book_names) > 1:
+        _bcol, _icol = st.columns([1.2, 3])
+        with _bcol:
+            _book = st.selectbox(
+                "Book",
+                _book_names,
+                format_func=lambda b: ap.BOOKS[b]['label'],
+                key='ap_book',
+                help="Two books run off the same signal stream. 'Control' only "
+                     "suggests swaps; 'Auto-swap' executes them. Compare on the "
+                     "Compare page.",
+            )
+        with _icol:
+            if ap.BOOKS[_book]['auto_swap']:
+                st.info(
+                    f"⚡ This book AUTO-EXECUTES up to "
+                    f"{ap.BOOKS[_book]['max_swaps_per_day']} swap(s)/day. "
+                    "It is the experiment's treatment arm — expect it to differ "
+                    "from Control.",
+                    icon="⚡",
+                )
+    else:
+        _book = ap.DEFAULT_BOOK
 
-    # Auto-refresh prices on page load (at most once per 5 minutes)
-    _REFRESH_KEY = '_ap_last_refresh'
+    data = ap.load(user_id=_user_id, book=_book)
+
+    _fork = (data.get('fork') or {}).get('date')
+    if _fork:
+        st.caption(f"Forked {_fork} — comparison metrics count from that date only.")
+
+    # Auto-refresh prices on page load (at most once per 5 minutes).
+    # Throttle key is per-book: refreshing Control must not mark Auto-swap fresh.
+    _REFRESH_KEY = f'_ap_last_refresh_{_book}'
     import time as _time
     _now = _time.time()
     if data['positions'] and (_now - st.session_state.get(_REFRESH_KEY, 0)) > 300:
         try:
-            result = ap.refresh_prices(user_id=_user_id)
+            result = ap.refresh_prices(user_id=_user_id, book=_book)
             data = result['data']
             st.session_state[_REFRESH_KEY] = _now
         except Exception:
@@ -619,7 +652,7 @@ def _render_auto_portfolio():
         if st.button("📥 Scan Signals", key="ap_scan",
                      help="Add new V9-C signals not yet in portfolio (from date if filter set)"):
             with st.spinner("Scanning signal files..."):
-                result = ap.scan_and_add(min_date=scan_min_date, position_pct=pos_pct, user_id=_user_id)
+                result = ap.scan_and_add(min_date=scan_min_date, position_pct=pos_pct, user_id=_user_id, book=_book)
             data    = result['data']
             summary = ap.get_summary(data)
             if result['added']:
@@ -639,7 +672,7 @@ def _render_auto_portfolio():
         if st.button("♻️ Recalculate", key="ap_recalc",
                      help="Reset portfolio and rescan ALL signals with selected position size & date filter"):
             with st.spinner(f"Recalculating with {pos_pct_label}..."):
-                result = ap.recalculate(position_pct=pos_pct, min_date=scan_min_date, user_id=_user_id)
+                result = ap.recalculate(position_pct=pos_pct, min_date=scan_min_date, user_id=_user_id, book=_book)
             data    = result['data']
             summary = ap.get_summary(data)
             st.toast(
@@ -655,7 +688,7 @@ def _render_auto_portfolio():
         if st.button("🔄 Refresh & Check Stops", key="ap_refresh",
                      help="Fetch current prices; auto-close if initial stop hit"):
             with st.spinner("Fetching prices..."):
-                result = ap.refresh_prices(user_id=_user_id)
+                result = ap.refresh_prices(user_id=_user_id, book=_book)
             data    = result['data']
             summary = ap.get_summary(data)
             if result['closed']:
@@ -668,7 +701,7 @@ def _render_auto_portfolio():
         if st.button("📈 Simulate Trailing Stops", key="ap_trail",
                      help=f"Walk every day since entry; close on trailing stop hit ({int(ap.TRAIL_PCT*100)}% from high)"):
             with st.spinner("Simulating trailing stops..."):
-                result = ap.simulate_trailing_stops(user_id=_user_id)
+                result = ap.simulate_trailing_stops(user_id=_user_id, book=_book)
             data    = result['data']
             summary = ap.get_summary(data)
             if result['closed']:
@@ -683,7 +716,7 @@ def _render_auto_portfolio():
                      help=f"Re-scan the last {_missed_days} days of signal files for "
                           f"V9-C signals never taken (missed opportunities)"):
             with st.spinner(f"Scanning the last {_missed_days} days for missed trades..."):
-                result = ap.rebuild_skipped_cash(user_id=_user_id)
+                result = ap.rebuild_skipped_cash(user_id=_user_id, book=_book)
             data    = result['data']
             summary = ap.get_summary(data)
             st.toast(f"Found {result['found']} missed trade(s).")
@@ -693,7 +726,7 @@ def _render_auto_portfolio():
         if st.button("⚡ Swap Advisor", key="ap_swap",
                      help="Find skipped signals that could replace weaker open positions"):
             with st.spinner("Analysing swap opportunities..."):
-                swaps = ap.suggest_swaps(notify=True, user_id=_user_id)
+                swaps = ap.suggest_swaps(notify=True, user_id=_user_id, book=_book)
             st.session_state['ap_swap_results'] = swaps
             if swaps:
                 st.toast(f"Found {len(swaps)} swap suggestion(s).")
@@ -720,7 +753,7 @@ def _render_auto_portfolio():
                     f"R:R {_sw.get('open_rr', 0):.2f}{_upside_pct}"
                 )
                 if _c3.button("Execute", key=f"ap_exec_swap_{_i}_{_sw['close_symbol']}_{_sw['open_symbol']}"):
-                    _res = ap.execute_swap(_sw['close_symbol'], _sw['open_symbol'], user_id=_user_id)
+                    _res = ap.execute_swap(_sw['close_symbol'], _sw['open_symbol'], user_id=_user_id, book=_book)
                     if _res.get('ok'):
                         st.session_state['ap_swap_last_undo'] = True
                         st.session_state['ap_swap_results'] = [
@@ -738,7 +771,7 @@ def _render_auto_portfolio():
 
             if st.session_state.get('ap_swap_last_undo'):
                 if st.button("↩️ Undo last swap", key="ap_swap_undo"):
-                    _u = ap.undo_last_swap(user_id=_user_id)
+                    _u = ap.undo_last_swap(user_id=_user_id, book=_book)
                     if _u.get('ok'):
                         st.session_state['ap_swap_last_undo'] = False
                         st.toast(
@@ -762,7 +795,7 @@ def _render_auto_portfolio():
         )
         c1, c2 = st.columns(2)
         if c1.button("Yes, reset it", key="ap_reset_yes", type="primary"):
-            ap.reset(user_id=_user_id)
+            ap.reset(user_id=_user_id, book=_book)
             st.session_state['ap_confirm_reset'] = False
             st.toast("Auto portfolio reset.")
             st.rerun()

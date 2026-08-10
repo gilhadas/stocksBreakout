@@ -1891,27 +1891,47 @@ Examples:
                 from api.models import User as _User
                 _db = next(_get_db())
                 _users = _db.query(_User).all()
+                # Every user holds one book per BOOKS entry (control + autoswap).
+                # Exit evaluation is advisory — the actual auto-close happens in
+                # refresh_prices — so one verdict per SYMBOL is still correct; the
+                # book only affects who is told about it.
                 for _user in _users:
-                    _ap_data = auto_portfolio.load(user_id=_user.id)
-                    for pos in _ap_data.get('positions', []):
-                        sym = pos['symbol']
-                        # Dedup: add to exit list only once
-                        if sym not in existing_symbols:
-                            mode = pos.get('mode', 'swing')
-                            exit_positions.append({
-                                'symbol': sym,
-                                'mode': mode,
-                                'entry': pos['entry_price'],
-                                'entry_date': pos.get('date_added', ''),
-                                'stop': pos['stop'],
-                                'target': pos['target'],
-                                'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
-                                'quality': pos.get('quality', 'PREMIUM'),
-                            })
-                            existing_symbols.add(sym)
-                        symbol_to_users.setdefault(sym, []).append(
-                            {'email': _user.email, 'user_id': _user.id}
-                        )
+                    for _book in auto_portfolio.BOOKS:
+                        _ap_data = auto_portfolio.load(user_id=_user.id, book=_book)
+                        for pos in _ap_data.get('positions', []):
+                            sym = pos['symbol']
+                            # Dedup: add to exit list only once
+                            if sym not in existing_symbols:
+                                mode = pos.get('mode', 'swing')
+                                exit_positions.append({
+                                    'symbol': sym,
+                                    'mode': mode,
+                                    'entry': pos['entry_price'],
+                                    'entry_date': pos.get('date_added', ''),
+                                    'stop': pos['stop'],
+                                    'target': pos['target'],
+                                    'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
+                                    'quality': pos.get('quality', 'PREMIUM'),
+                                })
+                                existing_symbols.add(sym)
+                            # One entry per (symbol, user) — NOT per book.
+                            # Notifier.send_exit_notification appends a signal
+                            # once per matching entry (notifier.py:540-542), so
+                            # a second entry for the same user would list the
+                            # same position twice in their exit email. Which
+                            # books hold it is recorded on the single entry.
+                            _entry = next(
+                                (u for u in symbol_to_users.setdefault(sym, [])
+                                 if u['user_id'] == _user.id),
+                                None,
+                            )
+                            if _entry is None:
+                                symbol_to_users[sym].append(
+                                    {'email': _user.email, 'user_id': _user.id,
+                                     'books': [_book]}
+                                )
+                            elif _book not in _entry['books']:
+                                _entry['books'].append(_book)
             except Exception as _e:
                 logger.warning(f"Multi-user portfolio load failed, falling back to default: {_e}")
                 _ap_data = auto_portfolio.load()

@@ -58,6 +58,7 @@ async function exportSkippedCSV(rows: any[]) {
 }
 import { useFocusEffect, router } from 'expo-router';
 import { fetchPortfolio, refreshPortfolio, fetchSkipped, suggestSwaps, fetchSwapSuggestions, executeSwap, undoSwap, getToken, clearToken, resetPortfolio, recalculatePortfolio, getEmailFromToken } from '../../lib/api';
+import { useBook } from '../../lib/book';
 import SummaryBar from '../../components/SummaryBar';
 import PositionCard from '../../components/PositionCard';
 
@@ -182,6 +183,7 @@ function SkippedCard({ item }: { item: any }) {
 }
 
 export default function PortfolioScreen() {
+  const { book, setBook, books, ready: bookReady } = useBook();
   const [activeTab, setActiveTab] = useState<'positions' | 'history' | 'skipped'>('positions');
   const [positions, setPositions] = useState<any[]>([]);
   const [closed, setClosed] = useState<any[]>([]);
@@ -208,7 +210,7 @@ export default function PortfolioScreen() {
       const token = await getToken();
       if (!token) { router.replace('/login'); return; }
       getEmailFromToken().then(e => setUserEmail(e));
-      const [data, skippedData] = await Promise.all([fetchPortfolio(), fetchSkipped()]);
+      const [data, skippedData] = await Promise.all([fetchPortfolio(book), fetchSkipped(book)]);
       setPositions(data.positions || []);
       setClosed(
         (data.closed || []).sort((a: any, b: any) =>
@@ -228,18 +230,25 @@ export default function PortfolioScreen() {
     }
     // Silently pre-load swap suggestions so banner is visible without scrolling
     try {
-      const swapData: any = await fetchSwapSuggestions();
+      const swapData: any = await fetchSwapSuggestions(book);
       if (swapData.swaps?.length > 0) setSwapResults(swapData.swaps);
     } catch { /* non-critical */ }
     setLoading(false);
-  }, []);
+    // `book` is a real dependency: without it the callback closes over the book
+    // that was active when the screen first mounted and every later fetch —
+    // including the focus refetch — silently targets the wrong book.
+  }, [book]);
 
-  useFocusEffect(useCallback(() => { loadData(); }, [loadData]));
+  useFocusEffect(useCallback(() => {
+    // Wait for the stored preference; fetching first would hit the default book
+    // and be immediately superseded, which reads as a flicker between books.
+    if (bookReady) loadData();
+  }, [loadData, bookReady]));
 
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const [data, skippedData] = await Promise.all([refreshPortfolio(), fetchSkipped()]);
+      const [data, skippedData] = await Promise.all([refreshPortfolio(book), fetchSkipped(book)]);
       setPositions(data.positions || []);
       setClosed(
         (data.closed || []).sort((a: any, b: any) =>
@@ -263,7 +272,7 @@ export default function PortfolioScreen() {
     setSwapResults(null);
     setSwapToast(null);
     try {
-      const result = await suggestSwaps();
+      const result = await suggestSwaps(book);
       setSwapResults(result.swaps || []);
     } catch (e: any) {
       setSwapResults([]);
@@ -277,7 +286,7 @@ export default function PortfolioScreen() {
     setExecutingSwap(key);
     setSwapToast(null);
     try {
-      const result = await executeSwap(closeSym, openSym);
+      const result = await executeSwap(closeSym, openSym, book);
       // Drop the executed pair from the inline list so it can't be clicked again
       setSwapResults((prev) =>
         prev ? prev.filter((s) => !(s.close_symbol === closeSym && s.open_symbol === openSym)) : prev
@@ -299,7 +308,7 @@ export default function PortfolioScreen() {
 
   const handleUndoSwap = async () => {
     try {
-      await undoSwap();
+      await undoSwap(book);
       setSwapToast({ msg: 'Swap undone.', canUndo: false, kind: 'ok' });
       await loadData();
       setTimeout(() => setSwapToast(null), 3000);
@@ -333,9 +342,9 @@ export default function PortfolioScreen() {
     setManageBusy(true);
     try {
       if (action === 'recalculate') {
-        await recalculatePortfolio(manageDate.trim() || undefined);
+        await recalculatePortfolio(manageDate.trim() || undefined, undefined, book);
       } else {
-        await resetPortfolio();
+        await resetPortfolio(book);
       }
       await loadData();
       setShowManage(false);
@@ -352,8 +361,33 @@ export default function PortfolioScreen() {
     : 0;
   const winRate = closed.length > 0 ? ((wins / closed.length) * 100).toFixed(1) : '0';
 
+  const activeBook = books.find(b => b.name === book);
+
   return (
     <View style={styles.container}>
+      {/* Book switcher — hidden until the server reports more than one book, so
+          a single-book deployment looks exactly as it did before the A/B. */}
+      {books.length > 1 && (
+        <View style={styles.bookRow}>
+          {books.map(b => (
+            <Pressable
+              key={b.name}
+              style={[styles.bookBtn, book === b.name && styles.bookBtnActive]}
+              onPress={() => setBook(b.name)}
+            >
+              <Text style={[styles.bookBtnText, book === b.name && styles.bookBtnTextActive]}>
+                {b.auto_swap ? '⚡ ' : ''}{b.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+      {activeBook?.auto_swap && (
+        <Text style={styles.bookNote}>
+          This book auto-executes up to {activeBook.max_swaps_per_day} swap(s)/day.
+        </Text>
+      )}
+
       {summary && <SummaryBar summary={summary} />}
 
       {/* Sub-tab switcher */}
@@ -600,6 +634,38 @@ const styles = StyleSheet.create({
   updated: { color: '#555', fontSize: 11 },
   logout: { color: '#ef4444', fontSize: 13 },
 
+  bookRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    gap: 8,
+  },
+  bookBtn: {
+    flex: 1,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2a2a4a',
+    alignItems: 'center',
+  },
+  bookBtnActive: {
+    backgroundColor: '#2a2a4a',
+    borderColor: '#4a9eff',
+  },
+  bookBtnText: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  bookBtnTextActive: {
+    color: '#fff',
+  },
+  bookNote: {
+    color: '#c9a227',
+    fontSize: 11,
+    paddingHorizontal: 14,
+    paddingTop: 6,
+  },
   tabRow: {
     flexDirection: 'row', backgroundColor: '#1a1a2e',
     padding: 6, gap: 6, marginHorizontal: 12, marginVertical: 8, borderRadius: 10,
