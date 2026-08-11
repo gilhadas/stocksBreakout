@@ -678,6 +678,17 @@ def _render_auto_portfolio():
                 st.toast(f"Added: {', '.join(result['added_symbols'])}")
             else:
                 st.toast("No new signals found.")
+            # A clamped window narrows the scan silently — without this it is
+            # indistinguishable from "that date range genuinely had no signals".
+            _clamped = result.get('stale_clamped')
+            if _clamped:
+                st.warning(
+                    f"Scanned from **{_clamped['applied']}**, not "
+                    f"{_clamped['requested']} — signals older than "
+                    f"{ap.SIGNAL_MAX_AGE_DAYS} days are not admitted to a live book "
+                    f"(they would enter with a backdated hold time and a stop sized "
+                    f"off stale volatility). Use Recalculate to rebuild from history."
+                )
             msgs = []
             if result['skipped_dup']:
                 msgs.append(f"{result['skipped_dup']} already open")

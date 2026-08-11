@@ -526,7 +526,8 @@ def scan_and_add(min_date: str | None = None,
                  user_id: str | None = None,
                  notify: bool = True,
                  book: str | None = DEFAULT_BOOK,
-                 user_label: str | None = None) -> dict:
+                 user_label: str | None = None,
+                 allow_stale: bool = False) -> dict:
     """
     Scan signal CSV files and add new V9-H signals.
 
@@ -542,8 +543,15 @@ def scan_and_add(min_date: str | None = None,
             - With min_date: process ALL files on or after min_date, regardless
               of whether they were previously processed. This lets you "re-scan
               from a date" and pick up signals you might have missed.
+            - Still bounded by SIGNAL_MAX_AGE_DAYS unless allow_stale=True; a
+              min_date older than that is clamped, logged, and reported back as
+              result['stale_clamped'].
         position_pct: Position size as a fraction of initial capital (e.g. 0.05
             for 5%, 0.10 for 10%). Defaults to POSITION_SIZE_PCT (10%).
+        allow_stale: Let min_date reach past the SIGNAL_MAX_AGE_DAYS bound. Only
+            for deliberate history rebuilds (recalculate); admitting weeks-old
+            signals into a live book backdates date_added and sizes stops off
+            stale volatility.
     Returns summary dict with counts.
     """
     import pandas as pd
@@ -585,6 +593,30 @@ def scan_and_add(min_date: str | None = None,
     stale_cutoff = (datetime.now(_NY_TZ).date()
                     - timedelta(days=SIGNAL_MAX_AGE_DAYS)).isoformat()
     stale_retired = 0
+
+    # `min_date` overrides the `processed` BOOKMARK — that is what "re-scan from a
+    # date" means and what backfills need. It must not silently also override the
+    # AGE BOUND, which is a correctness guard, not an optimisation (§20): a
+    # weeks-old signal admitted today gets a backdated `date_added` (so `days_held`
+    # is large the instant the position exists) and a stop/target sized off stale
+    # volatility. The two were one branch, so any min_date bypassed both.
+    #
+    # The reachable path was not hypothetical: pages/portfolio_page.py's "Filter by
+    # date" picker defaults to the FIRST OF THE CURRENT MONTH and allows back to
+    # 2023 — so "Scan Signals" with the box ticked on the 20th backfilled 19 days
+    # of stale signals into a live book, with no warning.
+    #
+    # Callers that genuinely rebuild history (recalculate) pass allow_stale=True.
+    stale_clamped = None
+    if min_date and not allow_stale and min_date < stale_cutoff:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            f"scan_and_add: min_date={min_date} is older than the "
+            f"{SIGNAL_MAX_AGE_DAYS}d signal age bound — clamping to {stale_cutoff}. "
+            f"Pass allow_stale=True to admit signals older than this on purpose."
+        )
+        stale_clamped = {'requested': min_date, 'applied': stale_cutoff}
+        min_date = stale_cutoff
 
     files_by_date: dict[str, list[str]] = {}
     for fname in all_fnames:
@@ -998,7 +1030,7 @@ def scan_and_add(min_date: str | None = None,
               skipped_cash=len(data.get('skipped_cash', [])))
 
     return _build_result(added_syms, skipped_dup, skipped_cash,
-                         skipped_no_v9c, files_scanned, data)
+                         skipped_no_v9c, files_scanned, data, stale_clamped)
 
 
 def _queue_ib_order(pos: dict):
@@ -1488,7 +1520,7 @@ def _find_stop_hit_date(symbol: str, stop: float,
     return fallback
 
 
-def _build_result(added, dup, cash, no_v9c, files, data):
+def _build_result(added, dup, cash, no_v9c, files, data, stale_clamped=None):
     return {
         'added':           len(added),
         'added_symbols':   added,
@@ -1497,6 +1529,10 @@ def _build_result(added, dup, cash, no_v9c, files, data):
         'skipped_cash_syms': cash,
         'skipped_no_v9c':  no_v9c,
         'files_scanned':   files,
+        # {'requested': ..., 'applied': ...} when a min_date was pulled forward to
+        # the age bound, else None. Returned rather than only logged so the caller
+        # can say so — a silently narrowed window looks identical to "no signals".
+        'stale_clamped':   stale_clamped,
         'data':            data,
     }
 
@@ -2568,7 +2604,13 @@ def recalculate(position_pct: float = POSITION_SIZE_PCT,
     save_json(pre_reset, backup_path)
 
     reset(user_id=user_id, book=book)
-    result = scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id, notify=False, book=book)
+    # allow_stale=True: this call exists to rebuild a book from history, so the
+    # SIGNAL_MAX_AGE_DAYS bound must not apply — clamping it would silently
+    # produce exactly the thin rebuild the docstring above warns about (the
+    # 2026-07-17 incident). scan_and_add's default stays False so the ordinary
+    # "Scan Signals + date filter" path cannot backfill stale signals unnoticed.
+    result = scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id,
+                          notify=False, book=book, allow_stale=True)
     _save_entry_price_cache()
 
     result['backup_path'] = backup_path

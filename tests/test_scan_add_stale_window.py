@@ -181,18 +181,91 @@ def test_a_book_with_positions_but_empty_processed_is_still_bounded(monkeypatch)
     assert loaded == [], f"replayed {len(loaded)} archived file(s) despite the age bound"
 
 
-def test_explicit_min_date_still_overrides_the_window(monkeypatch):
-    """Deliberate backfills pass min_date=; the bound must not silently break them."""
-    old = [_fname(_days_ago(n)) for n in (100, 90)]
-    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: list(old))
-
+def _stub_archive(monkeypatch, fnames):
+    """Point scan_and_add at `fnames` and record which ones get loaded."""
+    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: list(fnames))
     loaded = []
     monkeypatch.setattr(utils, 'load_data', lambda p: loaded.append(p) or None)
-
     book = ap._empty()
     monkeypatch.setattr(ap, 'load', lambda **k: book)
     monkeypatch.setattr(ap, '_save', lambda *a, **k: None)
+    return loaded
+
+
+def test_explicit_min_date_still_overrides_the_window(monkeypatch):
+    """Deliberate backfills pass min_date + allow_stale; the bound must not break them."""
+    old = [_fname(_days_ago(n)) for n in (100, 90)]
+    loaded = _stub_archive(monkeypatch, old)
+
+    ap.scan_and_add(min_date=_days_ago(365), allow_stale=True)
+    assert len(loaded) == len(old), (
+        "min_date + allow_stale must still reach old files — backfill is a supported flow")
+
+
+# ── min_date must not silently bypass the AGE bound as well as the bookmark ──
+#
+# One branch used to do both jobs, so any min_date turned off the age guard too.
+# That was reachable from the UI without anyone opting in: the "Filter by date"
+# picker defaults to the FIRST OF THE CURRENT MONTH, so ticking it and pressing
+# "Scan Signals" late in the month backfilled weeks-old signals into a live book.
+
+def test_min_date_is_clamped_to_the_age_bound_by_default(monkeypatch):
+    """Without allow_stale, a too-old min_date must NOT reach stale files."""
+    old = [_fname(_days_ago(n)) for n in (100, 90, 30)]
+    loaded = _stub_archive(monkeypatch, old)
+
+    result = ap.scan_and_add(min_date=_days_ago(365))
+
+    assert loaded == [], (
+        f"min_date bypassed the {ap.SIGNAL_MAX_AGE_DAYS}d age bound and loaded "
+        f"{len(loaded)} stale file(s)")
+    assert result['stale_clamped'] == {
+        'requested': _days_ago(365),
+        'applied':   _days_ago(ap.SIGNAL_MAX_AGE_DAYS),
+    }, "the clamp must be reported back, not applied silently"
+
+
+def test_clamped_min_date_still_admits_files_inside_the_window(monkeypatch):
+    """Clamping narrows the window — it must not turn the scan into a no-op."""
+    files = [_fname(_days_ago(n)) for n in (100, 2)]
+    loaded = _stub_archive(monkeypatch, files)
 
     ap.scan_and_add(min_date=_days_ago(365))
-    assert len(loaded) == len(old), (
-        "explicit min_date must still reach old files — backfill is a supported flow")
+
+    assert len(loaded) == 1 and _fname(_days_ago(2)) in loaded[0], (
+        f"expected only the in-window file to load, got {loaded}")
+
+
+def test_in_window_min_date_is_untouched(monkeypatch):
+    """A min_date already inside the window must pass through unchanged."""
+    files = [_fname(_days_ago(n)) for n in (5, 2)]
+    loaded = _stub_archive(monkeypatch, files)
+
+    result = ap.scan_and_add(min_date=_days_ago(6))
+
+    assert len(loaded) == 2, f"in-window min_date must reach both files, got {loaded}"
+    assert result['stale_clamped'] is None, "nothing was clamped; must not report a clamp"
+
+
+def test_recalculate_opts_into_stale_signals(monkeypatch):
+    """recalculate rebuilds a book from history — clamping it would thin the rebuild.
+
+    Guards the split that makes the default safe: scan_and_add defaults to
+    allow_stale=False, so recalculate MUST opt in explicitly or the 2026-07-17
+    silent-wipe incident recurs in a new form.
+    """
+    seen = {}
+
+    def _fake_scan(**kwargs):
+        seen.update(kwargs)
+        return ap._build_result([], [], [], 0, 0, ap._empty())
+
+    monkeypatch.setattr(ap, '_load_for_write', lambda **k: ap._empty())
+    monkeypatch.setattr(ap, 'reset', lambda **k: None)
+    monkeypatch.setattr(ap, 'scan_and_add', _fake_scan)
+    monkeypatch.setattr(ap, '_save_entry_price_cache', lambda: None)
+    monkeypatch.setattr('utils.save_json', lambda *a, **k: None)
+
+    ap.recalculate(min_date=_days_ago(365))
+    assert seen.get('allow_stale') is True, (
+        "recalculate must pass allow_stale=True — it exists to rebuild history")
