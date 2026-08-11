@@ -1,9 +1,13 @@
 # Minimal dependencies for CI (Tier 1/2 offline tests only).
 # ib_insync is NOT listed — it's stubbed in tests/conftest.py via sys.modules.
 # torch/transformers (FinBERT) are still excluded — not imported by any test file.
-# streamlit/streamlit-lightweight-charts/fastapi ARE needed: test_chart_nan_serialization.py
-# imports pages.chart_page/pages.scan_page directly, and test_user_delete_cleanup.py imports
-# api.server directly — neither is stubbed, so CI needs the real packages (cb40ab1, 5e93284).
+# streamlit/streamlit-lightweight-charts ARE needed: test_chart_nan_serialization.py imports
+# pages.chart_page/pages.scan_page directly (not stubbed) — cb40ab1.
+# The fastapi/.../httpx block mirrors requirements.txt's "Mobile API server" group in full:
+# test_user_delete_cleanup.py imports api.server directly (not stubbed) — 5e93284 — which
+# pulls in the whole trading_api_kit import chain (sqlalchemy models, bcrypt, jwt, httpx, ...).
+# Added incrementally (one ModuleNotFoundError per CI run) before switching to "add the whole
+# group at once" — do that next time instead of re-discovering each transitive import.
 
 pytest>=7.0.0
 pytest-mock>=3.10.0
@@ -13,4 +17,11 @@ python-dotenv>=1.0.0
 streamlit>=1.30.0
 streamlit-lightweight-charts>=0.7.0
 fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.0
+python-jose[cryptography]>=3.3
+PyJWT>=2.8
+httpx>=0.27
 sqlalchemy>=2.0
+bcrypt>=4.0.0
+python-multipart>=0.0.9
