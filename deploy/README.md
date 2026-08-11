@@ -157,6 +157,12 @@ docker compose start api
   each shape its own check (this bit three times — `SWING`/`VALIDATE`/`MONITOR`).
 - **Disk** — `deploy/disk-alert.sh` runs hourly from the **host** crontab (not a
   container) and pings `HC_UUID_DISK`.
+- **Container logs** — capped at `10m × 3` per service via the `x-logging` anchor in
+  `compose.yaml`. Verified 2026-08-11 against the running containers (all six report it
+  under `docker inspect`, not merely in the file), bounding this stack at 180 MB.
+  ⚠ The co-tenant `daytrade` project is **uncapped**, and there is no
+  `/etc/docker/daemon.json`, so anything created outside `compose.yaml` is unbounded
+  too. Both land on this same disk — covered only by the hourly disk alert above.
 
 ---
 
@@ -182,5 +188,4 @@ docker compose start api
 - **macOS notifications** self-disable off-Darwin (`notifier.mac_native_enabled`);
   Discord/Telegram/email are the live channels.
 - **Unresolved:** whether `sb-tailscale` is still load-bearing now that direct SSH
-  works, and whether Docker log-size caps are configured (disk *space* is alerted on;
-  log *growth* is not confirmed either way).
+  works.
