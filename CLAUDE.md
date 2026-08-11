@@ -1764,6 +1764,51 @@ fictitious — deep-dip BOUNCE rows (Dist −80%+, RSI < 20), the falling-knife 
 already flagged. Filed as issue #3; the fix changes admission order, so per §11 it must be
 judged on the `--realistic-sizing` arm with the >15d WR halt criterion.
 
+> **🔴 OVERTURNED 2026-08-11 — measured against the archive. Issue #3 closed as invalid;
+> the proposed fix would have CREATED the pathology it was written to remove.**
+>
+> Measured over all **894** signal files (10,245 GOLD/PREMIUM rows) by replaying the guard
+> condition `stop >= price or (price − stop)/price > 0.30` and recomputing R:R both ways:
+>
+> | | measured |
+> |---|---|
+> | rows where the guard actually fires | **15 / 10,245 = 0.15%** (all `BOUNCE`; 2.2% of BOUNCE rows) |
+> | of those 15, R:R = **2.0** | **14** |
+> | modal R:R across all eligible rows | **2.5 — 92.7% of rows** |
+> | within-file R:R distinctness | **9.3%** |
+> | rows with R:R > 5 | 35 (0.34%) |
+>
+> **"Systematic, not a one-off" was wrong — it is exactly a one-off.** 14 of the 15
+> guard-firing rows carry R:R **2.0, *below* the modal 2.5**, so they rank *worse* than
+> average: raw R:R is not flattering them at all. CAPR (11.27, the dataset maximum) is a
+> single row in 894 files. And because R:R is ~constant (92.7% at 2.5, 9.3% distinctness),
+> **R:R barely decides the ranking in the first place** — the Dist/Vol tiebreaks do. Same
+> degenerate-ranking shape already measured in §26 on the skipped list.
+>
+> **The fix sketch inverts.** Ranking on the *guarded* R:R gives those 15 rows **12–93**
+> instead of 2.0 — CAPR alone goes 11.27 → **93.0**, i.e. from slot 9 to slot 1. Mechanism:
+> the guard tightens the stop to 5% but leaves the target untouched, so the denominator
+> collapses and manufactures a huge ratio. The guarded R:R is *far more* fictitious than the
+> raw one, and ranking on it would systematically promote precisely the deep-dip
+> falling-knife BOUNCE names this section set out to demote.
+>
+> **Bonus divergence found on the way:** `backtest_regime_compare.py:860` takes `stop_loss`
+> straight from the signal and **never applies the 30% guard at all**. So the guard is a
+> live-only behaviour, the backtest models a wider stop than production would take, and no
+> `--realistic-sizing` run could have validated either version of this change. Untouched —
+> at 0.15% of rows it is not worth perturbing the baselines for, but it is a real
+> live-vs-backtest gap of the same class as §13.1's tiebreak divergence.
+>
+> **Method, for re-running:** iterate `utils.list_files('scanner_output/signals','*.csv')`,
+> filter `Quality in (GOLD, PREMIUM)`, apply the guard condition to `Price`/`Stop`, and
+> compare `(Target−Price)/(Price−Stop)` against `(Target−Price)/(Price−Price×0.95)`. Run it
+> inside `sb-scanner-cron` (`-w /app`) so the S3 credentials and memoized client are in play.
+>
+> **Standing lesson: measure the distribution before implementing a ranking fix.** The
+> issue's reasoning was mechanically sound and still landed on a change that would have made
+> live admissions worse — because it assumed the flattered rows were winning, and never
+> checked that R:R is 92.7% constant or that the guard fires on 0.15% of rows.
+
 ### 23.4 A correlated-cluster warning that did not survive checking
 Initial read of the manual longterm file was that its 8 GOLD rows would fill a fresh $100k
 book with a §10-style correlated cohort. Checking the sectors overturned it: Energy,
