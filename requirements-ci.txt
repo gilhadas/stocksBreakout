@@ -1,9 +1,15 @@
 # Minimal dependencies for CI (Tier 1/2 offline tests only).
 # ib_insync is NOT listed — it's stubbed in tests/conftest.py via sys.modules.
-# torch, transformers, streamlit etc. are excluded — not imported by any test file.
+# torch/transformers (FinBERT) are still excluded — not imported by any test file.
+# streamlit/streamlit-lightweight-charts/fastapi ARE needed: test_chart_nan_serialization.py
+# imports pages.chart_page/pages.scan_page directly, and test_user_delete_cleanup.py imports
+# api.server directly — neither is stubbed, so CI needs the real packages (cb40ab1, 5e93284).
 
 pytest>=7.0.0
 pytest-mock>=3.10.0
 numpy>=1.24.0
 pandas>=2.0.0
 python-dotenv>=1.0.0
+streamlit>=1.30.0
+streamlit-lightweight-charts>=0.7.0
+fastapi>=0.115
