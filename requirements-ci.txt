@@ -13,3 +13,4 @@ python-dotenv>=1.0.0
 streamlit>=1.30.0
 streamlit-lightweight-charts>=0.7.0
 fastapi>=0.115
+sqlalchemy>=2.0
