@@ -226,6 +226,121 @@ def _save(data: dict, user_id: str | None = None, book: str | None = DEFAULT_BOO
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+# ── Forking a variant book off control ───────────────────────────────────────
+#
+# `load()` returns _empty() — a plausible fresh $100k book — when a file does not
+# exist. For the control book that is correct: a new user starts empty. For a
+# VARIANT book it is a silent trap. The A/B only means anything if both arms
+# start from identical state and diverge solely through swap policy; a variant
+# that materializes empty diverges because it started somewhere else entirely,
+# and nothing anywhere errors. Observed 2026-08-11: an unforked autoswap book
+# was scanned into from $100k/0 positions while its control held 14 — the
+# comparison was measuring starting state, not the treatment.
+#
+# So the invariant is enforced at the WRITE boundary (see _load_for_write): the
+# first thing that would modify an unforked variant clones control into it first.
+# Reads stay pure — load() is called from API GETs, page renders and
+# book_compare, and a page render must never create a book in S3.
+
+
+def is_forked(data: dict) -> bool:
+    """True once a book carries a fork stamp (either arm of a forked pair)."""
+    return bool(data.get('fork'))
+
+
+def _book_has_state(data: dict) -> bool:
+    """True if a book has ever been used for anything.
+
+    This is the idempotency key for ensure_forked, and the single most important
+    predicate in the experiment: if it ever wrongly returns False for a book that
+    has diverged, the next write re-clones control over the top and destroys
+    however many weeks of accumulated divergence, silently. Deliberately broad —
+    any trace of use at all counts. Same predicate fork_books.fork_user uses for
+    its --force guard, so the manual and automatic paths cannot disagree.
+    """
+    return bool(
+        data.get('positions') or data.get('closed')
+        or data.get('processed_files') or data.get('fork')
+    )
+
+
+def ensure_forked(user_id: str | None = None,
+                  book: str | None = DEFAULT_BOOK,
+                  *, force: bool = False) -> dict:
+    """Clone the control book into `book` if it has never been used.
+
+    No-op for the control book itself, and no-op for any variant that already has
+    state (unless `force`). Returns the variant's data either way.
+
+    Both books are stamped with the same fork record, so neither can be read as
+    "the original" and book_compare has a `since` date on both sides. An empty
+    control (genuinely new user) still forks — to an empty, stamped variant —
+    because both arms then fill from the same scans, which is exactly the
+    apples-to-apples state wanted.
+    """
+    import copy
+
+    cfg = _book_cfg(book)
+    name = book or DEFAULT_BOOK
+    # Keyword args throughout: load() is called by keyword everywhere else in the
+    # codebase, and several test suites stub it as `lambda **kw: ...`.
+    if name == DEFAULT_BOOK or not cfg['suffix']:
+        return load(user_id=user_id, book=name)
+
+    existing = load(user_id=user_id, book=name)
+    if _book_has_state(existing) and not force:
+        return existing
+
+    control = load(user_id=user_id, book=DEFAULT_BOOK)
+    stamp = datetime.now(_NY_TZ)
+    fork_date = stamp.strftime('%Y-%m-%d')
+
+    clone = copy.deepcopy(control)
+    clone['fork'] = {
+        'date':   fork_date,
+        'at':     stamp.isoformat(),
+        'source': DEFAULT_BOOK,
+        'peer':   DEFAULT_BOOK,
+        'book':   name,
+    }
+    # Fresh advice/undo state — these describe the control book's history, not
+    # the variant's. Carried over, the variant's very first scan would think it
+    # had already advised or already swapped today.
+    clone.pop('last_swap', None)
+    clone['swap_advice'] = {}
+    _save(clone, user_id=user_id, book=name)
+
+    # Stamp control too, so both sides agree on when the clock started.
+    if control.get('fork', {}).get('date') != fork_date or force:
+        control['fork'] = {
+            'date':   fork_date,
+            'at':     stamp.isoformat(),
+            'source': DEFAULT_BOOK,
+            'peer':   name,
+            'book':   DEFAULT_BOOK,
+        }
+        _save(control, user_id=user_id, book=DEFAULT_BOOK)
+
+    return clone
+
+
+def _load_for_write(user_id: str | None = None,
+                    book: str | None = DEFAULT_BOOK) -> dict:
+    """load(), but forks a never-used variant book off control first.
+
+    Every function that reaches a _save() must load through this rather than
+    load(), or it can be the one that writes into an unforked variant and
+    invalidates the experiment. reset() is the deliberate exception — it intends
+    an empty book, and forking there would make Reset mean "restore control's
+    positions".
+
+    Costs exactly one book read in every case, the same as the load() it
+    replaces: ensure_forked already returns the data it read (or wrote), so
+    there is no second read to discard.
+    """
+    return ensure_forked(user_id, book)
+
+
 # Deleted users' books are moved here, never removed. A book is the only record
 # that a user ever traded — §20's "bound the read window, never prune" rule
 # applies to it at least as much as to the signal archive.
@@ -438,7 +553,7 @@ def scan_and_add(min_date: str | None = None,
     memt.mark('scan_and_add:start', user=(user_id or 'default')[:8])
 
     pos_pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
-    data      = load(user_id=user_id, book=book)
+    data      = _load_for_write(user_id=user_id, book=book)
     processed = set(data.get('processed_files', []))
     open_syms = open_symbols(data)
 
@@ -1434,7 +1549,12 @@ def scan_and_add_all_users(min_date: str | None = None,
                 n_books += 1
                 key = user.email if book == DEFAULT_BOOK else f'{user.email} [{book}]'
                 try:
-                    data = load(user_id=user.id, book=book)
+                    # _load_for_write, not load: this guard must see the book as it
+                    # will be AFTER forking. An unforked variant reads as empty, so a
+                    # plain load() would send it down the new-book path with
+                    # min_date=today while its control processed the full window —
+                    # the two arms would consume different files on day one.
+                    data = _load_for_write(user_id=user.id, book=book)
                     # First-run guard: if user has no processed_files and no positions,
                     # only pick up signals from today onwards to avoid flooding them
                     # with all historical backfill files.
@@ -1535,7 +1655,7 @@ def refresh_prices(user_id: str | None = None,
     """
     import yfinance as yf
 
-    data = load(user_id=user_id, book=book)
+    data = _load_for_write(user_id=user_id, book=book)
     if not data['positions']:
         _save(data, user_id=user_id, book=book)
         return {'closed': [], 'updated': 0, 'data': data}
@@ -1719,7 +1839,7 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
     import yfinance as yf
     import pandas as pd
 
-    data = load(user_id=user_id, book=book)
+    data = _load_for_write(user_id=user_id, book=book)
     if not data['positions']:
         _save(data, user_id=user_id, book=book)
         return {'closed': [], 'checked': 0, 'data': data}
@@ -1868,7 +1988,7 @@ def rebuild_skipped_cash(user_id: str | None = None,
     """
     from utils import list_files
 
-    data      = load(user_id=user_id, book=book)
+    data      = _load_for_write(user_id=user_id, book=book)
     taken_syms = ({p['symbol'] for p in data['positions']} |
                   {t['symbol'] for t in data['closed']})
 
@@ -2016,6 +2136,14 @@ def add_position_direct(
     lock_path = abs_path + '.lock'
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
+    # ⚠ Fork BEFORE taking the lock, never inside it. ensure_forked writes the
+    # variant through _save(), which acquires this exact lock file on its own
+    # descriptor — and fcntl.flock does not recurse, so a second acquisition from
+    # the same process blocks forever against itself. Doing it here keeps the
+    # load/dedup/save below in one uninterrupted lock acquisition, which is the
+    # whole reason this function bypasses _save() in the first place.
+    ensure_forked(user_id, book)
+
     with open(lock_path, 'w') as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
@@ -2070,7 +2198,7 @@ def promote_position_mode(symbol: str, new_mode: str, user_id: str | None = None
     so MAX_HOLD_BARS starts counting from the promotion date, not original entry.
     Returns {'promoted': bool, 'reason': str, 'old_mode': str}.
     """
-    data = load(user_id=user_id, book=book)
+    data = _load_for_write(user_id=user_id, book=book)
     sym = symbol.upper()
     for p in data['positions']:
         if p['symbol'].upper() == sym:
@@ -2089,7 +2217,7 @@ def promote_position_mode(symbol: str, new_mode: str, user_id: str | None = None
 def close_position(symbol: str, exit_price: float, reason: str = 'manual', user_id: str | None = None,
                    book: str | None = DEFAULT_BOOK) -> dict:
     """Close a specific position at given price."""
-    data = load(user_id=user_id, book=book)
+    data = _load_for_write(user_id=user_id, book=book)
     now_str    = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
     still_open = []
     closed_rec = None
@@ -2141,7 +2269,7 @@ def rebalance(dry_run: bool = True, user_id: str | None = None,
 
     from config import CASH_MANAGEMENT
 
-    data = load(user_id=user_id, book=book)
+    data = _load_for_write(user_id=user_id, book=book)
     positions = data['positions']
     capital = data['capital']
 
@@ -2382,7 +2510,20 @@ def _refresh_current_prices(data: dict):
 # ── Reset ─────────────────────────────────────────────────────────────────────
 
 def reset(user_id: str | None = None, book: str | None = DEFAULT_BOOK) -> dict:
+    """Empty a book. Deliberately does NOT go through _load_for_write.
+
+    ⚠ The fork stamp is carried across, and that is load-bearing rather than
+    cosmetic. _book_has_state() treats a stamp as "this book has been used", so a
+    reset that dropped it would leave the variant looking never-forked — and the
+    very next write would re-clone control over the top. Reset would then mean
+    "restore control's positions" on a variant and "empty the book" on control,
+    and recalculate() (reset + rescan) would silently resurrect control's book
+    into the variant. Reset means empty, on every book.
+    """
+    prior = load(user_id, book)
     data = _empty()
+    if prior.get('fork'):
+        data['fork'] = prior['fork']
     _save(data, user_id=user_id, book=book)
     return data
 
@@ -2412,7 +2553,7 @@ def recalculate(position_pct: float = POSITION_SIZE_PCT,
     """
     from utils import save_json
 
-    pre_reset = load(user_id=user_id, book=book)
+    pre_reset = _load_for_write(user_id=user_id, book=book)
     # Derive the backup path from the resolver, never by patching the filename.
     # This used to be `_portfolio_path_for(user_id).replace('auto_portfolio.json', …)`,
     # which silently NO-OPS for any book whose filename is not exactly
@@ -2921,8 +3062,12 @@ def _run_swap_stage(data: dict,
 
     # Re-load: _execute_swap_batch wrote through close_position /
     # add_position_direct, so the caller's `data` is stale for everything except
-    # the stamp we are about to set.
-    fresh = load(user_id=user_id, book=book)
+    # the stamp we are about to set. Through the seam like every other writer —
+    # the book is certainly forked by now (scan_and_add did it), so this is
+    # defence in depth rather than a live case, but a uniform "if you _save, you
+    # read through _load_for_write" rule is what the structural test enforces and
+    # what stops the next writer added here from quietly bypassing the fork.
+    fresh = _load_for_write(user_id=user_id, book=book)
     prior = fresh.get('swap_advice') or {}
     same_day = prior.get('date') == today
     fresh['swap_advice'] = {
@@ -3058,7 +3203,7 @@ def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None
     close_sym = close_symbol.upper()
     open_sym  = open_symbol.upper()
 
-    data = load(user_id=user_id, book=book)
+    data = _load_for_write(user_id=user_id, book=book)
 
     open_pos = next(
         (p for p in data.get('positions', []) if p['symbol'].upper() == close_sym),
@@ -3156,7 +3301,7 @@ def undo_last_swap(user_id: str | None = None,
 
     Returns {'ok': bool, 'reason': str}.
     """
-    data = load(user_id=user_id, book=book)
+    data = _load_for_write(user_id=user_id, book=book)
     snap = data.get('last_swap')
     if not snap:
         return {'ok': False, 'reason': 'no recent swap to undo'}

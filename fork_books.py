@@ -30,12 +30,10 @@ Usage
     python3 fork_books.py --force            # re-fork, discarding the variant
 """
 import argparse
-import copy
 import sys
-from datetime import datetime
 
 import auto_portfolio as ap
-from auto_portfolio import BOOKS, DEFAULT_BOOK, _NY_TZ
+from auto_portfolio import BOOKS, DEFAULT_BOOK
 
 
 VARIANT_BOOKS = [b for b in BOOKS if b != DEFAULT_BOOK]
@@ -71,8 +69,6 @@ def fork_user(user_id, label, *, force=False, dry_run=False) -> dict:
 
     n_pos = len(control.get('positions', []))
     n_closed = len(control.get('closed', []))
-    stamp = datetime.now(_NY_TZ)
-    fork_date = stamp.strftime('%Y-%m-%d')
 
     if not (n_pos or n_closed or control.get('processed_files')):
         # Not fatal — a genuinely new user starts empty and both books will fill
@@ -84,11 +80,11 @@ def fork_user(user_id, label, *, force=False, dry_run=False) -> dict:
     for variant in VARIANT_BOOKS:
         existing = ap.load(user_id=user_id, book=variant)
         # A book that has never been written comes back as _empty(); treat a
-        # book with any state at all as live and refuse to clobber it.
-        is_live = bool(
-            existing.get('positions') or existing.get('closed')
-            or existing.get('processed_files') or existing.get('fork')
-        )
+        # book with any state at all as live and refuse to clobber it. Shared
+        # with the automatic path (ap._load_for_write → ap.ensure_forked) so the
+        # manual and automatic forks cannot disagree about what "already forked"
+        # means — the §20 one-filter-not-two rule.
+        is_live = ap._book_has_state(existing)
         if is_live and not force:
             print(f"  = {label} [{variant}]: already forked "
                   f"({len(existing.get('positions', []))} positions, "
@@ -97,43 +93,20 @@ def fork_user(user_id, label, *, force=False, dry_run=False) -> dict:
             out['skipped'].append(variant)
             continue
 
-        clone = copy.deepcopy(control)
-        clone['fork'] = {
-            'date':   fork_date,
-            'at':     stamp.isoformat(),
-            'source': DEFAULT_BOOK,
-            'peer':   DEFAULT_BOOK,
-            'book':   variant,
-        }
-        # Fresh advice/undo state — these describe the control book's history,
-        # not the variant's, and carrying them over would let the variant's very
-        # first scan think it had already advised or already swapped today.
-        clone.pop('last_swap', None)
-        clone['swap_advice'] = {}
-
         if dry_run:
             print(f"  → {label} [{variant}]: WOULD fork "
                   f"({n_pos} positions, {n_closed} closed, "
                   f"capital ${control.get('capital', 0):,.2f})")
         else:
-            ap._save(clone, user_id=user_id, book=variant)
+            # The clone itself lives in auto_portfolio.ensure_forked — the same
+            # code the automatic first-write path runs — so an explicit fork and
+            # an auto-fork produce byte-identical books. This script keeps the
+            # --force / --dry-run / reporting shell around it.
+            ap.ensure_forked(user_id=user_id, book=variant, force=True)
             print(f"  ✓ {label} [{variant}]: forked "
                   f"({n_pos} positions, {n_closed} closed, "
                   f"capital ${control.get('capital', 0):,.2f})")
         out['forked'].append(variant)
-
-    # Stamp the control book too, so both sides agree on when the clock started
-    # and neither can be read as the "original" without a fork date.
-    if out['forked'] and not dry_run:
-        if control.get('fork', {}).get('date') != fork_date or force:
-            control['fork'] = {
-                'date':   fork_date,
-                'at':     stamp.isoformat(),
-                'source': DEFAULT_BOOK,
-                'peer':   VARIANT_BOOKS[0] if VARIANT_BOOKS else None,
-                'book':   DEFAULT_BOOK,
-            }
-            ap._save(control, user_id=user_id, book=DEFAULT_BOOK)
 
     return out
 

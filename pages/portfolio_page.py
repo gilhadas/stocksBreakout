@@ -577,6 +577,25 @@ def _render_auto_portfolio():
 
     data = ap.load(user_id=_user_id, book=_book)
 
+    # An unforked VARIANT book must not render as a portfolio. ap.load() returns
+    # a fresh $100k/0-position book when the file does not exist, which on a
+    # variant is indistinguishable from a real empty book — and acting on it
+    # (Scan Signals) is what silently starts the A/B from mismatched state.
+    # Reads stay pure, so the fork happens on the first write, not here.
+    # Rule: variant + no fork stamp = never forked. A control book without a
+    # stamp is just normal pre-experiment state and needs no notice.
+    if _book != ap.DEFAULT_BOOK and not ap.is_forked(data):
+        st.warning(
+            f"**{ap.BOOKS[_book]['label']} has not been forked yet.** It will be "
+            f"created as a copy of *{ap.BOOKS[ap.DEFAULT_BOOK]['label']}* the first "
+            f"time anything writes to it, so both arms of the experiment start from "
+            f"identical state. Nothing to show until then — switch back to "
+            f"*{ap.BOOKS[ap.DEFAULT_BOOK]['label']}*, or run `python3 fork_books.py` "
+            f"to fork it now and set the start date deliberately.",
+            icon="🍴",
+        )
+        return
+
     _fork = (data.get('fork') or {}).get('date')
     if _fork:
         st.caption(f"Forked {_fork} — comparison metrics count from that date only.")

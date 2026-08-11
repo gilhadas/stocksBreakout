@@ -132,7 +132,7 @@ def render_compare_page():
                 'edge_pct': 'Edge %', 'verdict': 'Verdict',
                 'score_improvement': 'Score Δ',
             }),
-            use_container_width=True, hide_index=True,
+            width='stretch', hide_index=True,
         )
 
     if not any_swaps:
@@ -146,7 +146,7 @@ def render_compare_page():
     # ── Deltas ───────────────────────────────────────────────────────────────
     if report.get('vs_control'):
         st.markdown("#### Difference vs control")
-        st.dataframe(pd.DataFrame(report['vs_control']).T, use_container_width=True)
+        st.dataframe(pd.DataFrame(report['vs_control']).T, width='stretch')
         st.caption(
             "Positive = the auto-swap book did better. CLAUDE.md §11 measured auto "
             "swap-on-skip in backtest at −4.68 Sharpe on all.txt 2026 with 0 swaps "

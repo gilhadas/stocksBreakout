@@ -2057,6 +2057,60 @@ python3 fork_books.py --dry-run     # then without --dry-run
 ```
 `--build` is mandatory — code is baked into the image (§5a).
 
+### 26.1 The fork was a manual step, so the A/B silently started mismatched (2026-08-11)
+
+Reported from the dev dashboard: *"the auto swap is starting a fresh portfolio, by
+design it should match the control portfolio."* Correct, and the mechanism is worth
+recording because the feature above shipped with it.
+
+`ap.load()` returns `_empty()` — a plausible fresh $100k book — when the file does not
+exist. For control that is right (a new user starts empty); for a **variant** it is a
+trap. `fork_books.py` did the correct clone but was a manual deploy step nobody had
+run, so selecting **Auto-swap** rendered a convincing empty portfolio and clicking
+Scan Signals wrote real positions into it. Sandbox state when caught: control 14
+positions / 62 processed files, autoswap **2 / 2**, neither stamped. The comparison
+was measuring starting state, not the treatment. Nothing errored — §22/§23's shape
+exactly: state that looks live but isn't.
+
+Caught before deploy, so no production book was affected; the first cron
+`scan_and_add_all_users()` after deploy would have created one fresh book per user.
+
+**Fix — the invariant moved to the write boundary.** `ensure_forked()` +
+`_load_for_write()` in `auto_portfolio.py`: the first thing that would modify an
+unforked variant clones control into it and stamps both books. `load()` stays pure —
+it is called from API GETs, page renders and `book_compare`, and a page render must
+never create a book in S3. `fork_books.fork_user()` now delegates its clone to
+`ensure_forked` so the manual and automatic paths cannot drift (§20's one-filter rule).
+Explicit `fork_books.py` at deploy is still the intended path; auto-fork is the net.
+
+Four things this turned up that were not obvious from the plan:
+
+1. **`scan_and_add_all_users`' first-run guard reads the book before the fork.** An
+   unforked variant reads as empty → `min_date=today`, while control processed the
+   full window. The two arms would have consumed *different files on day one* even
+   with forking working. That call site had to take the seam too.
+2. **`reset()` must keep the fork stamp.** `_book_has_state()` treats the stamp as
+   "used", so a reset that dropped it left the book looking never-forked and the next
+   write re-cloned control. Reset on a variant would have meant *restore control's
+   positions*, and `recalculate()` (reset + rescan) would have silently resurrected
+   control's book into the variant.
+3. ⚠ **Forking inside `add_position_direct` deadlocks the process against itself.**
+   That function bypasses `_save` to keep load/dedup/save in ONE `fcntl` acquisition;
+   `ensure_forked` writes through `_save`, which grabs the *same* `.lock` file on a
+   second descriptor, and `flock` does not recurse. The fork must happen **before**
+   the lock. Symptom was the suite going 22 s → hang with no traceback, so the
+   regression test runs it on a thread with `done.wait(timeout=20)` — a deadlock has
+   nothing to assert on unless you bound it.
+4. **A mutation test can pass for the wrong reason.** Removing the
+   `name == DEFAULT_BOOK` guard did *not* fail `test_control_is_never_a_fork_target`,
+   because that test seeds control **with** state and `_book_has_state` short-circuits
+   first. Only an *empty* control exercises the suffix guard. Same lesson as §23.1's
+   substring assertion: verify the mutation fails the test you think covers it.
+
+`tests/test_autofork_on_write.py` — 20 tests, 7 mutations verified. The structural one
+asserts every `_save`-reaching function forks first, so the next writer added here
+cannot quietly bypass it.
+
 ### Open
 - The degenerate ranking is **not fixed** — the advisor still ranks skipped
   signals by volume alone when quality and R:R tie, which is the normal case.
