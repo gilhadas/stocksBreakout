@@ -1627,6 +1627,28 @@ and its breaches never auto-close — which is why those 14 re-alert daily, seve
 deep below their stops (ASTS −18%, AMZN −11%). And all 14 carry `target: 0`, which is the
 `TP: $0.0` and the meaningless negative R:R in the notification.
 
+> **RESOLVED 2026-08-11 — decision made, issue #7 closed as "working as intended."**
+> `portfolio.json` is **alert-only by design** and `refresh_prices` correctly skips it.
+> It is a *manual* book: positions are bought/sold by hand via `/manual-portfolio/buy|sell`,
+> and its stops are set on demand by `/manual-portfolio/compute-stops` using a **wider
+> ATR×3.0 / 20-day-swing-low** rule — deliberately not the auto books' champion ATR×2.0
+> trail. Auto-trailing it would overwrite hand-set stops with a different methodology, and
+> auto-closing would sell a position the human owns the decision on. The evaluator and
+> monitor still report exits there; a human acts on them. Pinned by a docstring note on
+> `Portfolio.update_prices` so this is not re-filed as a bug a fourth time.
+>
+> Two premises of the paragraph above no longer hold, and both are worth recording:
+> the `days_held=0` half **was** a real bug and is fixed (`575b000`, verified in the
+> 2026-08-10 exit log — real values 6/12/14, not zeros); and **the 14 positions no longer
+> exist.** Production state 2026-08-11: `scanner_output/portfolio/portfolio.json` has 0
+> positions and was *re-created 2026-08-02* during the Oracle migration (§25), the
+> `cf699841…/portfolio.json` book has 0 positions and last changed 2026-04-23, and the
+> second user has no `portfolio.json` at all. So the daily re-alerting described here
+> stopped on its own at the migration — the alerts seen since are from the auto books,
+> which do trail and close correctly. **Lesson: a "still open" note describing live
+> production state has a shelf life; re-verify the state before acting on it.** (This one
+> was carried forward for 12 days across a host migration that silently reset it.)
+
 ### 22.4 Streamlit Cloud login: settings were read from the environment only (`ef8ea65`, `ec3d938`)
 Reported as "streamlit stopped working with google auth"; the pasted error was
 `HTTPConnectionPool(host='127.0.0.1', port=8000) … Errno 111`.

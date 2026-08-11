@@ -207,6 +207,16 @@ class Portfolio:
         """
         Update current prices for all positions.
         If price_map is None, fetches via yfinance.
+
+        Deliberately does NOT trail stops or auto-close on a stop breach — this
+        book is manual (bought/sold by hand via /manual-portfolio/buy|sell), and
+        its stops are set on demand by /manual-portfolio/compute-stops using a
+        wider ATR×3.0 / 20-day-swing-low rule, not the auto books' champion
+        ATR×2.0 trail. `auto_portfolio.refresh_prices` therefore skips this file
+        by design; exits here are alert-only (the evaluator and monitor still
+        report them, a human decides). Decided 2026-08-11, closing issue #7 —
+        do not "fix" this by wiring it into refresh_prices without that call
+        being re-made, or hand-set stops get overwritten.
         """
         if price_map is None:
             price_map = self._fetch_current_prices()
