@@ -37,6 +37,13 @@ ingress:
   - hostname: journal.gilhadas-stocks.com
     service: http://journal:80
 
+  # Same container, second entry point used for the DayTrade bot's rows (which
+  # arrive via DayTrade's journal_sync.py tagged broker="DayTrade"). Pure alias —
+  # no second instance. NOTE: separate origin => separate Google sign-in, and the
+  # origin must be on Supabase's Auth redirect allowlist or login bounces away.
+  - hostname: journal-daytrade.gilhadas-stocks.com
+    service: http://journal:80
+
   # Streamlit admin/scanning dashboard (compose service `dashboard`). Reached
   # over the internal Docker network via service name, independent of the
   # dashboard's `127.0.0.1:8501:8501` host port binding — that loopback bind
