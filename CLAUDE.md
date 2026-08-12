@@ -2189,3 +2189,100 @@ cannot quietly bypass it.
   same-day candidates (legitimately 0) and stale for older ones.
 - Notifier still has no per-user routing: every book lands in the same Telegram
   chat. The daily stamp bounds it at 2 sends/book/day; more books need chat IDs.
+
+## 27. Post-reset performance check + the stale-price escape hatch (2026-08-12)
+
+Started from "the auto portfolio seems to perform worse than SPX since it was
+reset." True, and the cause is not stock picking — but the investigation also
+produced a **wrong intermediate conclusion that nearly liquidated three healthy
+positions**, which is the more valuable half of this section.
+
+### The performance answer: it's the reset's cash window, not the picks
+Main book (`cf699841…/auto_portfolio.json`), reset 2026-08-02 16:05 to $100k cash:
+
+| Window | Book | SPX | Excess |
+|---|---|---|---|
+| Jul 31 → Aug 4 (redeploying, 83% cash) | +1.08% | **+3.30%** | **−2.22 pp** |
+| Aug 4 → Aug 11 (fully deployed) | +0.00% | −0.11% | **+0.11 pp** |
+| Whole period | +1.14% | +3.18% | −2.05 pp |
+
+**The entire gap opened in the two trading days the book spent in cash while SPX
+rallied +3.3%.** Once deployed it tracked the index. 0 closed trades, 14
+positions, 9 sessions — no basis for any config change. If a reset is ever
+repeated, deploy in one pass rather than leaving a multi-day cash window.
+
+Two real observations, neither actioned (both need a `--realistic-sizing` arm
+per §11, and §13.5's meta-finding says ranking/admission levers come back null):
+- **Sizing is inversely correlated with outcome.** Spearman(weight, return) =
+  **−0.27**. ITT (+13.7%) got 2.1% of the book, ZBRA (+10.9%) got 4.5%, while
+  BP/CNO/GSAT/STEL got the full 10% and went nowhere. Same 14 picks equal-weighted
+  would have returned **+1.98% vs the actual +1.14%**. ATR-risk sizing
+  systematically starves the volatile momentum names the strategy exists to catch.
+- **ITT was backdated.** Entry $190.80 is exactly the Jul 29 close, but the book
+  was empty until Aug 2 — the §18/§23.2 hazard, re-triggered because the reset
+  cleared `processed_files` and re-ingested the Jul 29 signal file. ~$85 of its
+  $287 gain never happened. The Aug 4 entries are legitimate intraday fills.
+
+### 🔴 The wrong turn: yfinance rate-limiting read as delisting
+Four positions (PRA/JHG/HOLX/STEL, **$24,905 = 24.9% of the book**) returned zero
+history rows **from the Mac**, with returns of +0.04/−0.08/0.00/+0.13% — pinned
+flat, the signature of cash-merger targets. A control group (KO/F/AAPL) fetched
+fine, which made "four completed mergers" look conclusive. It was not.
+
+Re-probed **from the box, 5 trials each**: PRA/JHG/STEL **5/5 available** at
+exactly the book's marks; HOLX **0/5**. The Mac was being rate-limited for those
+three; mega-caps kept working because they're served from a different cache tier.
+Real sterilised capital: **$4,941 (HOLX alone)**, not $24,905.
+
+**Lessons.** (1) A control group of mega-caps does not prove a data source is
+healthy for thin/odd tickers — it proves the cache is warm. (2) Probe from the
+host that actually runs production; the Mac and the box do not see the same
+Yahoo. (3) One trial per symbol is not a measurement — the same box returned
+`NO DATA` for all four on the very next call, then 5/5 on a repeat.
+
+The four are still **dead money** in the strategy sense (merger-arb pinned flat,
+~0% return, ~25% of the book) — but that is a selection issue, not a mechanism
+defect, and three of them price and exit normally.
+
+### The real defect, shipped (PR #12, `36a9c10`, deployed)
+When yfinance returns no history, `refresh_prices` fell back to the STORED
+`current_price` for **both** the display mark and the exit basis. That makes the
+position permanently unexitable: `basis_close` == the frozen mark, the trail
+cannot move (an empty frame is below `ATR_TRAIL_FLOOR_BARS`), and the frozen mark
+sits above the stop, so `basis_close <= p['stop']` can never become true. Same
+shape as §22.3 — a rule that silently never fires for part of its input.
+
+`_apply_stale_price()` stamps `stale_since` on the first failed fetch, clears it
+on any success, and `refresh_prices` settles at the last known mark once the gap
+reaches `STALE_PRICE_MAX_DAYS = 5` calendar days. Counting from a stamped **date**
+rather than a run counter is deliberate: refresh runs at least twice a weekday, so
+a counter would halve the window.
+
+⚠ **Safety property, and the wrong turn above is exactly why it exists:**
+staleness is assessed **only when at least one symbol fetched successfully**. A
+wholesale failure is an outage, not N simultaneous delistings. Had the naive
+version shipped, the Mac's view would have liquidated PRA/JHG/STEL. Pinned by
+`test_wholesale_fetch_failure_closes_nothing`.
+
+19 tests, 4 mutations verified. Full suite **771 pass**.
+
+### The settle, and why not `stale_max_days=0`
+`stale_max_days=0` closes anything that fails its fetch **during that one run** —
+a live symbol blipping at the wrong moment gets settled. The operator path used
+instead (`settle_dead.py`, scratchpad): verify the named symbol is dead over 3
+trials, backdate `stale_since` on **only** those, then run a **normal** refresh —
+so any other position that blips gets a fresh stamp (gap 0) and survives.
+It refused to settle PRA/JHG/STEL even when explicitly passed them.
+
+Result: HOLX closed at $76.02, P&L $0, `close_reason: 'no_market_data'`, in both
+the control and autoswap books (keeping the §26 A/B aligned). 13 open each,
+available cash $1,331 → **$6,272**.
+
+### Open
+- The four merger-arb names should never have scored **GOLD / TREND_CONFIRM** —
+  a deal-pinned stock has collapsed volatility and no trend, the opposite of a
+  Stage 2 breakout, yet they cleared the top quality tier. A "reject compressed /
+  pinned range" filter is a **signal-generation** fix, which is where §13.5
+  concluded the remaining edge lives. Best lead out of this session.
+- The sizing anti-correlation (−0.27) — needs a `--realistic-sizing` arm.
+- §26's degenerate skipped-signal ranking is still unfixed.
