@@ -142,6 +142,26 @@ SIGNAL_MAX_AGE_DAYS = 7        # calendar days; covers a weekend + holiday gap
 # 7 + 23 = 30 days, matching cleanup_outputs.py's retention for signals/*.csv.
 PROCESSED_PRUNE_MARGIN_DAYS = 23
 
+# How long a position may go without any market data before it is settled out.
+#
+# When yfinance returns no history for a symbol, refresh_prices used to fall back
+# to the STORED current_price for both the display mark and the exit basis. That
+# makes the position permanently unexitable: basis_close == the frozen mark, the
+# trail cannot move (an empty frame is below ATR_TRAIL_FLOOR_BARS), and the frozen
+# mark sits above the stop, so `basis_close <= p['stop']` can never become true.
+#
+# Measured 2026-08-12: PRA/JHG/HOLX/STEL — four completed-merger names that had
+# stopped trading — held $24,905 (24.9%) of the main book in exactly this state,
+# guaranteed to return 0% forever. A real broker settles the deal cash back into
+# buying power; this book had no equivalent, so the capital was sterilised.
+#
+# 5 calendar days spans a weekend plus a flaky session, so a transient yfinance
+# failure cannot close anything, while a genuinely dead symbol is released within
+# a week. Staleness is tracked as a `stale_since` date stamped on the position
+# (cleared on any successful fetch) rather than a run counter, because refresh
+# runs at least twice a weekday and a counter would halve the effective window.
+STALE_PRICE_MAX_DAYS = 5
+
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
 MAX_ADDS_PER_SCAN  = 10        # Max new positions admitted per trading day (across all files for that day)
 MAX_PORTFOLIO_ATR_RISK = 0.12  # Max total portfolio risk as ATR% (12% = aggressive)
@@ -1681,13 +1701,58 @@ def _close_basis_history(hist: 'pd.DataFrame', now_et: 'datetime') -> 'pd.DataFr
     return close_basis_history(hist, now_et)
 
 
+def _apply_stale_price(p: dict, has_data: bool, today: str,
+                       max_days: int = STALE_PRICE_MAX_DAYS) -> bool:
+    """
+    Track how long a position has gone without market data.
+
+    Mutates ``p['stale_since']`` in place: cleared on any successful fetch,
+    stamped with ``today`` on the first failure. Returns True once the gap has
+    reached ``max_days``, meaning the position can never be priced or exited
+    again and must be settled out at its last known mark.
+
+    Counting from a stamped DATE rather than a run counter is deliberate:
+    refresh_prices runs at least twice a weekday (docker/crontab 10:00 and
+    15:45), so a counter would halve the intended window.
+
+    ``max_days=0`` closes on the first failed fetch. That is the operator path
+    for settling symbols already known to be dead — it reuses this same tested
+    branch rather than hand-editing the book JSON.
+    """
+    if has_data:
+        p.pop('stale_since', None)
+        return False
+
+    since = p.get('stale_since')
+    if not isinstance(since, str) or not since:
+        p['stale_since'] = today
+        since = today
+
+    try:
+        gap = (datetime.strptime(today, '%Y-%m-%d')
+               - datetime.strptime(since, '%Y-%m-%d')).days
+    except ValueError:
+        # Malformed stamp — restart the clock rather than closing on bad data.
+        p['stale_since'] = today
+        return max_days <= 0
+
+    return gap >= max_days
+
+
 def refresh_prices(user_id: str | None = None,
-                   book: str | None = DEFAULT_BOOK) -> dict:
+                   book: str | None = DEFAULT_BOOK,
+                   stale_max_days: int = STALE_PRICE_MAX_DAYS) -> dict:
     """
     Fetch current prices for all open positions.
     Auto-close any position where the close-basis price <= stop (close-based —
     mirrors the backtest champion exit; intraday dips do not trigger).
-    Returns {'closed': [symbols], 'data': data}
+
+    Positions whose symbol has returned no market data for ``stale_max_days``
+    calendar days are settled out at their last known mark — see
+    STALE_PRICE_MAX_DAYS for why holding them forever was the alternative.
+    Pass ``stale_max_days=0`` to settle known-dead symbols immediately.
+
+    Returns {'closed': [symbols], 'updated': int, 'data': data}
     """
     import yfinance as yf
 
@@ -1713,12 +1778,35 @@ def refresh_prices(user_id: str | None = None,
     closed_now = []
     still_open = []
 
+    # A wholesale fetch failure (network down, rate limit) must never be read as
+    # every symbol delisting at once, so staleness is only assessed when at least
+    # one symbol came back. This is the difference between settling a dead name
+    # and liquidating the whole book on a bad afternoon.
+    any_data = bool(hists)
+
     for p in data['positions']:
-        sym     = p['symbol']
-        hist    = hists.get(sym)
-        current = float(hist['Close'].dropna().iloc[-1]) if hist is not None and not hist.empty \
-                  else p.get('current_price', p['entry_price'])
+        sym      = p['symbol']
+        hist     = hists.get(sym)
+        has_data = hist is not None and not hist.empty
+        current  = float(hist['Close'].dropna().iloc[-1]) if has_data \
+                   else p.get('current_price', p['entry_price'])
         p['current_price'] = round(current, 4)   # live price — display only
+
+        # Symbol has gone quiet: settle it out rather than holding a position
+        # that can no longer be priced, trailed, or stopped out.
+        if any_data and _apply_stale_price(p, has_data, now_str, stale_max_days):
+            exit_px = float(current)
+            pnl     = round((exit_px - p['entry_price']) * p['shares'], 2)
+            data['closed'].append({
+                **p,
+                'date_closed':  now_str,
+                'exit_price':   round(exit_px, 4),
+                'pnl':          pnl,
+                'pnl_pct':      round((exit_px - p['entry_price']) / p['entry_price'] * 100, 2),
+                'close_reason': 'no_market_data',
+            })
+            closed_now.append(sym)
+            continue
 
         # Close-based basis: outside the late window, decisions use the last
         # COMPLETED daily bar, so a morning run only catches yesterday's
