@@ -1745,7 +1745,13 @@ def refresh_prices(user_id: str | None = None,
     """
     Fetch current prices for all open positions.
     Auto-close any position where the close-basis price <= stop (close-based —
-    mirrors the backtest champion exit; intraday dips do not trigger).
+    mirrors the backtest champion exit; intraday dips do not trigger), or where
+    it has been held past its mode's MAX_HOLD_BARS (calendar days, mirroring
+    simulate()'s MaxHold exit — exit_evaluator.py already recommends this same
+    close, but recommending it was never enough on its own: this is the only
+    function that actually closes a position, and it had no hold-period check
+    at all, so an EXIT_FULL "Max hold" notification could recur indefinitely
+    with no way for it to ever be acted on automatically).
 
     Positions whose symbol has returned no market data for ``stale_max_days``
     calendar days are settled out at their last known mark — see
@@ -1755,6 +1761,7 @@ def refresh_prices(user_id: str | None = None,
     Returns {'closed': [symbols], 'updated': int, 'data': data}
     """
     import yfinance as yf
+    from config import MAX_HOLD_BARS
 
     data = _load_for_write(user_id=user_id, book=book)
     if not data['positions']:
@@ -1835,6 +1842,32 @@ def refresh_prices(user_id: str | None = None,
                 'pnl':          pnl,
                 'pnl_pct':      pnl_pct,
                 'close_reason': 'atr_trail_stop',
+            })
+            closed_now.append(sym)
+            continue
+
+        # MaxHold — calendar days since date_added, mode-specific cap. date_added
+        # is 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' (promote_position_mode re-stamps
+        # with a time component); slicing to the first 10 chars handles both.
+        max_hold = MAX_HOLD_BARS.get(p.get('mode', 'swing'), 30)
+        days_held = None
+        added = (p.get('date_added') or '')[:10]
+        if added:
+            try:
+                days_held = (now_et.date() - datetime.strptime(added, '%Y-%m-%d').date()).days
+            except ValueError:
+                pass
+        if max_hold > 0 and days_held is not None and days_held >= max_hold:
+            exit_px = basis_close
+            pnl     = round((exit_px - p['entry_price']) * p['shares'], 2)
+            pnl_pct = round((exit_px - p['entry_price']) / p['entry_price'] * 100, 2)
+            data['closed'].append({
+                **p,
+                'date_closed':  now_str,
+                'exit_price':   round(exit_px, 4),
+                'pnl':          pnl,
+                'pnl_pct':      pnl_pct,
+                'close_reason': 'max_hold',
             })
             closed_now.append(sym)
         else:

@@ -31,6 +31,11 @@ from unittest.mock import patch, MagicMock
 # passing for entirely the wrong reason. Deriving the date from today keeps
 # every test in this class measuring the quality filter, which is its subject.
 _TODAY = datetime.now().strftime('%Y%m%d')
+# Position fixtures use this instead of a fixed historical date so they stay
+# inside every mode's MAX_HOLD_BARS cap (refresh_prices' MaxHold auto-close,
+# added 2026-08-28) regardless of when the suite runs — same aging trap as
+# the signal-date fix above, one layer down.
+_RECENT_DATE = datetime.now().strftime('%Y-%m-%d')
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -232,7 +237,7 @@ class TestExitFromPortfolioMerge(unittest.TestCase):
         auto_data = {
             'positions': [
                 {'symbol': 'RGC', 'mode': 'swing', 'entry_price': 26.38,
-                 'stop': 21.3, 'target': 37.47, 'date_added': '2026-03-18',
+                 'stop': 21.3, 'target': 37.47, 'date_added': _RECENT_DATE,
                  'quality': 'PREMIUM'},
                 {'symbol': 'AAPL', 'mode': 'swing', 'entry_price': 185.0,
                  'stop': 175.0, 'target': 205.0, 'date_added': '2026-03-17',
@@ -302,7 +307,7 @@ class TestRefreshPricesStopHit(unittest.TestCase):
         import auto_portfolio as ap
 
         data = self._make_portfolio([
-            {'symbol': 'TEST', 'date_added': '2026-03-18', 'mode': 'swing',
+            {'symbol': 'TEST', 'date_added': _RECENT_DATE, 'mode': 'swing',
              'quality': 'PREMIUM', 'minervini_score': 0,
              'entry_price': 100.0, 'stop': 95.0, 'target': 115.0,
              'shares': 100, 'cost': 10000.0, 'current_price': 100.0,
@@ -339,7 +344,7 @@ class TestRefreshPricesStopHit(unittest.TestCase):
         import auto_portfolio as ap
 
         data = self._make_portfolio([
-            {'symbol': 'TEST', 'date_added': '2026-03-18', 'mode': 'swing',
+            {'symbol': 'TEST', 'date_added': _RECENT_DATE, 'mode': 'swing',
              'quality': 'PREMIUM', 'minervini_score': 0,
              'entry_price': 100.0, 'stop': 95.0, 'target': 115.0,
              'shares': 100, 'cost': 10000.0, 'current_price': 100.0,
@@ -395,7 +400,7 @@ class TestDayAfterExit(unittest.TestCase):
         data = {
             'capital': 10000,
             'positions': [
-                {'symbol': 'RGC', 'date_added': '2026-03-18', 'mode': 'swing',
+                {'symbol': 'RGC', 'date_added': _RECENT_DATE, 'mode': 'swing',
                  'quality': 'PREMIUM', 'minervini_score': 0,
                  'entry_price': 26.38, 'stop': 21.3, 'target': 37.47,
                  'shares': 75, 'cost': 1978.5, 'current_price': 26.38,
@@ -444,7 +449,7 @@ class TestDayAfterExit(unittest.TestCase):
         data = {
             'capital': 10000,
             'positions': [
-                {'symbol': 'RGC', 'date_added': '2026-03-18', 'mode': 'swing',
+                {'symbol': 'RGC', 'date_added': _RECENT_DATE, 'mode': 'swing',
                  'quality': 'PREMIUM', 'minervini_score': 0,
                  'entry_price': 26.38, 'stop': 21.3, 'target': 37.47,
                  'shares': 75, 'cost': 1978.5, 'current_price': 26.38,
@@ -487,7 +492,7 @@ class TestDayAfterExit(unittest.TestCase):
         data = {
             'capital': initial_capital,
             'positions': [
-                {'symbol': 'LOSER', 'date_added': '2026-03-18', 'mode': 'swing',
+                {'symbol': 'LOSER', 'date_added': _RECENT_DATE, 'mode': 'swing',
                  'quality': 'PREMIUM', 'minervini_score': 0,
                  'entry_price': 50.0, 'stop': 45.0, 'target': 60.0,
                  'shares': 200, 'cost': 10000.0, 'current_price': 50.0,
