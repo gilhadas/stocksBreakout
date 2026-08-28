@@ -2398,3 +2398,73 @@ organically in §27.
 any that get downgraded/blocked by this gate, and sanity-check each one isn't
 a legitimate tight pre-breakout consolidation getting caught by the absolute
 threshold rather than a genuine deal-pin.
+
+## 29. Lookahead-bias audit: no future-data leak, but the main breakout detector was silently dead in every historical backtest (2026-08-28)
+
+Triggered by a direct request to validate that `backtest_regime_compare.py` isn't
+lying — specifically, that no trading decision ever uses data unavailable as of the
+decision date. Full trace of the decision path (signal generation, all indicators,
+regime classification, entry/exit simulation, pooled-cap ranking) came back clean:
+`df_slice = df[df.index <= sim_date]` bounds every detector call, every indicator in
+`quantkit/indicators.py` uses `.rolling()`/`.ewm()` (backward-only — grepped for
+`center=True` and `.shift(-N)`, zero hits anywhere), `classify_day_regime` and every
+post-hoc gate (SMA200, pinned-range, residual-momentum) re-mask their own lookback to
+the signal's date, and `simulate()`'s exit loop explicitly skips same-day exit checks
+(`if today_norm == pos['entry_date']`) so a position can never stop out on data that
+preceded its own entry. `end_prices` (final mark) is only applied after the day loop
+ends, never mid-simulation. **None of this is where the actual problem was.**
+
+### The real defect: `detect()`'s stale-data guard read the wrong "today"
+`scanner.py`'s main breakout detector (`BreakoutDetector.detect()` — the original
+V3-scoring consolidation-breakout path, not BOUNCE/SMA20_CROSS/TREND_CONFIRM) rejects
+any symbol whose last bar is >7 calendar days older than a `reference_date` kwarg. That
+kwarg defaults to `date.today()` — real wall-clock today — unless the caller passes
+`reference_date=sim_date`. Five other backtest scripts in this repo already do
+(`mode_optimizer.py`, `enhanced_backtest.py`, `backtest_new_signals.py`,
+`scalp_supertrend_backtest.py`, `daytrade_tension_backtest.py` — the last of these even
+has a comment naming the exact trap: *"defeats the >7d stale-data guard"*).
+**`backtest_regime_compare.py` — the script behind every champion table in §7–§13 and
+§26–§28 — never did.**
+
+Verified empirically, not just by reading: called `detector.detect()` directly on real
+2022 AAPL data 50 times → 50/50 rejected (`"stale data (last bar 2022-03-16)"` etc.); ran
+the actual `run_scan()` over 2023 H1 on 3 real symbols → **zero** `BREAKOUT`-type signals,
+only `TREND_CONFIRM`/`BOUNCE`. The guard was added 2026-03-11 (`4b3e1c40`) — so every
+backtest result recorded in this file since then was silently missing the system's
+namesake detector for any date more than a week before whenever the script happened to
+be run. Confirmed this is backtest-only: `orchestrator.py`'s live call site also omits
+`reference_date`, which is *correct* live — real "today" is the right reference there.
+
+### Fix and direct A/B (commit pending push, `backtest_regime_compare.py`)
+Threaded `reference_date=sim_date` into the three `collect_signals_{old,new,hybrid}` →
+`detector.detect()` calls (one-line addition each, matching the existing pattern in the
+other five scripts). 769 tests still pass. Ran the exact champion CLI
+(`--no-tc --bounce-bear-gate 15 --atr-trail-always --skip-old`, `optimizer_watch.txt`)
+before and after as a controlled pair — pre-fix run reproduced the documented champion
+table to the decimal (confirms it as a faithful control), post-fix:
+
+| Year | Pre-fix (documented) | Post-fix | Δ Sharpe |
+|---|---|---|---|
+| 2022 | −10.75% (Sharpe −0.24) | −9.92% (−0.21) | +0.03 |
+| 2023 | +142.17% (+3.42) | **+150.69% (+3.52)** | +0.10 |
+| 2024 | +29.92% (+1.51) | **+42.23% (+2.15)** | **+0.64** |
+| 2025 | +19.63% (+1.09) | +21.83% (+1.21) | +0.12 |
+| 2026 YTD | +5.94% (+0.63) | +5.91% (+0.63) | ~0 |
+| **5yr avg Sharpe** | **+1.28** | **+1.46** | **+0.18** |
+
+Trade counts rose in 2023–2025 (2024: 100→113) as the previously-dead detector started
+contributing; 2026 is unchanged because pooled-cap=10 was already saturated by BOUNCE
+signals most days that year — consistent with §13.5's own finding that the cap, not the
+signal supply, is usually the binding constraint. **Direction matters: this bug made the
+champion look worse than it actually is, not better** — the safer failure mode, but still
+a real one. Logs: `scanner_output/backtests/lookahead_audit_20260828/`.
+
+### Standing implication
+Every table in §7–§13 and §26–§28 computed after 2026-03-11 was validated against a
+signal mix missing the entire original consolidation-breakout detector. The qualitative
+meta-finding (champion well-tuned, most ranking/admission levers null) is unlikely to
+flip wholesale just from more signal supply, but no specific ablation verdict in that
+range has been re-checked against the fix — treat any of them as provisional until
+re-run. Deliberately not done in this session (scope decision): re-running the full
+ablation suite (panic-throttle, pinned-range, tiebreak, sleeve, NBC, SMA200 gates) is a
+substantial job left for a dedicated pass.

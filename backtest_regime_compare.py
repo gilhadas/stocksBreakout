@@ -143,13 +143,14 @@ def is_spy_below_sma200(spy_df, sim_date):
 
 
 # ─── Signal detectors ─────────────────────────────────────────────────────────
-def collect_signals_old(detector, df_slice, symbol, mode, spy_perf):
+def collect_signals_old(detector, df_slice, symbol, mode, spy_perf, sim_date):
     """OLD config: breakout + SMA20_CROSS (vol>=1.8, RSI 48-62) + BOUNCE (no quality gate)"""
     sig = None
     # Breakout
     try:
         sig = detector.detect(df_slice, symbol, mode, '1 day', spy_perf, use_scoring=True,
-                              use_legacy_momentum=False, use_v4_overextension=False)
+                              use_legacy_momentum=False, use_v4_overextension=False,
+                              reference_date=sim_date)
     except Exception:
         pass
     if sig:
@@ -171,7 +172,7 @@ def collect_signals_old(detector, df_slice, symbol, mode, spy_perf):
     return sig
 
 
-def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
+def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime, sim_date):
     """
     NEW config: same detectors BUT with:
     - Vol>=2.5, RSI bimodal in detect_sma20_cross (enforced by scanner already)
@@ -182,7 +183,8 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
     # Breakout always allowed unless RED_MARKET (quality filtered)
     try:
         sig = detector.detect(df_slice, symbol, mode, '1 day', spy_perf, use_scoring=True,
-                              use_legacy_momentum=False, use_v4_overextension=False)
+                              use_legacy_momentum=False, use_v4_overextension=False,
+                              reference_date=sim_date)
     except Exception:
         pass
 
@@ -246,7 +248,7 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
     return sig
 
 
-def collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf, regime, bear_macro):
+def collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf, regime, bear_macro, sim_date):
     """
     V9-H HYBRID: SPY SMA200 quality escalation + BEARISH block.
     - bear_macro=True (SPY < SMA200): GOLD breakouts only, no BOUNCE/SMA20_CROSS
@@ -258,7 +260,8 @@ def collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf, regime, b
     # Breakout detection — always attempt
     try:
         sig = detector.detect(df_slice, symbol, mode, '1 day', spy_perf, use_scoring=True,
-                              use_legacy_momentum=False, use_v4_overextension=False)
+                              use_legacy_momentum=False, use_v4_overextension=False,
+                              reference_date=sim_date)
     except Exception:
         pass
 
@@ -361,11 +364,11 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
 
             for mode in modes:
                 if config == 'old':
-                    sig = collect_signals_old(detector, df_slice, symbol, mode, spy_perf_frac)
+                    sig = collect_signals_old(detector, df_slice, symbol, mode, spy_perf_frac, sim_date)
                 elif config == 'hybrid':
-                    sig = collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf_frac, regime, bear_macro)
+                    sig = collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf_frac, regime, bear_macro, sim_date)
                 else:
-                    sig = collect_signals_new(detector, df_slice, symbol, mode, spy_perf_frac, regime)
+                    sig = collect_signals_new(detector, df_slice, symbol, mode, spy_perf_frac, regime, sim_date)
 
                 if sig:
                     quality = sig.get('Quality', 'STANDARD')
