@@ -486,6 +486,52 @@ def _apply_bounce_sma200_gate(signals, historical, spy_below_dates=None):
     return kept, gated
 
 
+def _apply_pinned_range_gate(signals, historical, lookback_days=60,
+                             max_range_pct=10.0, max_atr_pct=1.5):
+    """Drop GOLD/PREMIUM signals (any type) fired while the stock was trading
+    in an abnormally tight, low-ATR range for `lookback_days` — the
+    cash-merger "pinned" signature (CLAUDE.md §27, 2026-08-12: PRA/JHG/HOLX/
+    STEL scored GOLD/TREND_CONFIRM while merger-arb pinned, the opposite of a
+    genuine Stage 2 breakout). "Best lead" identified in that session, per
+    §13.5's meta-finding that ranking/admission levers keep coming back null
+    and the remaining edge is in signal generation.
+
+    Reuses quantkit.indicators.check_pinned_range (same definition live and
+    in backtest — CLAUDE.md §20's one-filter lesson, learned the hard way
+    after §13's SEMANTIC_FLAGS drift). Applied BEFORE pooling so gated
+    signals don't consume pooled-cap slots (mirrors live, where the scanner
+    would simply never emit the signal in the first place).
+
+    Returns (kept_signals, gated_count).
+    """
+    from quantkit.indicators import calculate_atr, check_pinned_range
+    atr_cache: dict = {}
+    kept, gated = [], 0
+    for s in signals:
+        sym = s['symbol']
+        df = historical.get(sym)
+        if df is None:
+            kept.append(s)
+            continue
+        d = pd.Timestamp(s['date']).normalize()
+        upto = df[df.index.normalize() <= d]
+        if len(upto) < lookback_days:
+            kept.append(s)          # <lookback bars — undefined, permissive pass
+            continue
+        atr_ser = atr_cache.get(sym)
+        if atr_ser is None:
+            atr_ser = calculate_atr(df)
+            atr_cache[sym] = atr_ser
+        window = upto.tail(lookback_days).copy()
+        window['ATR'] = atr_ser.reindex(window.index)
+        is_pinned, _, _ = check_pinned_range(window, lookback_days, max_range_pct, max_atr_pct)
+        if is_pinned:
+            gated += 1
+        else:
+            kept.append(s)
+    return kept, gated
+
+
 def _compute_panic_days(spy_df, sma_window: int = 200, vol_window: int = 20,
                         vol_thresh_daily: float = 0.015):
     """Return the set of normalized dates in a Daniel-Moskowitz 'panic state':
@@ -1303,7 +1349,8 @@ def run_year(year, symbols, capital,
              normal_bounce_cap=0, start_date_override=None, realistic_sizing=False,
              bounce_sma200_gate=False, residual_dist=False, panic_throttle=False,
              bounce_sma200_bear_only=False, live_tiebreak=False,
-             sleeve_symbols=None, sleeve_slots=0, panic_bear_only=False):
+             sleeve_symbols=None, sleeve_slots=0, panic_bear_only=False,
+             reject_pinned_range=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     if start_date_override and start_date_override[:4] == str(year):
@@ -1458,6 +1505,25 @@ def run_year(year, symbols, capital,
                               realistic_sizing=True, swap_on_skip=False, **sim_kw)
             print_report(rpt_gr, f'REALISTIC sizing + BounceSMA200Gate', len(new_premium_g_pooled), spy_info, show_hold_split=True)
             print(f"    {'':42} Skipped for cash: {rpt_gr.get('skipped_signals', 0)}")
+
+    # Ablation rows — pinned/compressed-range veto (§27 "best lead out of the
+    # session"): drop GOLD/PREMIUM signals from stocks trading in an abnormally
+    # tight, low-ATR range (the merger-arb pinned signature — PRA/JHG/HOLX/STEL).
+    # Gate applied pre-pooling, same single-lever-A/B shape as the SMA200 gate above.
+    if reject_pinned_range:
+        new_premium_pr, n_pr = _apply_pinned_range_gate(new_premium, historical)
+        new_premium_pr_pooled = _pooled_cap(new_premium_pr, max_per_day=pooled_cap)
+        rpt_pr = simulate(new_premium_pr_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+PinnedRangeVeto', **sim_kw)
+        print_report(rpt_pr, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +PinnedRangeVeto',
+                     len(new_premium_pr_pooled), spy_info, show_hold_split=True)
+        print(f"    {'':42} Signals gated as pinned/compressed range: {n_pr}")
+        if realistic_sizing:
+            rpt_prr = simulate(new_premium_pr_pooled, start, end, end_prices, historical, capital,
+                               tp_as_trail=True, label='REALISTIC PinnedRangeVeto',
+                               realistic_sizing=True, swap_on_skip=False, **sim_kw)
+            print_report(rpt_prr, f'REALISTIC sizing + PinnedRangeVeto', len(new_premium_pr_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_prr.get('skipped_signals', 0)}")
 
     # Ablation rows — bear-only conditional SMA200 gate (§12 Task 2b): per-stock
     # gate applies ONLY on days SPY itself closed below its SMA200. Motivated by
@@ -2111,6 +2177,14 @@ PARAMETER REFERENCE:
                         '(mirrors auto_portfolio.suggest_swaps() for the swap variant). Off by default to '
                         'preserve all previously documented reproducible baselines.')
 
+    p.add_argument('--reject-pinned-range', action='store_true',
+                   help='Ablation (CLAUDE.md §27): drop GOLD/PREMIUM signals (any type) fired '
+                        'while the stock traded in an abnormally tight, low-ATR range over the '
+                        'last 60 days — the cash-merger "pinned" signature (PRA/JHG/HOLX/STEL '
+                        'scored GOLD/TREND_CONFIRM while merger-arb pinned). Adds gated pooled-cap '
+                        'and gated REALISTIC rows next to the ungated champion rows — single-lever '
+                        'A/B in one run. Off by default.')
+
     p.add_argument('--normal-bounce-cap', type=int, default=0,
                    help='Cap same-day BOUNCE signals in NORMAL regime to at most N within the pooled-cap '
                         'ranking (0=off). Tests the cross-sectional-correlation hypothesis from the 2026 YTD '
@@ -2191,7 +2265,8 @@ def main():
                  live_tiebreak=args.live_tiebreak,
                  sleeve_symbols=sleeve_symbols,
                  sleeve_slots=args.sleeve_slots,
-                 panic_bear_only=args.panic_throttle_bear_only)
+                 panic_bear_only=args.panic_throttle_bear_only,
+                 reject_pinned_range=args.reject_pinned_range)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")

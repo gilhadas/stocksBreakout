@@ -9,12 +9,13 @@ import numpy as np
 
 from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, RR_GRADE_SCORES,
                     BB_TREND_FILTER, WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS,
-                    TREND_CONFIRM, TENSION_CONFIG, SUPERTREND_CONFIG)
+                    TREND_CONFIRM, TENSION_CONFIG, SUPERTREND_CONFIG, PINNED_RANGE_CONFIG)
 from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
     check_volume_divergence,
     check_candle_structure,
+    check_pinned_range,
     compute_volume_profile,
 )
 from market_data import check_liquidity
@@ -181,6 +182,15 @@ class BreakoutDetector:
         df = calculate_all_indicators(
             df, cfg['trend_type'], cfg.get('trend_period'), timeframe
         )
+
+        # Pinned/compressed-range check (deal-pin veto, see PINNED_RANGE_CONFIG) —
+        # computed once up front since it's used by the GOLD/PREMIUM downgrade below.
+        pinned_range, pinned_range_pct, pinned_atr_pct = False, 0.0, 0.0
+        if PINNED_RANGE_CONFIG.get('enabled'):
+            pinned_range, pinned_range_pct, pinned_atr_pct = check_pinned_range(
+                df, PINNED_RANGE_CONFIG['lookback_days'],
+                PINNED_RANGE_CONFIG['max_range_pct'], PINNED_RANGE_CONFIG['max_atr_pct']
+            )
 
         # V15: Supertrend (ATR-band trend filter) — computed on-demand only for the
         # intraday modes that use it (scalping/daytrade), keeping the recursive O(n)
@@ -637,6 +647,19 @@ class BreakoutDetector:
                     old_q = quality
                     quality = _downgrade[quality]
                     logger.debug(f"{symbol}: {old_q}→{quality} (tension fractal contradiction)")
+
+            # Pinned/compressed-range veto — a stock this quiet (tight absolute range
+            # + collapsed ATR, e.g. a cash-merger target pinned near the deal price)
+            # cannot be a genuine Stage 2 breakout. Cap below PREMIUM/GOLD regardless
+            # of how SMA/MACD/RSI happen to read near a flat price. See PINNED_RANGE_CONFIG.
+            if pinned_range and quality in ('GOLD', 'PREMIUM'):
+                old_q = quality
+                quality = 'HIGH'
+                logger.debug(
+                    f"{symbol}: {old_q}→HIGH (pinned/compressed range: "
+                    f"{pinned_range_pct:.1f}% range, {pinned_atr_pct:.2f}% ATR over "
+                    f"{PINNED_RANGE_CONFIG['lookback_days']}d)"
+                )
         else:
             # Original all-or-nothing logic
             condition_names = ['price_break', 'vol_confirm', 'dist_confirm', 'trend_ok',
@@ -1600,6 +1623,19 @@ class BreakoutDetector:
         # Hard prerequisites for any firing: G1, G3, G4, G5, G7 must be True.
         # G2 (slope) and G6 (volume) may relax under Path B.
         hard_ok = last['G1'] and last['G3'] and last['G4'] and last['G5'] and last['G7']
+
+        # Pinned/compressed-range veto (see PINNED_RANGE_CONFIG) — reuses the same
+        # helper as the main breakout path so both detectors agree on one definition
+        # of "pinned" (CLAUDE.md §20's one-filter lesson). TREND_CONFIRM only ever
+        # emits PREMIUM/GOLD, so this fully blocks the detector for a pinned stock
+        # rather than downgrading it, matching the main-path GOLD/PREMIUM veto's intent.
+        if hard_ok and PINNED_RANGE_CONFIG.get('enabled'):
+            _pinned, _, _ = check_pinned_range(
+                df, PINNED_RANGE_CONFIG['lookback_days'],
+                PINNED_RANGE_CONFIG['max_range_pct'], PINNED_RANGE_CONFIG['max_atr_pct']
+            )
+            hard_ok = hard_ok and not _pinned
+
         if not hard_ok:
             return None
 

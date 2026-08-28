@@ -2286,3 +2286,115 @@ available cash $1,331 → **$6,272**.
   concluded the remaining edge lives. Best lead out of this session.
 - The sizing anti-correlation (−0.27) — needs a `--realistic-sizing` arm.
 - §26's degenerate skipped-signal ranking is still unfixed.
+
+## 28. Pinned/Compressed-Range Veto — validated (inconclusive), shipped live (2026-08-21)
+
+Picks up §27's "best lead out of that session": PRA/JHG/HOLX/STEL scored GOLD/
+TREND_CONFIRM while pinned near their merger-arb deal price — collapsed
+volatility, no real trend, the opposite of a genuine Stage 2 breakout — because
+SMA/MACD/RSI can spuriously align near a flat price.
+
+### What shipped (code + tests only — NOT yet enabled live)
+- `quantkit.indicators.check_pinned_range(df, lookback_days=60, max_range_pct=10.0,
+  max_atr_pct=1.5)` — new primitive. Flags a stock only when BOTH the absolute
+  high-low range over the lookback AND current ATR are below threshold —
+  range alone would also catch a legitimate pre-breakout consolidation, ATR
+  alone would catch any quiet low-beta name. Deliberately an ABSOLUTE floor,
+  not relative to the stock's own rolling BB-width average (`Is_Consolidating`)
+  — a stock pinned for months already has a tiny rolling average, so a
+  relative measure never flags it. Re-exported via the `indicators.py` shim.
+- `config.PINNED_RANGE_CONFIG` — new dormant block (`enabled: False`, matching
+  the TENSION_CONFIG/SUPERTREND_CONFIG pattern).
+- `scanner.py` wiring, both gated behind `PINNED_RANGE_CONFIG['enabled']`
+  (currently off, so zero live behavior change):
+  - `detect()`: downgrades GOLD/PREMIUM → HIGH when pinned (mirrors the
+    existing tension-fractal-contradiction downgrade block).
+  - `detect_trend_confirm()`: added as an additional hard-gate requirement,
+    reusing the same `check_pinned_range` helper (one filter, not two
+    hand-written copies — §20's lesson). TREND_CONFIRM only ever emits
+    PREMIUM/GOLD, so this fully blocks the detector for a pinned stock.
+- `backtest_regime_compare.py`: `_apply_pinned_range_gate()` + a
+  `--reject-pinned-range` CLI flag, mirroring `--bounce-sma200-gate`'s shape
+  — gates ANY signal type (not just BOUNCE; the merger-arb failure spanned
+  types), applied pre-pooling, adds gated pooled-cap + REALISTIC rows next to
+  the ungated champion rows for a single-lever A/B.
+- Tests: `tests/test_pinned_range.py` (22 — primitive, config contract,
+  TREND_CONFIRM wiring, and an end-to-end `detect()` test built by mocking
+  every sub-check so the REAL downgrade conditional executes, not a mirror of
+  its logic — the first version of this test suite only checked a hand-copied
+  decision table and would have missed a real regression in the shipped
+  code) + `tests/test_pinned_range_backtest_gate.py` (7). All mutation-verified
+  (core AND predicate, `hard_ok` wiring, the downgrade conditional, the
+  backtest gate's `if is_pinned` branch) — each confirmed to fail before being
+  restored. Full suite green: 795 passed, 10 skipped, 1 xfailed (excluding
+  `test_scan_feedback_agent.py` — three separate runs each hung on a different
+  test in that file on a live, unmocked yfinance/Yahoo call, CLOSE_WAIT
+  confirmed via `lsof`; unrelated to this change, matches the yfinance
+  flakiness already documented elsewhere in this file, e.g. §27). An earlier
+  full run (819 passed, including that file) was clean before this change.
+
+### Validation run (2026-08-21) — zero regression, but the gate never fired
+Per the standing §11 rule, ran the required `--realistic-sizing` ablation before
+touching `enabled`. Two 5yr runs, logs in
+`scanner_output/backtests/pinned_range_validation_20260821/`:
+```bash
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --atr-trail-always \
+  --skip-old --realistic-sizing --reject-pinned-range --watchlist input/plus.txt
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --atr-trail-always \
+  --skip-old --realistic-sizing --reject-pinned-range --watchlist input/spx_plus.txt
+```
+
+| Universe | Symbols | Signals gated (5yr total) | Avg Sharpe, champion | Avg Sharpe, +veto |
+|---|---|---|---|---|
+| `plus.txt` | 129 | **0** / 1,297 | 1.97 | 1.97 (byte-identical) |
+| `spx_plus.txt` | 548 | **0** / 1,958 | 2.10 | 2.10 (byte-identical) |
+
+Every "+PinnedRangeVeto" row in both logs is a byte-identical copy of the
+ungated champion row — same trade count, same Sharpe, same MaxDD, every year.
+**Not a wash in the usual §13.5 sense** (where competing levers produce close
+but distinct numbers) — the gate produced literally zero effect because it
+never fired once across ~3,255 signals.
+
+**Why it never fired, checked rather than assumed:**
+1. Confirmed the primitive isn't broken: a synthetic 90-day flat series (±$0.15
+   noise) with a computed `ATR` column correctly returns `is_pinned=True`
+   (`range_pct≈1.6%`, `atr_pct≈0.6%`, both under threshold). My first attempt
+   at this test omitted the `ATR` column and wrongly returned `False` — a test
+   bug, not a code bug, per the standing §22/§23 lesson to verify a guard
+   actually exercises the code path before trusting its result.
+2. `plus.txt` doesn't contain any of PRA/JHG/HOLX/STEL (the merger-arb names
+   that motivated this feature) — that run was structurally incapable of
+   testing the mechanism, confirmed by grep before trusting the "0 gated"
+   read.
+3. `spx_plus.txt` contains STEL, and STILL shows 0 gated — STEL never even
+   appears in the log as a signal, gated or not. Direct yfinance probes (from
+   the Mac) show PRA/JHG/STEL each return only 1–3 rows of history for all of
+   2024–2026, nowhere near enough for SMA150/200 warmup. This is very likely
+   the **same Mac yfinance rate-limiting artifact §27 already diagnosed**
+   (looks like delisting, isn't) rather than genuine data loss — but the
+   structural point holds regardless of which it is: **a stock that gets
+   absorbed/delisted tends to stop being served by yfinance's default history
+   API**, which is exactly the population this gate targets. A backtest
+   replay is structurally unlikely to ever reproduce this failure mode,
+   independent of whether the gate logic is correct.
+
+### Decision: shipped live anyway (2026-08-21)
+Given zero measured regression across two universes and ~3,255 signals, a
+unit-tested/mutation-verified primitive, and a mechanism that's a pure
+quality-downgrade (worst case: demotes a name that wasn't actually pinned,
+made unlikely by requiring BOTH range and ATR collapse together) — flipped
+`PINNED_RANGE_CONFIG['enabled'] = True` in `config.py` without a positive
+backtest result, on the reasoning that **backtest cannot validate this
+specific lever** (its target population doesn't survive in the data source).
+Per the "measurement over simulation" pattern already established for the
+live signal panel (see `project_live_panel_research_agents_jul2026`), efficacy
+here has to be confirmed live, not in `backtest_regime_compare.py`. Live is a
+better test bed for this one: production position data + the exit
+notification pipeline will surface a false-positive downgrade immediately if
+one occurs, the same way the original PRA/JHG/HOLX/STEL cluster surfaced
+organically in §27.
+
+**Open:** watch the next few weeks of GOLD/PREMIUM/TREND_CONFIRM signals for
+any that get downgraded/blocked by this gate, and sanity-check each one isn't
+a legitimate tight pre-breakout consolidation getting caught by the absolute
+threshold rather than a genuine deal-pin.

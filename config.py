@@ -248,6 +248,26 @@ TREND_CONFIRM = {
     'persistent_min_days':  4,     # need this many of N to qualify
 }
 
+# --- Pinned/Compressed Range Veto ---
+# A stock trading in an abnormally tight range for an extended window (e.g. a
+# cash-merger target pinned near the deal price) has collapsed volatility and
+# no real trend — the opposite of a Stage 2 breakout — yet SMA/MACD/RSI can
+# still spuriously align near a flat price and clear the top quality tier.
+# CLAUDE.md §27 (2026-08-12): PRA/JHG/HOLX/STEL scored GOLD/TREND_CONFIRM while
+# merger-arb pinned; this is the "best lead out of that session" — a
+# signal-generation fix rather than another admission/ranking tweak (§13.5's
+# meta-finding: ranking levers keep coming back null).
+# Dormant until validated via the --reject-pinned-range backtest ablation
+# (judge on the --realistic-sizing arm per the §11 standing rule).
+PINNED_RANGE_CONFIG = {
+    'enabled':         True,    # live 2026-08-21 — zero regression on 2 backtest universes;
+                                 # see CLAUDE.md §28 for why the veto couldn't be positively
+                                 # validated (trigger names drop out of yfinance history once delisted)
+    'lookback_days':   60,      # trading days of high/low range checked
+    'max_range_pct':   10.0,    # (lookback high − lookback low) / close, in percent
+    'max_atr_pct':     1.5,     # current ATR / close, in percent — both must fire together
+}
+
 # --- Selective Mode (high-conviction, ~100 trades/yr) ---
 # Toggleable filter for the auto-portfolio admission stage. When enabled,
 # stacks on top of the existing V9-H Quality+Minervini mask and the cross-day
