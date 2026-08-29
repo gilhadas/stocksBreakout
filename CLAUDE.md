@@ -2468,3 +2468,83 @@ range has been re-checked against the fix — treat any of them as provisional u
 re-run. Deliberately not done in this session (scope decision): re-running the full
 ablation suite (panic-throttle, pinned-range, tiebreak, sleeve, NBC, SMA200 gates) is a
 substantial job left for a dedicated pass.
+
+## 30. SLOW_GRIND detector — built for the NOW miss, validated NULL, shipped dormant (2026-08-29)
+
+Motivated by a live miss: NOW gained +31.5% in August 2026 without firing a single
+signal, any type, all month. Ran every existing detector directly against NOW's real
+daily bars — `detect()` logged "no price break" on every checked date. Root cause:
+NOW's climb was a grind (new highs most days, by a small margin, with occasional red
+days), not a decisive break above a clear resistance level. `detect_continuation()`
+needs 3+ **consecutive** green candles — a single red day resets its streak counter to
+zero, and NOW's real pattern never sustained that; `detect_bounce`/`detect_sma20_cross`/
+`detect_trend_confirm` all need their own sharp triggers a slow grind doesn't produce.
+
+### What was built
+`scanner.py::detect_slow_grind()` — majority (not unbroken) up days over a 15-day
+lookback, ≥10% net cumulative gain, still within 2% of the lookback high, rising SMA20,
+RSI in a healthy 50-75 band (below `detect_continuation`'s 80 blow-off guard), checks-
+based PREMIUM/HIGH/STANDARD quality tiers. Wired as the **final fallback** in
+`orchestrator.py`'s detection cascade (only reached when every other detector returns
+None) and in `backtest_regime_compare.py::collect_signals_new()`, both gated behind
+`config.SLOW_GRIND_CONFIG['enabled']` (shipped `False`). New `--slow-grind` CLI flag
+force-enables it for one backtest run, matching the established dormant-feature pattern
+(Tension Index, Supertrend, panic-throttle). `tests/test_slow_grind.py` — 13 tests, one
+using NOW's own real OHLCV as a fixture (`tests/fixtures/slow_grind_now_2026.csv`,
+force-added past the repo's blanket `*.csv` gitignore rule) as the positive-fire case
+rather than hand-tuned synthetic data — real RSI/SMA/volume interactions were hard to
+fake convincingly during iteration. Mutation-verified; caught one vacuous test in the
+process (a fixture that "tested" the up-day-ratio gate was actually failing on the
+cumulative-return gate first — same class of bug as §22.1/§23's "verify the mutation
+fails the test you think covers it").
+
+⚠ **Also fixed a display bug while validating**: `backtest_regime_compare.py`'s signal-
+type breakdown printout hardcoded a type list that predated `TREND_CONFIRM` and
+`SLOW_GRIND` — both detectors' signals were silently invisible in every run's console
+output even when firing normally. Confirmed via a fast 5-symbol probe (NOW/PLTR/IGV/
+AAPL/MSFT, 2026-06-01→08-28) that SLOW_GRIND does fire through the real pipeline (3 of
+13 signals) once the breakdown list included it.
+
+### Validation (2026-08-29) — full 5yr, realistic-sizing, `plus.txt`, same-code A/B
+Per §11's standing rule, ran champion baseline vs champion+`--slow-grind` back to back
+on identical code (both already carry the §29 `reference_date` fix, so this is a clean
+same-version comparison, not a re-check against the older documented baseline table).
+Logs: `scanner_output/backtests/slow_grind_validation_20260829/`.
+
+| Year | Baseline Sharpe | +SlowGrind Sharpe | Δ | MaxDD base→sg | >15d WR base→sg |
+|---|---|---|---|---|---|
+| 2022 | −0.37 | −0.40 | −0.03 | −31.90%→−31.90% | 70.6%→71.4% |
+| 2023 | +3.83 | +3.81 | −0.02 | −15.27%→−15.92% deeper | 94.5%→93.1% ↓ |
+| 2024 | +3.71 | +3.51 | **−0.20** | −13.02%→−13.78% deeper | 87.5%→87.7% |
+| 2025 | +1.88 | +2.05 | +0.17 | −26.04%→−26.65% deeper | 79.3%→79.4% |
+| 2026 YTD | +1.09 | +1.03 | −0.06 | −20.56%→−22.88% deeper | 84.4%→93.8% |
+| **4-full-yr avg** | **+2.26** | **+2.24** | **−0.02** | | |
+
+SLOW_GRIND fired for real (88–172 signals/year, not a rounding artifact) but the
+aggregate effect is a wash-to-mild-negative — well below the +0.10 ship bar, wrong sign,
+and MaxDD deepens in 4 of 5 years with no offsetting return. **Same crowding-out
+mechanism already diagnosed in §11/§23.4**: new SLOW_GRIND candidates compete for the
+same 10 daily pooled-cap slots and the same cash, displacing some existing BOUNCE/
+Momentum trades rather than purely adding on top — a net-new signal source is not
+automatically additive under a capital- and slot-constrained admission pipeline.
+
+**Verdict: `SLOW_GRIND_CONFIG['enabled']` stays `False`.** Shipped exactly as scoped
+("dormant + backtested") — code, tests, and this result are committed; live behavior is
+unchanged. Joins the null-lever list (§13.5): Tension Index, Supertrend, Breakeven,
+WinProb-cal, Daytrade A/B, SMA200 gates, residual-dist, live-tiebreak, sleeve-slots,
+panic-throttle(+4b), normal-bounce-cap, and now SLOW_GRIND. **Reconfirms §13.5's
+meta-finding once more**: the admission/ranking layer is saturated — a genuinely new,
+correctly-firing signal source still can't clear the bar once it has to compete inside
+the existing pooled-cap. Any future signal-generation idea should be judged the same
+way, not assumed to help just because it fires on the motivating real-world case.
+
+### Still open
+- The NOW-type miss is diagnosed and a fix was built and honestly tested — but the test
+  says this specific fix doesn't pay for itself under the current admission pipeline.
+  Whether a slow-grind-shaped signal could ever help (e.g. with its own reserved pooled-
+  cap slots, mirroring the rejected §13.2 sleeve-slots idea — also null) is unexplored.
+- The Aug-10 signal-flood (19 files in one day inflating the pooled-cap pool to 76
+  candidates, burying PLTR at 73/76 and IGV at 52/76 despite both being legitimate
+  PREMIUM/GOLD) and the ITT exit-notification-without-a-close-record mystery from this
+  same investigation are both still unresolved — deprioritized by explicit user scope
+  choice in favor of the slow-grind detector, not because they're settled.

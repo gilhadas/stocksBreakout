@@ -17,7 +17,8 @@ import pandas as pd
 
 from config import (MODES, MAX_CONCURRENT_REQUESTS, SCAN_DELAY, OUTPUT_DIR,
                     V9H_REGIME_GATE, SECTOR_EXCEPTION, VIX_CONFIG,
-                    SURGE_DAY_CONFIG, BOUNCE_BEAR_GATE, TENSION_CONFIG, SENTIMENT)
+                    SURGE_DAY_CONFIG, BOUNCE_BEAR_GATE, TENSION_CONFIG, SENTIMENT,
+                    SLOW_GRIND_CONFIG)
 from market_data import MarketDataHandler
 from scanner import BreakoutDetector
 from exit_evaluator import ExitEvaluator
@@ -569,6 +570,11 @@ class ScannerOrchestrator:
 
                 if signal is None:
                     signal = self.detector.detect_sma20_cross(
+                        df, symbol, mode, timeframe, spy_perf
+                    )
+
+                if signal is None and SLOW_GRIND_CONFIG.get('enabled'):
+                    signal = self.detector.detect_slow_grind(
                         df, symbol, mode, timeframe, spy_perf
                     )
 

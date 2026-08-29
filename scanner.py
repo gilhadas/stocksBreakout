@@ -9,7 +9,8 @@ import numpy as np
 
 from config import (MODES, REGIME_CONFIG, RR_GRADE_CONFIG, RR_GRADE_SCORES,
                     BB_TREND_FILTER, WIN_PROBABILITY, SCORING_WEIGHTS, SCORE_THRESHOLDS,
-                    TREND_CONFIRM, TENSION_CONFIG, SUPERTREND_CONFIG, PINNED_RANGE_CONFIG)
+                    TREND_CONFIRM, TENSION_CONFIG, SUPERTREND_CONFIG, PINNED_RANGE_CONFIG,
+                    SLOW_GRIND_CONFIG)
 from indicators import (
     calculate_all_indicators,
     calculate_gap_percent,
@@ -1520,6 +1521,137 @@ class BreakoutDetector:
             f"🚀 CONTINUATION {symbol} @ ${latest['close']:.2f} | "
             f"{streak}-day streak +{cum_move_pct:.1f}% | "
             f"Vol: {streak_vol_ratio:.1f}x | RSI: {rsi:.0f} | {quality}"
+        )
+
+        return signal
+
+    def detect_slow_grind(self, df: pd.DataFrame, symbol: str, mode_name: str,
+                          timeframe: str, spy_perf: float = 0.0,
+                          **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        Detect a steady grinding uptrend — new highs on most days, but no
+        single dramatic breakout candle and no near-unbroken green streak.
+
+        Every other detector needs a sharp trigger: a decisive break above
+        resistance (detect), an oversold snap-back (detect_bounce), a fresh
+        SMA20 cross, 3+ CONSECUTIVE green candles with an 8%+ move
+        (detect_continuation — a single red day resets its streak counter to
+        zero), or a full gate stack in one bar (detect_trend_confirm). A stock
+        that grinds up over weeks with the occasional red day mixed in
+        satisfies none of them — this is the gap CLAUDE.md's 2026-08 review
+        found (NOW +31.5% in August, zero signals of any type all month).
+
+        Criteria (SLOW_GRIND_CONFIG):
+          1. Net return over the lookback >= min_cum_return_pct
+          2. Majority (>= min_up_day_ratio) of days in the lookback are up
+             days — deliberately NOT requiring a near-unbroken streak
+          3. Close within near_high_pct of the lookback's own high — still
+             near its highs, not round-tripping back down
+          4. Close above SMA20, and SMA20 itself rising over the lookback
+          5. RSI in [rsi_min, rsi_max] — healthy but not blown off
+          6. Average volume ratio over the lookback >= min_vol_ratio
+        """
+        cfg = SLOW_GRIND_CONFIG
+        lookback = cfg['lookback_days']
+
+        if len(df) < max(60, lookback + 25):
+            return None
+
+        mcfg = MODES.get(mode_name, MODES['swing'])
+        if 'ATR' not in df.columns:
+            df = calculate_all_indicators(
+                df, mcfg['trend_type'], mcfg.get('trend_period'), timeframe
+            )
+
+        latest = df.iloc[-1]
+        window = df.iloc[-lookback:]
+        start = df.iloc[-(lookback + 1)]
+
+        cum_return_pct = (latest['close'] - start['close']) / start['close'] * 100
+        if cum_return_pct < cfg['min_cum_return_pct']:
+            return None
+
+        closes = window['close'].to_numpy()
+        prior_closes = df['close'].iloc[-(lookback + 1):-1].to_numpy()
+        up_days = int((closes > prior_closes).sum())
+        up_day_ratio = up_days / lookback
+        if up_day_ratio < cfg['min_up_day_ratio']:
+            return None
+
+        lookback_high = float(window['high'].max())
+        if latest['close'] < lookback_high * (1 - cfg['near_high_pct'] / 100):
+            return None
+
+        sma20 = df['close'].rolling(20).mean()
+        sma20_now = sma20.iloc[-1]
+        sma20_then = sma20.iloc[-(lookback + 1)]
+        if pd.isna(sma20_now) or pd.isna(sma20_then):
+            return None
+        if latest['close'] < sma20_now or sma20_now <= sma20_then:
+            return None
+
+        rsi = latest.get('RSI', 50)
+        if pd.isna(rsi) or not (cfg['rsi_min'] <= rsi <= cfg['rsi_max']):
+            return None
+
+        vol_avg_ref = df['volume'].rolling(20).mean().iloc[-(lookback + 1)]
+        vol_ratio = (float(window['volume'].mean()) / vol_avg_ref
+                     if vol_avg_ref and not pd.isna(vol_avg_ref) else 1.0)
+        if vol_ratio < cfg['min_vol_ratio']:
+            return None
+
+        atr = latest['ATR']
+        if pd.isna(atr):
+            return None
+        lookback_low = float(window['low'].min())
+        sl = max(lookback_low, latest['close'] - cfg['atr_stop_mult'] * atr)
+        risk = latest['close'] - sl
+        if risk <= 0:
+            return None
+        tp = latest['close'] + risk * cfg['target_rr']
+        rr = cfg['target_rr']
+
+        rs_ok = (cum_return_pct / 100) > spy_perf if mode_name != 'scalping' else True
+
+        checks = {
+            'return_strong':   cum_return_pct >= cfg['min_cum_return_pct'] * 1.5,
+            'up_ratio_strong': up_day_ratio >= 0.65,
+            'rs_ok':           rs_ok,
+            'rsi_mid':         55 <= rsi <= 70,
+            'vol_confirmed':   vol_ratio >= 1.3,
+        }
+        passed = sum(checks.values())
+        if passed >= 4:
+            quality = 'PREMIUM'
+        elif passed >= 2:
+            quality = 'HIGH'
+        else:
+            quality = 'STANDARD'
+
+        signal = {
+            'Symbol':      symbol,
+            'Price':       round(latest['close'], 2),
+            'Vol':         round(vol_ratio, 2),
+            'Dist':        round(cum_return_pct, 1),
+            'SMA_Dist%':   round(((latest['close'] - sma20_now) / sma20_now) * 100, 1),
+            'Stop':        round(sl, 2),
+            'Target':      round(tp, 2),
+            'R:R':         round(rr, 2),
+            'Gap%':        round(cum_return_pct / lookback, 2),
+            'Mode':        mode_name,
+            'Quality':     quality,
+            'Type':        'SLOW_GRIND',
+            'RSI':         round(rsi, 1),
+            'UpDayRatio':  round(up_day_ratio, 2),
+        }
+        _cal = self._calibrated_winprob('SLOW_GRIND', quality)
+        if _cal:
+            signal['WinProb'], signal['WinGrade'] = _cal
+
+        logger.info(
+            f"🐢 SLOW_GRIND {symbol} @ ${latest['close']:.2f} | "
+            f"{lookback}d +{cum_return_pct:.1f}% | UpDays: {up_day_ratio:.0%} | "
+            f"Vol: {vol_ratio:.1f}x | RSI: {rsi:.0f} | {quality}"
         )
 
         return signal

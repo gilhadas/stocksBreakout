@@ -34,6 +34,7 @@ except RuntimeError:
 
 from scanner import BreakoutDetector
 from config import TREND_CONFIRM as _TC_CFG
+from config import SLOW_GRIND_CONFIG as _SG_CFG
 from yfinance_adapter import YFinanceAdapter
 
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
@@ -245,6 +246,18 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime, sim_
             sig = detector.detect_trend_confirm(df_slice, symbol, mode, '1 day', spy_perf)
         except Exception:
             sig = None
+    if sig:
+        return sig
+
+    # SLOW_GRIND — final fallback (2026-08-29). Catches steady grinding uptrends
+    # (majority up days, no single dramatic candle) that every detector above
+    # misses by construction. Respects SLOW_GRIND_CONFIG['enabled'] (off by
+    # default); --slow-grind CLI flag forces it on for this run regardless.
+    if _SG_CFG.get('enabled') and regime not in ('RED_MARKET', 'BEARISH'):
+        try:
+            sig = detector.detect_slow_grind(df_slice, symbol, mode, '1 day', spy_perf)
+        except Exception:
+            sig = None
     return sig
 
 
@@ -420,7 +433,8 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
         for q in ['GOLD', 'PREMIUM', 'HIGH', 'STANDARD']:
             n = (sig_df['quality'] == q).sum()
             if n: print(f"    {q}: {n}")
-        for t in ['SMA20_CROSS', 'BOUNCE', 'CONTINUATION', 'Momentum', 'BREAKOUT', 'PULLBACK']:
+        for t in ['SMA20_CROSS', 'BOUNCE', 'CONTINUATION', 'Momentum', 'BREAKOUT', 'PULLBACK',
+                  'TREND_CONFIRM', 'SLOW_GRIND']:
             n = (sig_df.get('type', pd.Series()) == t).sum() if 'type' in sig_df.columns else 0
             if n: print(f"    Type={t}: {n}")
     return signals
@@ -2084,6 +2098,10 @@ PARAMETER REFERENCE:
     p.add_argument('--no-tc', action='store_true',
                    help='Disable TREND_CONFIRM multi-gate check in signal collection. TREND_CONFIRM Path B destroys edge (-24pts); '
                         'Path A is kept but minimal (+2.7pts). Use --no-tc to reproduce pre-TC +195%% baseline or disable all TREND_CONFIRM logic.')
+    p.add_argument('--slow-grind', action='store_true',
+                   help='Force-enable the SLOW_GRIND detector (2026-08-29, off by default in config.py) '
+                        'for this run — catches grinding uptrends (majority up days, no single breakout '
+                        'candle) that no other detector fires on. Unvalidated; this flag exists to validate it.')
 
     p.add_argument('--pooled-cap', type=int, default=10,
                    help='Max NEW signals to admit per calendar day in pooled-cap★ row (default: 10). '
@@ -2205,6 +2223,15 @@ def main():
         import config as _cfg
         _cfg.TREND_CONFIRM['enabled'] = False
         print("⚠  --no-tc: TREND_CONFIRM disabled for this run (reproducing NEW-no-TC baseline)")
+
+    if args.slow_grind:
+        import config as _cfg
+        _cfg.SLOW_GRIND_CONFIG['enabled'] = True
+        # backtest_regime_compare's module-level _SG_CFG is the same dict object
+        # config.SLOW_GRIND_CONFIG refers to, so mutating it here is enough —
+        # collect_signals_new reads _SG_CFG.get('enabled') at signal-collection
+        # time, not at import time.
+        print("⚠  --slow-grind: SLOW_GRIND detector force-enabled for this run (unvalidated ablation)")
 
     if args.no_aroon:
         import config as _cfg
