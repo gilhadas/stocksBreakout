@@ -1185,3 +1185,60 @@ not committed — kept locally for reproducibility this session only).
 closed; the one new observation (Materials) is filed as flagged-not-actionable; the one
 new hazard (HZ5) doesn't change any existing verdict. Budget `end_date` is tomorrow
 (2026-07-31) — nothing else queued for this role.
+
+---
+
+## 2026-08-29 (worker-picking) — H2 reopening-trigger recheck post-outage: not yet met, but archive gap confirmed closed going forward
+
+**Context.** The runner had a ~4-week outage (main repo left checked out off
+`research/auto-agents` — see `reference_research_runner_branch_dependency` memory) that
+was just resolved; `budget.json` was updated today noting "H2's reopening trigger ...
+should fire once the panel re-ingests the 42 signal files that queued up during the
+outage." This tick checks whether it did.
+
+**Panel state:** 10710 rows (up from 10003 on 2026-07-28), signal dates now current
+through **2026-08-28**. Frozen (`bars_available>=30`, `is_episode_start`) episode set:
+**1719 rows, 46 unique dates, 2026-04-01 → 2026-07-17** (up from 1675/41/→06-08 on
+2026-07-28). Only **5 new frozen dates** (07-06, 07-07, 07-09, 07-16, 07-17; 44 new
+episode-start rows, mostly TREND_CONFIRM 30/44).
+
+**Two things checked, one expected, one new:**
+1. **HZ4's archive gap is unchanged and permanent.** 2026-06-10→07-05 (28 calendar
+   days) still has zero signal files in the raw panel, identical to the original
+   finding. The outage-recovery re-ingested files that existed on S3 but queued in the
+   local runner — it could not and did not backfill data that was never archived. This
+   gap will permanently cap how many *April–June* frozen dates ever exist; it does not
+   affect July onward.
+2. **New: post-gap coverage is dense/continuous from 2026-07-16 onward.** Checked
+   business-day coverage Jul 1 → Aug 29: only 8 missing days total, and all 8 fall in
+   the 07-01→07-15 window (tail of HZ4 plus a small separate 4-day stretch 07-10/13/14/
+   15 — not investigated further, low priority, doesn't block anything). From 07-16
+   through the panel's current max date (08-28) there are **zero missing business
+   days**. This means the reason frozen-day growth is slow right now is **purely the
+   30-trading-day aging requirement**, not sparse archive coverage — a meaningfully
+   better position than every prior recheck (07-25/27/28), each of which couldn't rule
+   out that the archive itself was still the bottleneck.
+
+**Threshold check:** H2's stated reopening criterion (set by the lead 2026-07-27) is
+**≥70 frozen dates** for the walk-forward Ridge retry. Currently 46/70 — **not met**.
+Given dense coverage from 07-16 onward, growth from here is time-gated at roughly one
+new frozen date per elapsed trading day (~5/week) rather than archive-gated, so a
+concrete estimate is now possible for the first time: **≈2026-10-06**, assuming the
+panel keeps refreshing daily and no new archive gaps appear. This is a real ETA, not a
+placeholder — the prior "mid-to-late August" estimates were never reliable because they
+implicitly assumed no further outages, which turned out false.
+
+**No retry attempted this tick** — 46 < 70, consistent with the lead's own criterion.
+No other picking-owned hypothesis is open: H6 closed-null (2026-07-30); H2's mechanism
+sub-question (GOLD>PREMIUM pooled-cap ranking) is answered and closed with "no proposal
+needed." This is the 4th reopening-trigger recheck (07-25, 07-27, 07-28, now) — logged
+despite the repetition because it was explicitly anticipated by today's `budget.json`
+note and because it produced a genuinely new fact (post-gap coverage density / real
+ETA), not a flat repeat of the "still blocked, no change" verdict from the prior three.
+
+Scratch scripts: `research/tmp/h2_recheck_20260829.py`, `h2_recheck2_20260829.py`
+(gitignored, not committed).
+
+**Next picking task, unchanged from H6's closeout:** none until the ≥70-frozen-date
+threshold is reached (~2026-10-06 per above) or the lead reprioritizes. No further
+action taken this tick.

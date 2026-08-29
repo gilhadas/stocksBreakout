@@ -90,6 +90,14 @@ reopened: retry the walk-forward Ridge with ≥70 frozen training days, targetin
 confirmed ≤15d-vs->15d hold split rather than raw ret_20d — and lead with **RSI** as the
 first feature to test (see evidence below), not a fresh 16-feature sweep.
 
+**Reconfirmed 2026-08-29, post ~4wk runner-outage resume:** frozen set grew to
+1719/46 dates (→2026-07-17), still short of the 70-date threshold. New fact: coverage
+from 2026-07-16 onward is dense/continuous (0 missing business days through the panel's
+current max, 2026-08-28) — growth from here is purely 30-trading-day-aging-bound, not
+archive-gated, giving a real ETA of **~2026-10-06** for the first time. HZ4's 06-10→07-05
+gap is confirmed permanent/unfilled by the outage recovery. Full detail:
+`decisions.md` 2026-08-29 (worker-picking). No retry attempted; threshold not met.
+
 **RSI named as the candidate feature (prescreen, 2026-07-27):** a diagnostic univariate
 screen (not a fitted model) found RSI's tercile/decile spread on the TC gt15d rate is the
 largest of 10 admission-time features tested (37.9pp, next-best sector at 32.6pp with no
