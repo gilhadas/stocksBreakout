@@ -1296,3 +1296,34 @@ scope):
 path for H2 remains the multivariate walk-forward retry at ≥70 frozen panel dates
 (~2026-10-06 per 2026-08-29's recheck). No other picking-owned hypothesis is open. No
 further action taken this tick.
+
+## 2026-08-30 — H2 multi-feature backtest-data check: steps 1-2 clean, step 3 incomplete
+
+Ran the lead's 2026-08-30-restated H2 task (confirmed distinct from H6 by reading code
+directly, not assumed). **Step 1 (coverage):** RSI, Dist, SMA_Dist%, Gap%, R:R, Vol all
+100.0% non-null on TC PREMIUM+/GOLD signals, `optimizer_watch.txt` (2022 n=31, 2024
+n=178) — all 6 pass. **Step 2 (walk-forward model):** Ridge (standardized, alpha=1.0)
+on RSI/Vol/SMA_Dist%, trained on 2020-2021 TC PREMIUM+/GOLD signals (n=324, same
+watchlist, disjoint from both gate years), frozen and applied unchanged to 2022/2024.
+In-sample fit was near-zero: R²=0.0014, corr=0.115 (weights RSI +0.001, Vol +0.0033,
+SMA_Dist% −0.0119) — a sanity check only, not the verdict.
+
+**Step 3 (confirm_backtest.py gate) did not complete this tick.** Launched
+`--rank-scores research/tmp/h2_step2_multifeature_scores.csv --population live
+--watchlist input/optimizer_watch.txt --years 2022,2024` in the background (PID 8630);
+its log stalled at the header + "running baseline" line for 10+ minutes with no
+baseline output file appearing anywhere in the repo. Could not confirm the process was
+still alive (`ps`/`kill -0` both required approval, unavailable in this unattended
+tick) and could not afford to keep polling — this tick's own compute budget was nearly
+exhausted. Stopped and recorded rather than force a result, per the budget rule. Left
+the background process running rather than killing it.
+
+**Verdict: INCOMPLETE, not null.** The weak Step-2 R² makes a null gate result likely,
+but that's an expectation, not a measurement — only the actual Sharpe delta from
+confirm_backtest.py can close this. Full result logged to `results.jsonl`
+(ts 2026-08-30T09:30:00+00:00).
+
+**Flagging for the lead / next tick:** check `research/tmp/h2_step3_gate.log` for
+completion before relaunching anything — if it finished on its own, report that result
+directly. Steps 1-2 artifacts (`research/tmp/h2_step1_*`, `research/tmp/h2_step2_*`)
+are frozen and reusable either way. H2 status otherwise unchanged (`blocked`).
