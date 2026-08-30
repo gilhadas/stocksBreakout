@@ -98,6 +98,47 @@ archive-gated, giving a real ETA of **~2026-10-06** for the first time. HZ4's 06
 gap is confirmed permanent/unfilled by the outage recovery. Full detail:
 `decisions.md` 2026-08-29 (worker-picking). No retry attempted; threshold not met.
 
+**Task assigned to picking, effective now (2026-08-30, human+assistant) — interim
+backtest-data check, mirroring H6's playbook, does NOT replace the live-panel retry.**
+Rather than wait until ~2026-10-06 for the panel to clear 70 frozen dates, run the same
+kind of continuous-ranking test H6 already validated as workable via the **5-year
+historical backtest** (`backtest_regime_compare.py` / `confirm_backtest.py
+--rank-scores`, `--population live`) — that data already exists today with genuine
+multi-regime coverage the panel won't have for months.
+
+**Why this is an interim check, not a substitute — read before running:**
+- The backtest is an *approximation* of live (`--population live` re-weights its
+  naturally BOUNCE-heavy engine to look TC-dominated), not the live signal stream itself.
+- HZ2's schema drift means most panel features (FinBERT_*, Buzz, TC_Score, sector RS)
+  are unlikely to exist reliably on older backtest-generated signal rows — **check
+  per-column coverage across years FIRST**; do not assume a feature is usable just
+  because the panel has it. RSI and basic OHLCV-derived fields (Dist, SMA_Dist%, Gap%,
+  R:R, Vol) are the safe baseline (RSI already prescreened as the strongest, see below).
+  If more than RSI survives the coverage check, a small (2-4 feature) walk-forward model
+  is fine — stay inspectable, do not fit a 16-feature model on backtest data either.
+- `backtest_regime_compare.py` itself has had real, material correctness bugs found and
+  fixed on a lag — most recently §29 (2026-08-28): a stale `reference_date` guard had
+  silently killed the original breakout detector in every run since March, moving the
+  5yr champion Sharpe 1.28→1.46. Treat its output as a good-faith estimate, not ground
+  truth.
+- **Ship bar is unchanged** (≥+0.10 Sharpe on the REALISTIC arm, >15d WR must not
+  shrink, full-year averages only per §13.5) — but a marginal or ambiguous result here
+  must be logged as **inconclusive, pending live-panel confirmation at ~Oct 6**, not
+  shipped either way. Only a decisive result (a clear reject like H6's, or a clear pass
+  that also clears the live-panel retry once it's available) should actually close this
+  question. A "promising" backtest read is not sufficient on its own to promote to live
+  config — that judgment call belongs to a human, not this tick.
+
+**Method, following H6's corrected playbook exactly (same stall/lesson applies):**
+checkpoint the rank-scores CSV after every year (do not accumulate in memory across a
+multi-year loop — this is exactly how H6's first attempt lost two years of completed
+work). First pass: years 2022 and 2024 only (matches `confirm_backtest.py`'s own
+defaults), `optimizer_watch.txt` universe (matches the harness already proven working
+in the H6 log). Do not run a separate baseline scan — `confirm_backtest.py` already
+produces the paired comparison internally.
+
+---
+
 **RSI named as the candidate feature (prescreen, 2026-07-27):** a diagnostic univariate
 screen (not a fitted model) found RSI's tercile/decile spread on the TC gt15d rate is the
 largest of 10 admission-time features tested (37.9pp, next-best sector at 32.6pp with no
