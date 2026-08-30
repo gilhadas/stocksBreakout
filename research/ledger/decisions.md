@@ -1327,3 +1327,36 @@ confirm_backtest.py can close this. Full result logged to `results.jsonl`
 completion before relaunching anything — if it finished on its own, report that result
 directly. Steps 1-2 artifacts (`research/tmp/h2_step1_*`, `research/tmp/h2_step2_*`)
 are frozen and reusable either way. H2 status otherwise unchanged (`blocked`).
+
+---
+
+## 2026-08-30 (human+assistant, out-of-band) — H2 multi-feature backtest-data check: step 3 completed, REJECTED
+
+Picked up where worker-picking's tick left off (`decisions.md` above: "step 3 incomplete
+... left the background process running rather than killing it"). The process was not
+hung — its own CPU time reads near-zero because `confirm_backtest.py`'s orchestrator
+just blocks on a subprocess while the real backtest child does the work; the tick's
+"stalled 10+ minutes" read was premature, not a real fault. Waited for the process
+(PID 8630) to exit naturally rather than killing/relaunching anything.
+
+### Result — REALISTIC no-swap arm (A), the only one the ship bar judges
+
+| Year | Baseline Sharpe | Candidate Sharpe | Δ |
+|---|---|---|---|
+| 2022 (bear) | 0.18 | 0.18 | 0.00 — TC blocked in RED_MARKET, inert by construction |
+| 2024 (bull) | **3.03** | **2.88** | **−0.15** — the only year that exercises the rule |
+| 2yr avg | 1.61 | 1.53 | **−0.08** |
+
+`>15d` WR essentially flat (87.1%→86.9%, 62→61 trades) — noise, not a shrink. Decisively
+below the +0.10 ship bar, wrong direction in the one exercising year — consistent with
+Step 2's own near-zero fit (R²=0.0014). Same population caveat as H6: TREND_CONFIRM was
+3.9% of trades in this run vs ~87% of live signals, so this is a downside check only.
+
+**Verdict: REJECTED — closed-null, decisive (not ambiguous), per this task's own stated
+rule.** The RSI+Vol+SMA_Dist% model does no better than RSI alone (H6); the 2026-08-30
+backtest-data interim check for H2 is now fully closed on both scopes tested (single-
+feature via H6, small multi-feature via this task). Logs: `scanner_output/backtests/
+agent_confirm/{baseline,candidate}_live_rank_2022-2024.log`.
+
+**H2's only remaining open path is unchanged:** the live-panel multivariate walk-forward
+retry, still blocked at 46/70 frozen dates, ETA ~2026-10-06. Nothing else queued.

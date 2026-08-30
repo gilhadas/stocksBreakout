@@ -141,6 +141,16 @@ panel) actually closes this early. Remember `backtest_regime_compare.py` has its
 history of correctness bugs found on a lag (most recently §29, 2026-08-28) — treat its
 output as a good-faith estimate, not ground truth.
 
+**CLOSED 2026-08-30 (human+assistant) — REJECTED, decisively.** Steps 1-2 passed
+coverage (6/6 features 100% non-null) and fit a Ridge on RSI/Vol/SMA_Dist% (R²=0.0014,
+near-noise). Step 3 gate: 2yr avg Sharpe Δ=**−0.08** (2022 0.00 — TC blocked in bear,
+inert by construction; 2024 **−0.15** — the only exercising year), >15d WR flat
+(87.1%→86.9%). Decisively below the +0.10 bar, same shape and same population caveat as
+H6 (TREND_CONFIRM only 3.9% of trades here vs ~87% live). Full result:
+`decisions.md` 2026-08-30. **This closes the backtest-data interim path for H2 on both
+scopes now tested (RSI-alone via H6, small multi-feature via this task).** The live-
+panel multivariate retry (≥70 frozen dates, ETA ~2026-10-06) remains the only open path.
+
 ---
 
 **RSI named as the candidate feature (prescreen, 2026-07-27):** a diagnostic univariate
