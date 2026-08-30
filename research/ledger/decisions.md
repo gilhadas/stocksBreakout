@@ -1242,3 +1242,57 @@ Scratch scripts: `research/tmp/h2_recheck_20260829.py`, `h2_recheck2_20260829.py
 **Next picking task, unchanged from H6's closeout:** none until the ≥70-frozen-date
 threshold is reached (~2026-10-06 per above) or the lead reprioritizes. No further
 action taken this tick.
+
+---
+
+## 2026-08-30 (worker-picking) — H2's assigned "interim backtest check" duplicates H6; not re-run, flagged to lead
+
+**Checked panel state first:** no change worth noting beyond the 2026-08-29 recheck
+(one day of signal-date growth, no new frozen dates). Nothing new for the multivariate
+retry.
+
+**What I actually did this tick.** `hypotheses.md` carries a task block under H2 dated
+"effective now (2026-08-30, human+assistant)" titled "interim backtest-data check,
+mirroring H6's playbook." Reading it against H6's own text side by side: it is not
+*inspired by* H6's method, it is H6's method, verbatim — same feature (RSI on TC
+PREMIUM+/GOLD signals), same watchlist (`optimizer_watch.txt`), same years (2022 and
+2024 only, first pass), same `--population live`, same "checkpoint per year, don't
+build a separate baseline" instructions, same downstream `confirm_backtest.py
+--rank-scores` call. There is no scope delta I can identify beyond wording.
+
+**H6 already ran exactly this and closed it — decisively, not ambiguously.** CSV built
+2026-07-29 (`research/tmp/h6_rsi_rank_scores.csv`, verified still present, 556 data
+rows). Gate run 2026-07-30: REALISTIC no-swap arm, 2022 Δ=0.00 (TC blocked in
+RED_MARKET/BEARISH, trade-for-trade identical by construction), **2024 Δ=−0.15** (the
+only year that actually exercises the rule), 2yr avg Δ=**−0.08** — decisively short of
+the +0.10 ship bar and in the wrong direction in the one year that tests it. `>15d` WR
+did not shrink (87.1%→86.9%). Verdict recorded: `closed-null`, and H6's status field in
+`hypotheses.md` already reads `closed-null (2026-07-30)`.
+
+**Action taken: none — did not rebuild the CSV or rerun the gate.** Re-running an
+already-closed, method-identical test produces zero new information and burns budget
+for its own sake, which the guardrails and this session's operating instructions both
+call out as the wrong default ("repeating completed work is a failure, not a safe
+default"). Recorded a duplicate-detection entry in `results.jsonl` instead of a fresh
+experiment result.
+
+**Flagging for the lead, not deciding myself:** two ways to resolve this, and I don't
+have the authority to pick between them (only the lead edits `hypotheses.md` status/
+scope):
+1. If the intent was simply "confirm H2 has an interim answer via backtest data" — it
+   does, H6 *is* that answer, and this task block should be marked resolved-by-H6 with
+   a cross-reference, not left as an open, seemingly-fresh task that the next tick will
+   also mistake for new work.
+2. If the intent was a **genuinely broader** check the wording gestures at but doesn't
+   commit to — e.g., the "if more than RSI survives the coverage check, a small (2-4
+   feature) walk-forward model is fine" option, or a wider watchlist/more years than
+   H6's narrow 50-symbol/2-year scope — that needs to be stated explicitly (which
+   features, which watchlist, which years) so it's distinguishable from H6 before
+   another tick spends compute on it. A per-column coverage check across years (HZ2)
+   would be the correct first step of that larger task, and was not done as part of H6
+   (H6 used RSI alone, already known to be coverage-safe as a basic field).
+
+**H2 status unchanged (still `blocked`) — I did not touch it.** The only genuinely open
+path for H2 remains the multivariate walk-forward retry at ≥70 frozen panel dates
+(~2026-10-06 per 2026-08-29's recheck). No other picking-owned hypothesis is open. No
+further action taken this tick.
