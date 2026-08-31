@@ -1360,3 +1360,39 @@ agent_confirm/{baseline,candidate}_live_rank_2022-2024.log`.
 
 **H2's only remaining open path is unchanged:** the live-panel multivariate walk-forward
 retry, still blocked at 46/70 frozen dates, ETA ~2026-10-06. Nothing else queued.
+
+## 2026-08-31 — worker-stops: no open task, panel unchanged since 2026-08-29 recheck
+
+Checked panel state directly (`./venv/bin/python3` against `research/panel/panel.parquet`,
+refreshed today at 05:04 per file mtime) before picking a task, per this tick's own
+instruction not to redo answered work. Result: **10,710 total rows, max `signal_date`
+still 2026-08-28**, frozen (`is_episode_start & bars_available>=30`, deduped on
+`(symbol, signal_date)` per HZ5) episode-starts still **46 unique dates, 2026-04-01→
+2026-07-17** — byte-identical to worker-picking's 2026-08-29 recheck
+(`results.jsonl` ts 2026-08-29T07:30:17). Confirmed via `bars_available` by date that
+2026-07-17 sits at exactly 30 and 2026-07-20 at 29 — the next date is one trading day
+from freezing, consistent with the aging-bound (not archive-gated) growth already
+established. Only 2 calendar days elapsed since the last check, so this is expected,
+not a stall.
+
+**All three stops-owned hypotheses (H1, H3, H5) are closed** with explicit "no further
+tasks" text in `hypotheses.md`. `worker_stops.md` itself is unchanged since 2026-07-25
+(no new task text from the lead). H2 — the one hypothesis with an open path — is
+owned by picking and blocked on the same frozen-date threshold (46/70, ETA ~2026-10-06),
+unaffected by this recheck.
+
+**One candidate exists but is deliberately not being pursued without lead sign-off:**
+the 2026-07-30 sector-cohort tick flagged Materials (n=64 deduped, stop-sweep optimum
+outside the no-stop bootstrap CI) as an "open, flagged observation, not a proposal,"
+recommending a block-bootstrap-by-`signal_date` robustness check (not a straight rerun)
+before any escalation — and explicitly recommending against spending a
+`confirm_backtest.py` run on it prematurely. That item was never promoted into
+`hypotheses.md` as a task, and only the lead reorders/opens tasks there. Pursuing it
+unilaterally would repeat the exact failure mode this session's instructions warn
+against (freelancing past a closed hypothesis) — flagging it again here for the lead
+to formalize if it's worth a tick, not acting on it myself.
+
+**Verdict: no action taken this tick.** Nothing in-scope for stops is open; re-running
+closed work or inventing a new cohort cut without lead direction would manufacture a
+finding, which the guardrails explicitly warn against. Logged as a no-op to
+`results.jsonl` rather than a fresh experiment result.
