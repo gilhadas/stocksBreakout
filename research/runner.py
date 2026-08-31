@@ -569,7 +569,7 @@ def _commit_ledger(role: str, tick: int) -> None:
     r = subprocess.run(['git', 'commit', '-m', msg, '--', rel],
                        cwd=str(ROOT), capture_output=True, text=True)
     print(f"  ledger committed (tick {tick})" if r.returncode == 0
-          else f"  ledger commit skipped: {r.stdout.strip()[-200:]}")
+          else f"  ledger commit skipped: {(r.stdout + r.stderr).strip()[-200:]}")
 
 
 if __name__ == '__main__':
