@@ -320,3 +320,89 @@ class TestMainPathDowngrade:
         import scanner
         assert hasattr(scanner, 'check_pinned_range')
         assert hasattr(scanner, 'PINNED_RANGE_CONFIG')
+
+
+# ── 5. detect_sma20_cross() — the gap CWAN slipped through (2026-09-01) ────────
+#
+# CWAN (Clearwater Analytics) was taken private on 2026-07-02 at $24.55/share.
+# Its frozen, near-zero-ATR post-delisting price trivially satisfies "above
+# SMA20/SMA50", and detect_sma20_cross() was the one detector type never wired
+# into this veto — detect() and detect_trend_confirm() were, this wasn't — so
+# it kept re-admitting CWAN as a fresh PREMIUM signal into every live book.
+
+class TestSma20CrossVeto:
+    """The GOLD/PREMIUM→HIGH downgrade block in detect_sma20_cross()."""
+
+    def _cross_df(self, n_pre=180, n_tail=70):
+        """Uptrend long enough for SMA200 (above_sma200 check), dipping below
+        SMA20 for the required 3-of-5 days, then crossing back above with a
+        volume spike and a bullish candle — satisfies every hard gate in
+        detect_sma20_cross() and, with vol=5x/RSI=62, enough soft checks
+        (vol_very_strong, above_sma200, fresh_cross, rsi_sweet_spot) for a
+        PREMIUM bar quality, so the downgrade has something to downgrade."""
+        pre = np.linspace(30.0, 50.0, n_pre)
+        tail = np.linspace(50.0, 70.0, n_tail)
+        for off in range(-6, -1):
+            tail[off] *= 0.92          # pull below SMA20 for the lookback window
+        tail[-1] = tail[-2] * 1.03     # cross back above on the last bar
+        close = np.concatenate([pre, tail])
+        n = len(close)
+        idx = pd.date_range(end=pd.Timestamp.today().normalize(), periods=n, freq='B')
+        open_ = close * 0.995
+        open_[-1] = close[-2]          # opens near yesterday's close -> bullish candle
+        high = np.maximum(close, open_) * 1.005
+        low = np.minimum(close, open_) * 0.995
+        vol = np.full(n, 1_000_000.0)
+        vol[-1] = 5_000_000.0
+        atr = close * 0.02
+        df = pd.DataFrame({
+            'open': open_, 'high': high, 'low': low, 'close': close,
+            'volume': vol, 'ATR': atr,
+        }, index=idx)
+        df['Vol_Ratio'] = 1.0
+        df.iloc[-1, df.columns.get_loc('Vol_Ratio')] = 5.0
+        df['RSI'] = 62.0
+        return df
+
+    def test_real_detect_sma20_cross_downgrades_pinned_premium_to_high(self, monkeypatch):
+        """End-to-end through the REAL detect_sma20_cross() — not a mirror of
+        the logic — so a regression in the shipped conditional is caught."""
+        import config
+        monkeypatch.setitem(config.PINNED_RANGE_CONFIG, 'enabled', True)
+        monkeypatch.setattr('scanner.check_pinned_range',
+                            lambda *a, **kw: (True, 4.0, 0.5))
+        from scanner import BreakoutDetector
+        detector = BreakoutDetector()
+
+        result = detector.detect_sma20_cross(self._cross_df(), 'CWAN', 'swing', '1 day')
+        assert result is not None
+        assert result['Quality'] == 'HIGH'
+
+    def test_real_detect_sma20_cross_leaves_non_pinned_premium_alone(self, monkeypatch):
+        import config
+        monkeypatch.setitem(config.PINNED_RANGE_CONFIG, 'enabled', True)
+        monkeypatch.setattr('scanner.check_pinned_range',
+                            lambda *a, **kw: (False, 40.0, 3.0))
+        from scanner import BreakoutDetector
+        detector = BreakoutDetector()
+
+        result = detector.detect_sma20_cross(self._cross_df(), 'NVDA', 'swing', '1 day')
+        assert result is not None
+        assert result['Quality'] == 'PREMIUM'
+
+    def test_real_detect_sma20_cross_disabled_config_never_downgrades(self, monkeypatch):
+        """Dormant by default: even a PREMIUM signal on a stock that WOULD be
+        flagged pinned must keep its tier when PINNED_RANGE_CONFIG is off, and
+        check_pinned_range must not even be called."""
+        import config
+        monkeypatch.setitem(config.PINNED_RANGE_CONFIG, 'enabled', False)
+
+        def _boom(*a, **kw):
+            raise AssertionError("check_pinned_range must not be called when dormant")
+        monkeypatch.setattr('scanner.check_pinned_range', _boom)
+
+        from scanner import BreakoutDetector
+        detector = BreakoutDetector()
+        result = detector.detect_sma20_cross(self._cross_df(), 'CWAN', 'swing', '1 day')
+        assert result is not None
+        assert result['Quality'] == 'PREMIUM'

@@ -1886,6 +1886,18 @@ class BreakoutDetector:
                 df, cfg['trend_type'], cfg.get('trend_period'), timeframe
             )
 
+        # Pinned/compressed-range check (deal-pin veto, see PINNED_RANGE_CONFIG) —
+        # same primitive detect()/detect_trend_confirm() already gate on. A stock
+        # frozen near a delisting/take-private price (e.g. CWAN pinned at $24.56
+        # since its July 2026 buyout) trivially satisfies "above SMA20/SMA50" with
+        # near-zero ATR, so this detector needs the same veto those two have.
+        pinned_range, pinned_range_pct, pinned_atr_pct = False, 0.0, 0.0
+        if PINNED_RANGE_CONFIG.get('enabled'):
+            pinned_range, pinned_range_pct, pinned_atr_pct = check_pinned_range(
+                df, PINNED_RANGE_CONFIG['lookback_days'],
+                PINNED_RANGE_CONFIG['max_range_pct'], PINNED_RANGE_CONFIG['max_atr_pct']
+            )
+
         latest = df.iloc[-1]
         sma_20 = df['close'].rolling(20).mean()
 
@@ -1979,6 +1991,17 @@ class BreakoutDetector:
             quality = 'HIGH'
         else:
             quality = 'STANDARD'
+
+        # Pinned/compressed-range veto — see PINNED_RANGE_CONFIG and the note above
+        # where pinned_range is computed. Mirrors detect()'s downgrade exactly.
+        if pinned_range and quality in ('GOLD', 'PREMIUM'):
+            old_q = quality
+            quality = 'HIGH'
+            logger.debug(
+                f"{symbol}: {old_q}→HIGH (pinned/compressed range: "
+                f"{pinned_range_pct:.1f}% range, {pinned_atr_pct:.2f}% ATR over "
+                f"{PINNED_RANGE_CONFIG['lookback_days']}d)"
+            )
 
         signal = {
             'Symbol': symbol,
