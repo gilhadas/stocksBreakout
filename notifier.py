@@ -47,6 +47,47 @@ def _notifications_blocked_for_tests() -> bool:
     )
 
 
+_GMAIL_DOMAINS = {'gmail.com', 'googlemail.com'}
+
+
+def _canonical_email(addr: str) -> str:
+    """Collapse a Gmail '+tag' alias to its base address.
+
+    Gmail ignores everything from '+' to '@' in the local part for delivery
+    — gil.hadas+1@gmail.com and gil.hadas+2@gmail.com are the same inbox as
+    gil.hadas@gmail.com. Multiple accounts (e.g. test/dev logins) that share
+    one real inbox this way must not each trigger a separate notification
+    for the same event, so every recipient is normalized to this base form
+    before dedup/send — the '+' alias is never used as an actual send target.
+    """
+    addr = addr.strip()
+    if '@' not in addr:
+        return addr
+    local, _, domain = addr.rpartition('@')
+    if domain.lower() in _GMAIL_DOMAINS and '+' in local:
+        local = local.split('+', 1)[0]
+    return f'{local}@{domain}'
+
+
+def _dedupe_recipients(raw: str) -> str:
+    """Collapse Gmail '+tag' aliases in a comma-separated recipient list.
+
+    Order-preserving first-seen dedup, so config['recipient_email'] (which
+    can list several addresses, e.g. from input/email_recipients.txt) never
+    puts the same physical inbox in the 'To' header twice under different
+    '+tag' spellings.
+    """
+    seen: list[str] = []
+    for part in raw.split(','):
+        addr = part.strip()
+        if not addr:
+            continue
+        canon = _canonical_email(addr)
+        if canon not in seen:
+            seen.append(canon)
+    return ', '.join(seen)
+
+
 class Notifier:
     """Handles notifications via multiple channels"""
 
@@ -197,7 +238,7 @@ class Notifier:
             msg = MIMEMultipart('mixed')
             msg['Subject'] = subject
             msg['From'] = config['sender_email']
-            msg['To'] = recipient or config['recipient_email']
+            msg['To'] = _dedupe_recipients(recipient or config['recipient_email'])
             
             # Build email body
             body = f"{message}\n\n"
@@ -577,12 +618,19 @@ class Notifier:
         # Email — per-user if symbol_to_users provided, else single broadcast
         if self.email_enabled:
             if symbol_to_users:
-                # Collect unique users and their actionable symbols
-                user_exits: dict[str, list] = {}  # email -> list of formatted exits
+                # Collect unique users and their actionable symbols, keyed by
+                # the CANONICAL (non-'+alias') email — gil.hadas@gmail.com,
+                # gil.hadas+1@gmail.com and gil.hadas+2@gmail.com are the same
+                # real inbox, so accounts that alias to the same base address
+                # are merged here and get exactly one email, sent to the base
+                # address, never to a '+tag' spelling.
+                user_exits: dict[str, list] = {}  # canonical email -> list of formatted exits
                 for sig in formatted:
                     for user_info in symbol_to_users.get(sig['Symbol'], []):
-                        email = user_info['email']
-                        user_exits.setdefault(email, []).append(sig)
+                        email = _canonical_email(user_info['email'])
+                        existing = user_exits.setdefault(email, [])
+                        if not any(s['Symbol'] == sig['Symbol'] for s in existing):
+                            existing.append(sig)
                 for email, user_sigs in user_exits.items():
                     user_subject = f"Exit Alert ({len(user_sigs)} position{'s' if len(user_sigs) > 1 else ''})"
                     user_message = f"{len(user_sigs)} of your position{'s require' if len(user_sigs) > 1 else ' requires'} attention:"
