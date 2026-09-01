@@ -34,6 +34,7 @@ except RuntimeError:
 
 from scanner import BreakoutDetector
 from config import TREND_CONFIRM as _TC_CFG
+from config import SLOW_GRIND_CONFIG as _SG_CFG
 from yfinance_adapter import YFinanceAdapter
 
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
@@ -143,13 +144,14 @@ def is_spy_below_sma200(spy_df, sim_date):
 
 
 # ─── Signal detectors ─────────────────────────────────────────────────────────
-def collect_signals_old(detector, df_slice, symbol, mode, spy_perf):
+def collect_signals_old(detector, df_slice, symbol, mode, spy_perf, sim_date):
     """OLD config: breakout + SMA20_CROSS (vol>=1.8, RSI 48-62) + BOUNCE (no quality gate)"""
     sig = None
     # Breakout
     try:
         sig = detector.detect(df_slice, symbol, mode, '1 day', spy_perf, use_scoring=True,
-                              use_legacy_momentum=False, use_v4_overextension=False)
+                              use_legacy_momentum=False, use_v4_overextension=False,
+                              reference_date=sim_date)
     except Exception:
         pass
     if sig:
@@ -171,7 +173,7 @@ def collect_signals_old(detector, df_slice, symbol, mode, spy_perf):
     return sig
 
 
-def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
+def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime, sim_date):
     """
     NEW config: same detectors BUT with:
     - Vol>=2.5, RSI bimodal in detect_sma20_cross (enforced by scanner already)
@@ -182,7 +184,8 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
     # Breakout always allowed unless RED_MARKET (quality filtered)
     try:
         sig = detector.detect(df_slice, symbol, mode, '1 day', spy_perf, use_scoring=True,
-                              use_legacy_momentum=False, use_v4_overextension=False)
+                              use_legacy_momentum=False, use_v4_overextension=False,
+                              reference_date=sim_date)
     except Exception:
         pass
 
@@ -243,10 +246,22 @@ def collect_signals_new(detector, df_slice, symbol, mode, spy_perf, regime):
             sig = detector.detect_trend_confirm(df_slice, symbol, mode, '1 day', spy_perf)
         except Exception:
             sig = None
+    if sig:
+        return sig
+
+    # SLOW_GRIND — final fallback (2026-08-29). Catches steady grinding uptrends
+    # (majority up days, no single dramatic candle) that every detector above
+    # misses by construction. Respects SLOW_GRIND_CONFIG['enabled'] (off by
+    # default); --slow-grind CLI flag forces it on for this run regardless.
+    if _SG_CFG.get('enabled') and regime not in ('RED_MARKET', 'BEARISH'):
+        try:
+            sig = detector.detect_slow_grind(df_slice, symbol, mode, '1 day', spy_perf)
+        except Exception:
+            sig = None
     return sig
 
 
-def collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf, regime, bear_macro):
+def collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf, regime, bear_macro, sim_date):
     """
     V9-H HYBRID: SPY SMA200 quality escalation + BEARISH block.
     - bear_macro=True (SPY < SMA200): GOLD breakouts only, no BOUNCE/SMA20_CROSS
@@ -258,7 +273,8 @@ def collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf, regime, b
     # Breakout detection — always attempt
     try:
         sig = detector.detect(df_slice, symbol, mode, '1 day', spy_perf, use_scoring=True,
-                              use_legacy_momentum=False, use_v4_overextension=False)
+                              use_legacy_momentum=False, use_v4_overextension=False,
+                              reference_date=sim_date)
     except Exception:
         pass
 
@@ -361,11 +377,11 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
 
             for mode in modes:
                 if config == 'old':
-                    sig = collect_signals_old(detector, df_slice, symbol, mode, spy_perf_frac)
+                    sig = collect_signals_old(detector, df_slice, symbol, mode, spy_perf_frac, sim_date)
                 elif config == 'hybrid':
-                    sig = collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf_frac, regime, bear_macro)
+                    sig = collect_signals_hybrid(detector, df_slice, symbol, mode, spy_perf_frac, regime, bear_macro, sim_date)
                 else:
-                    sig = collect_signals_new(detector, df_slice, symbol, mode, spy_perf_frac, regime)
+                    sig = collect_signals_new(detector, df_slice, symbol, mode, spy_perf_frac, regime, sim_date)
 
                 if sig:
                     quality = sig.get('Quality', 'STANDARD')
@@ -418,7 +434,8 @@ def run_scan(historical, start_date, end_date, modes, config='new'):
         for q in ['GOLD', 'PREMIUM', 'HIGH', 'STANDARD']:
             n = (sig_df['quality'] == q).sum()
             if n: print(f"    {q}: {n}")
-        for t in ['SMA20_CROSS', 'BOUNCE', 'CONTINUATION', 'Momentum', 'BREAKOUT', 'PULLBACK']:
+        for t in ['SMA20_CROSS', 'BOUNCE', 'CONTINUATION', 'Momentum', 'BREAKOUT', 'PULLBACK',
+                  'TREND_CONFIRM', 'SLOW_GRIND']:
             n = (sig_df.get('type', pd.Series()) == t).sum() if 'type' in sig_df.columns else 0
             if n: print(f"    Type={t}: {n}")
     return signals
@@ -481,6 +498,52 @@ def _apply_bounce_sma200_gate(signals, historical, spy_below_dates=None):
         df = historical[sym]
         px = df['close'][df.index.normalize() <= d]
         if not px.empty and float(px.iloc[-1]) < float(upto.iloc[-1]):
+            gated += 1
+        else:
+            kept.append(s)
+    return kept, gated
+
+
+def _apply_pinned_range_gate(signals, historical, lookback_days=60,
+                             max_range_pct=10.0, max_atr_pct=1.5):
+    """Drop GOLD/PREMIUM signals (any type) fired while the stock was trading
+    in an abnormally tight, low-ATR range for `lookback_days` — the
+    cash-merger "pinned" signature (CLAUDE.md §27, 2026-08-12: PRA/JHG/HOLX/
+    STEL scored GOLD/TREND_CONFIRM while merger-arb pinned, the opposite of a
+    genuine Stage 2 breakout). "Best lead" identified in that session, per
+    §13.5's meta-finding that ranking/admission levers keep coming back null
+    and the remaining edge is in signal generation.
+
+    Reuses quantkit.indicators.check_pinned_range (same definition live and
+    in backtest — CLAUDE.md §20's one-filter lesson, learned the hard way
+    after §13's SEMANTIC_FLAGS drift). Applied BEFORE pooling so gated
+    signals don't consume pooled-cap slots (mirrors live, where the scanner
+    would simply never emit the signal in the first place).
+
+    Returns (kept_signals, gated_count).
+    """
+    from quantkit.indicators import calculate_atr, check_pinned_range
+    atr_cache: dict = {}
+    kept, gated = [], 0
+    for s in signals:
+        sym = s['symbol']
+        df = historical.get(sym)
+        if df is None:
+            kept.append(s)
+            continue
+        d = pd.Timestamp(s['date']).normalize()
+        upto = df[df.index.normalize() <= d]
+        if len(upto) < lookback_days:
+            kept.append(s)          # <lookback bars — undefined, permissive pass
+            continue
+        atr_ser = atr_cache.get(sym)
+        if atr_ser is None:
+            atr_ser = calculate_atr(df)
+            atr_cache[sym] = atr_ser
+        window = upto.tail(lookback_days).copy()
+        window['ATR'] = atr_ser.reindex(window.index)
+        is_pinned, _, _ = check_pinned_range(window, lookback_days, max_range_pct, max_atr_pct)
+        if is_pinned:
             gated += 1
         else:
             kept.append(s)
@@ -1358,7 +1421,7 @@ def run_year(year, symbols, capital,
              bounce_sma200_gate=False, residual_dist=False, panic_throttle=False,
              bounce_sma200_bear_only=False, live_tiebreak=False,
              sleeve_symbols=None, sleeve_slots=0, panic_bear_only=False,
-             rank_scores=None):
+             rank_scores=None, reject_pinned_range=False):
     start = f"{year}-01-01"
     end   = f"{year}-12-31"
     if start_date_override and start_date_override[:4] == str(year):
@@ -1514,6 +1577,25 @@ def run_year(year, symbols, capital,
                               realistic_sizing=True, swap_on_skip=False, **sim_kw)
             print_report(rpt_gr, f'REALISTIC sizing + BounceSMA200Gate', len(new_premium_g_pooled), spy_info, show_hold_split=True)
             print(f"    {'':42} Skipped for cash: {rpt_gr.get('skipped_signals', 0)}")
+
+    # Ablation rows — pinned/compressed-range veto (§27 "best lead out of the
+    # session"): drop GOLD/PREMIUM signals from stocks trading in an abnormally
+    # tight, low-ATR range (the merger-arb pinned signature — PRA/JHG/HOLX/STEL).
+    # Gate applied pre-pooling, same single-lever-A/B shape as the SMA200 gate above.
+    if reject_pinned_range:
+        new_premium_pr, n_pr = _apply_pinned_range_gate(new_premium, historical)
+        new_premium_pr_pooled = _pooled_cap(new_premium_pr, max_per_day=pooled_cap)
+        rpt_pr = simulate(new_premium_pr_pooled, start, end, end_prices, historical, capital,
+                          tp_as_trail=True, label=f'NEW PREMIUM+ pooled-{pooled_cap}+PinnedRangeVeto', **sim_kw)
+        print_report(rpt_pr, f'NEW Regime-Adaptive  PREMIUM+ pooled-cap={pooled_cap} +PinnedRangeVeto',
+                     len(new_premium_pr_pooled), spy_info, show_hold_split=True)
+        print(f"    {'':42} Signals gated as pinned/compressed range: {n_pr}")
+        if realistic_sizing:
+            rpt_prr = simulate(new_premium_pr_pooled, start, end, end_prices, historical, capital,
+                               tp_as_trail=True, label='REALISTIC PinnedRangeVeto',
+                               realistic_sizing=True, swap_on_skip=False, **sim_kw)
+            print_report(rpt_prr, f'REALISTIC sizing + PinnedRangeVeto', len(new_premium_pr_pooled), spy_info, show_hold_split=True)
+            print(f"    {'':42} Skipped for cash: {rpt_prr.get('skipped_signals', 0)}")
 
     # Ablation rows — bear-only conditional SMA200 gate (§12 Task 2b): per-stock
     # gate applies ONLY on days SPY itself closed below its SMA200. Motivated by
@@ -2071,6 +2153,10 @@ PARAMETER REFERENCE:
     p.add_argument('--no-tc', action='store_true',
                    help='Disable TREND_CONFIRM multi-gate check in signal collection. TREND_CONFIRM Path B destroys edge (-24pts); '
                         'Path A is kept but minimal (+2.7pts). Use --no-tc to reproduce pre-TC +195%% baseline or disable all TREND_CONFIRM logic.')
+    p.add_argument('--slow-grind', action='store_true',
+                   help='Force-enable the SLOW_GRIND detector (2026-08-29, off by default in config.py) '
+                        'for this run — catches grinding uptrends (majority up days, no single breakout '
+                        'candle) that no other detector fires on. Unvalidated; this flag exists to validate it.')
 
     p.add_argument('--pooled-cap', type=int, default=10,
                    help='Max NEW signals to admit per calendar day in pooled-cap★ row (default: 10). '
@@ -2175,6 +2261,14 @@ PARAMETER REFERENCE:
                         '(mirrors auto_portfolio.suggest_swaps() for the swap variant). Off by default to '
                         'preserve all previously documented reproducible baselines.')
 
+    p.add_argument('--reject-pinned-range', action='store_true',
+                   help='Ablation (CLAUDE.md §27): drop GOLD/PREMIUM signals (any type) fired '
+                        'while the stock traded in an abnormally tight, low-ATR range over the '
+                        'last 60 days — the cash-merger "pinned" signature (PRA/JHG/HOLX/STEL '
+                        'scored GOLD/TREND_CONFIRM while merger-arb pinned). Adds gated pooled-cap '
+                        'and gated REALISTIC rows next to the ungated champion rows — single-lever '
+                        'A/B in one run. Off by default.')
+
     p.add_argument('--normal-bounce-cap', type=int, default=0,
                    help='Cap same-day BOUNCE signals in NORMAL regime to at most N within the pooled-cap '
                         'ranking (0=off). Tests the cross-sectional-correlation hypothesis from the 2026 YTD '
@@ -2192,6 +2286,15 @@ def main():
         import config as _cfg
         _cfg.TREND_CONFIRM['enabled'] = False
         print("⚠  --no-tc: TREND_CONFIRM disabled for this run (reproducing NEW-no-TC baseline)")
+
+    if args.slow_grind:
+        import config as _cfg
+        _cfg.SLOW_GRIND_CONFIG['enabled'] = True
+        # backtest_regime_compare's module-level _SG_CFG is the same dict object
+        # config.SLOW_GRIND_CONFIG refers to, so mutating it here is enough —
+        # collect_signals_new reads _SG_CFG.get('enabled') at signal-collection
+        # time, not at import time.
+        print("⚠  --slow-grind: SLOW_GRIND detector force-enabled for this run (unvalidated ablation)")
 
     if args.no_aroon:
         import config as _cfg
@@ -2284,7 +2387,8 @@ def main():
                  sleeve_symbols=sleeve_symbols,
                  sleeve_slots=args.sleeve_slots,
                  panic_bear_only=args.panic_throttle_bear_only,
-                 rank_scores=rank_scores)
+                 rank_scores=rank_scores,
+                 reject_pinned_range=args.reject_pinned_range)
 
     if len(years) > 1 and _sharpe_accum:
         print(f"\n{'='*80}")

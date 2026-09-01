@@ -18,6 +18,7 @@ import csv
 import json
 import logging
 import os
+import threading
 
 # ---------------------------------------------------------------------------
 # Custom SCAN log level (15) — between DEBUG (10) and INFO (20).
@@ -168,26 +169,82 @@ def _s3_conn():
     return st.connection('s3', type=FilesConnection)
 
 
-def _s3_fs():
-    """Return an s3fs filesystem.
+# One filesystem per credential set, for the lifetime of the process.
+#
+# WHY: constructing an S3FileSystem is cheap, but the first operation on each new
+# instance builds a fresh aiobotocore/botocore client, which JSON-parses the S3
+# service model and never releases it — a measured **12.8 MB per call, perfectly
+# linear** (CLAUDE.md §19). Reusing one instance costs 12.8 MB *once* and 0.0 MB
+# thereafter. That per-call term is what made the §18 archive replay fatal: 858
+# files ≈ 11 GB of demand, so the process filled whatever mem_limit it was given
+# and every recorded "peak" was really the cap.
+#
+# `skip_instance_cache=True` is preserved deliberately — it is the 4007cd0
+# workaround for the AioSession kwarg bug in s3fs ≥2025 + aiobotocore ≥3.x. We
+# memoize *around* fsspec's instance cache rather than re-enabling it.
+_S3_FS_CACHE: dict = {}
+_S3_FS_LOCK = threading.Lock()
 
-    - Inside a Streamlit session: goes through st.connection (caches credentials).
-    - Outside Streamlit (cron/CLI): creates S3FileSystem directly from env vars,
-      avoiding the AioSession kwarg bug in s3fs ≥2025 + aiobotocore ≥3.x.
-    """
-    if _in_streamlit():
-        return _s3_conn().fs
-    import s3fs
+
+def _s3_credentials() -> tuple:
+    """(key, secret, region) from env, else secrets.toml. Also the cache key,
+    so rotated credentials naturally produce a new filesystem."""
     _toml = _load_secrets_toml()
     _conn = _toml.get('connections', {}) or {}
     key    = os.environ.get('AWS_ACCESS_KEY_ID')    or _toml.get('AWS_ACCESS_KEY_ID')    or _toml.get('aws_access_key_id')    or _conn.get('key')
     secret = os.environ.get('AWS_SECRET_ACCESS_KEY') or _toml.get('AWS_SECRET_ACCESS_KEY') or _toml.get('aws_secret_access_key') or _conn.get('secret')
     region = os.environ.get('AWS_DEFAULT_REGION')    or _toml.get('AWS_DEFAULT_REGION')    or _conn.get('region', 'eu-central-1')
-    return s3fs.S3FileSystem(
-        key=key, secret=secret,
-        client_kwargs={'region_name': region},
-        skip_instance_cache=True,
-    )
+    return key, secret, region
+
+
+def _s3_fs():
+    """Return the shared s3fs filesystem for the current credentials.
+
+    - Inside a Streamlit session: goes through st.connection (caches credentials).
+    - Outside Streamlit (cron/CLI): one memoized S3FileSystem per credential set.
+    """
+    if _in_streamlit():
+        return _s3_conn().fs
+    import s3fs
+    creds = _s3_credentials()
+    with _S3_FS_LOCK:
+        fs = _S3_FS_CACHE.get(creds)
+        if fs is None:
+            key, secret, region = creds
+            fs = s3fs.S3FileSystem(
+                key=key, secret=secret,
+                client_kwargs={'region_name': region},
+                skip_instance_cache=True,
+            )
+            _S3_FS_CACHE[creds] = fs
+        return fs
+
+
+def _drop_s3_fs() -> None:
+    """Discard the memoized filesystem so the next call builds a fresh one."""
+    with _S3_FS_LOCK:
+        _S3_FS_CACHE.clear()
+
+
+def _s3_call(op):
+    """Run ``op(fs)`` on the shared filesystem, self-healing on failure.
+
+    A memoized filesystem holds a connection pool for the life of the process,
+    and `sb-api` runs for days — the one failure mode reuse introduces is a pool
+    that has gone stale while idle. So on *any* error we discard the instance,
+    rebuild, and retry exactly once; a second failure propagates to the caller,
+    whose existing handler falls back to local disk.
+
+    Every operation passed here is a whole-object read, a whole-object
+    overwrite, or a listing — all idempotent, so the retry is safe.
+    """
+    try:
+        return op(_s3_fs())
+    except Exception as first:
+        logger.debug(f"S3 op failed on the cached filesystem ({first}); "
+                     f"rebuilding and retrying once")
+        _drop_s3_fs()
+        return op(_s3_fs())
 
 
 # ─── CSV ────────────────────────────────────────────────────────────────────
@@ -208,9 +265,10 @@ def load_data(local_path: str, s3_path: str = None) -> Optional[pd.DataFrame]:
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'r') as f:
-                return pd.read_csv(f)
+            def _read(fs):
+                with fs.open(s3_path, 'r') as f:
+                    return pd.read_csv(f)
+            return _s3_call(_read)
         except Exception as e:
             logger.warning(f"S3 CSV read failed for {s3_path}, falling back to local: {e}")
 
@@ -237,10 +295,11 @@ def save_data(df: pd.DataFrame, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'w') as f:
-                df.to_csv(f, index=False)
-            fs.invalidate_cache(s3_path)
+            def _write(fs):
+                with fs.open(s3_path, 'w') as f:
+                    df.to_csv(f, index=False)
+                fs.invalidate_cache(s3_path)
+            _s3_call(_write)
             return
         except Exception as e:
             logger.warning(f"S3 CSV write failed for {s3_path}, falling back to local: {e}")
@@ -256,11 +315,12 @@ def load_text(local_path: str, s3_path: str = None) -> Optional[str]:
     """Load text file — tries S3 first (via raw s3fs), falls back to local."""
     if s3_path is None:
         s3_path = _to_s3_key(local_path)
-    if _is_cloud(): 
+    if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'r') as f:
-                return f.read().strip()
+            def _read(fs):
+                with fs.open(s3_path, 'r') as f:
+                    return f.read().strip()
+            return _s3_call(_read)
         except Exception as e:
             logger.warning(f"S3 text read failed for {s3_path}: {e}")
 
@@ -282,10 +342,11 @@ def save_text(content: str, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'w') as f:
-                f.write(content)
-            fs.invalidate_cache(s3_path)
+            def _write(fs):
+                with fs.open(s3_path, 'w') as f:
+                    f.write(content)
+                fs.invalidate_cache(s3_path)
+            _s3_call(_write)
             return
         except Exception as e:
             logger.warning(f"S3 text write failed for {s3_path}: {e}")
@@ -308,9 +369,10 @@ def load_json(local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'r') as f:
-                return json.loads(f.read())
+            def _read(fs):
+                with fs.open(s3_path, 'r') as f:
+                    return json.loads(f.read())
+            return _s3_call(_read)
         except Exception as e:
             logger.warning(f"S3 JSON read failed for {s3_path}: {e}")
 
@@ -342,12 +404,49 @@ def save_json(data, local_path: str, s3_path: str = None):
 
     if _is_cloud():
         try:
-            fs = _s3_fs()
-            with fs.open(s3_path, 'w') as f:
-                f.write(content)
-            fs.invalidate_cache(s3_path)
+            def _write(fs):
+                with fs.open(s3_path, 'w') as f:
+                    f.write(content)
+                fs.invalidate_cache(s3_path)
+            _s3_call(_write)
         except Exception as e:
             logger.warning(f"S3 JSON write failed for {s3_path}: {e}")
+
+
+def delete_file(local_path: str, s3_path: str = None) -> bool:
+    """Delete a file locally and on S3. Returns True if either side removed it.
+
+    Idempotent by design: a path that does not exist is a success, not an error.
+    That matters for the retry inside ``_s3_call`` — the existence check lives
+    *inside* the op, so a rebuild-and-retry cannot turn "already gone" into a
+    raised FileNotFoundError. It also makes the caller safe to re-run after a
+    partial failure, which is the whole point of archive-then-delete flows.
+
+    Unlike ``save_json``, an S3 failure is NOT swallowed. Callers delete only
+    after verifying a copy exists elsewhere, so a silent failure here would
+    orphan the original — the exact bug this helper exists to prevent.
+    """
+    if s3_path is None:
+        s3_path = _to_s3_key(local_path)
+
+    removed = False
+
+    abs_path = _to_local_abs(local_path)
+    if os.path.exists(abs_path):
+        os.remove(abs_path)
+        removed = True
+
+    if _is_cloud():
+        def _rm(fs):
+            fs.invalidate_cache(s3_path)
+            if fs.exists(s3_path):
+                fs.rm(s3_path)
+                fs.invalidate_cache(s3_path)
+                return True
+            return False
+        removed = _s3_call(_rm) or removed
+
+    return removed
 
 
 # ─── File listing (glob) ───────────────────────────────────────────────────
@@ -364,9 +463,14 @@ def list_files(local_dir: str, pattern: str = "*",
     if _is_cloud():
         try:
             import fnmatch
-            fs = _s3_fs()
-            fs.invalidate_cache(s3_prefix)
-            all_keys = fs.ls(s3_prefix, detail=False)
+
+            def _ls(fs):
+                # Listings are the one thing fsspec caches across calls, so a
+                # reused filesystem must invalidate before every ls. This call
+                # predates the memoization and is exactly what makes it safe.
+                fs.invalidate_cache(s3_prefix)
+                return fs.ls(s3_prefix, detail=False)
+            all_keys = _s3_call(_ls)
             names = [os.path.basename(k) for k in all_keys]
             matched = [n for n in names if fnmatch.fnmatch(n, pattern)]
             return sorted(matched, reverse=True)
@@ -883,6 +987,65 @@ def check_regime_cooldown(cooldown_hours: float) -> tuple:
     if remaining > 0:
         return True, remaining
     return False, 0.0
+
+
+def drop_incomplete_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows whose OHLC is not fully populated.
+
+    yfinance emits a **trailing placeholder bar** for the most recent period
+    with NaN Open/High/Low/Close — often with Volume already filled in, so an
+    ``.empty`` or Volume-based check does not catch it. Measured 2026-08-04:
+    every symbol tested, SPY included, carried exactly one such row at the end
+    of a ``period='1y'`` fetch.
+
+    That row breaks two things downstream:
+
+    1. ``json.dumps`` serialises NaN as a bare ``NaN`` token, which is not
+       valid JSON — the browser throws ``SyntaxError: Unexpected token 'N'``
+       and the chart never renders (issue #4).
+    2. ``int(row['Volume'])`` raises ``ValueError`` when Volume is NaN too.
+
+    Applied at fetch time so every consumer of the frame is covered, rather
+    than at each render site. Distinct from :func:`close_basis_history`, which
+    drops a *complete but still-forming* bar for a different reason (its Close
+    is a live price, not a close); this one drops bars that have no data at all.
+    """
+    if df is None or df.empty:
+        return df
+    cols = [c for c in ('Open', 'High', 'Low', 'Close') if c in df.columns]
+    if not cols:
+        return df
+    return df.dropna(subset=cols)
+
+
+def close_basis_history(hist, now_et) -> Optional[pd.DataFrame]:
+    """
+    Trim a daily OHLCV history to the basis usable for close-based decisions.
+
+    A daily bar fetched mid-session (yfinance ``ticker.history()``, or the IB/
+    yfinance blend behind ``MarketDataHandler.get_historical_data``) includes
+    today's still-forming bar, whose Close is really the live/intraday price
+    — not an actual close. Deciding a close-based rule (a trend/stop check
+    that intraday noise must not trigger) off that row makes the check
+    low-based instead of close-based whenever it runs intraday.
+
+    Rule: drop today's partial bar unless we're in the late window (>= 15:30
+    ET, where the near-close price is a fair proxy for today's close) or the
+    session is over (>= 16:00 ET, bar is final).
+
+    Shared by ``auto_portfolio.refresh_prices`` (ATR-trail stop/trail) and
+    ``orchestrator.evaluate_exits`` (rule-based ``ExitEvaluator`` checks,
+    e.g. "Trend broken"). Only meaningful for daily bars — callers must not
+    apply this to intraday timeframes.
+    """
+    if hist is None or hist.empty:
+        return hist
+    last_ts = hist.index[-1]
+    last_date = last_ts.date() if hasattr(last_ts, 'date') else last_ts
+    in_late_window = (now_et.hour, now_et.minute) >= (15, 30)
+    if last_date == now_et.date() and now_et.hour < 16 and not in_late_window:
+        return hist.iloc[:-1]
+    return hist
 
 
 def setup_logging(log_file: str = None, debug: bool = False):

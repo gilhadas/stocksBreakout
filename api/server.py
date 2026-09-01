@@ -5,9 +5,10 @@ Run: uvicorn api.server:app --host 0.0.0.0 --port 8000
 """
 
 import math
+import os
 import sys
 from pathlib import Path
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ── trading_api_kit provides: auth, admin, push, user management ──────────────
 from trading_api_kit import create_app, get_current_user
+from trading_api_kit.admin_routes import register_user_delete_hook
 from trading_api_kit.models import User
 from trading_api_kit.push_registry import register_token
 
@@ -25,6 +27,17 @@ app = create_app(
     version="2.0",
     static_dir=Path(__file__).resolve().parent / "static",
 )
+
+
+# A user's portfolio lives only as JSON under scanner_output/portfolio/<user_id>/
+# — the users DB has no portfolio table, so deleting a row cascades to nothing.
+# Without this the book stays behind indistinguishable from a live one.
+def _archive_portfolio_on_delete(user_id: str, email: str) -> None:
+    from auto_portfolio import archive_user_portfolio
+    archive_user_portfolio(user_id)
+
+
+register_user_delete_hook(_archive_portfolio_on_delete)
 
 
 def _clean(obj):
@@ -108,13 +121,80 @@ def _save_portfolio_json(data: dict, user_id: str):
         pass
 
 
+# ── Book variants (live control-vs-autoswap A/B) ─────────────────────────────
+
+_BOOK_DESC = ("Portfolio variant: 'control' (no swaps, the default and the book "
+              "every pre-A/B client sees) or 'autoswap'.")
+
+
+class BookRequest(BaseModel):
+    """Optional book selector for POST endpoints.
+
+    Follows the established convention here — an optional Pydantic body field
+    with a default (cf. RecalculateRequest, BuyRequest) rather than a query
+    param, so an older client that posts no body at all still resolves to the
+    control book.
+    """
+    book: str | None = None
+
+
+def _book(name: str | None) -> str:
+    """Validate a client-supplied book name, or fall back to the default.
+
+    Translates auto_portfolio's ValueError into a 400. Without this an unknown
+    book would surface as a 500, and — worse — a silent fallback would let a
+    typo'd `?book=autoswapp` quietly return CONTROL data while the caller
+    believes it is looking at the variant.
+    """
+    import auto_portfolio as ap
+    if not name:
+        return ap.DEFAULT_BOOK
+    try:
+        ap._book_cfg(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return name
+
+
+def _book_of(req) -> str:
+    """Book named on an optional request body (absent body ⇒ control)."""
+    return _book(getattr(req, 'book', None) if req is not None else None)
+
+
+@app.get("/portfolio/books")
+def list_books(current_user: User = Depends(get_current_user)):
+    """Enumerate available books so clients need not hardcode the names."""
+    import auto_portfolio as ap
+    return {
+        "default": ap.DEFAULT_BOOK,
+        "books": [
+            {"name": n, "label": c["label"], "auto_swap": c["auto_swap"],
+             "max_swaps_per_day": c["max_swaps_per_day"]}
+            for n, c in ap.BOOKS.items()
+        ],
+    }
+
+
+@app.get("/portfolio/compare")
+def compare_books_endpoint(current_user: User = Depends(get_current_user)):
+    """Both books side by side: metrics since fork + per-swap attribution.
+
+    Attribution is the primary readout — the equity deltas need months to
+    separate, because both books trade the same signals on the same days.
+    """
+    import book_compare
+    return _clean(book_compare.compare_books(user_id=current_user.id))
+
+
 # ── Portfolio ────────────────────────────────────────────────────────────────
 
 @app.get("/portfolio")
-def get_portfolio(current_user: User = Depends(get_current_user)):
+def get_portfolio(current_user: User = Depends(get_current_user),
+                  book: str = Query(None, description=_BOOK_DESC)):
     import auto_portfolio as ap
 
-    data = ap.load(user_id=current_user.id)
+    book = _book(book)
+    data = ap.load(user_id=current_user.id, book=book)
     summary = ap.get_summary(data)
     return _clean({
         "positions":    data.get("positions", []),
@@ -125,10 +205,11 @@ def get_portfolio(current_user: User = Depends(get_current_user)):
 
 
 @app.post("/portfolio/refresh")
-def refresh_portfolio(current_user: User = Depends(get_current_user)):
+def refresh_portfolio(req: BookRequest | None = None,
+                      current_user: User = Depends(get_current_user)):
     import auto_portfolio as ap
 
-    result = ap.refresh_prices(user_id=current_user.id)
+    result = ap.refresh_prices(user_id=current_user.id, book=_book_of(req))
     data = result["data"]
     summary = ap.get_summary(data)
     return _clean({
@@ -142,11 +223,12 @@ def refresh_portfolio(current_user: User = Depends(get_current_user)):
 
 
 @app.get("/portfolio/skipped")
-def get_skipped(current_user: User = Depends(get_current_user)):
+def get_skipped(current_user: User = Depends(get_current_user),
+                book: str = Query(None, description=_BOOK_DESC)):
     import auto_portfolio as ap
     import yfinance as yf
 
-    data = ap.load(user_id=current_user.id)
+    data = ap.load(user_id=current_user.id, book=_book(book))
     skipped = data.get("skipped_cash", [])
     capital = data.get("capital", 0)
     cash = ap.available_cash(data)
@@ -469,33 +551,40 @@ def buy_position(req: BuyRequest, current_user: User = Depends(get_current_user)
 # ── Swap Advisor ─────────────────────────────────────────────────────────────
 
 @app.get("/portfolio/swap-suggestions")
-def swap_suggestions_get(current_user: User = Depends(get_current_user)):
+def swap_suggestions_get(current_user: User = Depends(get_current_user),
+                         book: str = Query(None, description=_BOOK_DESC)):
     """Silent polling endpoint — no notification. Uses 30-day window to surface missed opportunities."""
     import auto_portfolio as ap
 
-    swaps = ap.suggest_swaps(user_id=current_user.id, notify=False, fresh_days=30)
+    swaps = ap.suggest_swaps(user_id=current_user.id, notify=False, fresh_days=30,
+                             book=_book(book))
     return {"swaps": swaps, "count": len(swaps)}
 
 
 @app.post("/portfolio/suggest-swaps")
-def suggest_swaps_endpoint(current_user: User = Depends(get_current_user)):
+def suggest_swaps_endpoint(req: BookRequest | None = None,
+                           current_user: User = Depends(get_current_user)):
     """Manual trigger — sends notification when swaps are found."""
     import auto_portfolio as ap
 
-    swaps = ap.suggest_swaps(user_id=current_user.id, notify=True)
+    swaps = ap.suggest_swaps(user_id=current_user.id, notify=True, book=_book_of(req))
     return {"swaps": swaps, "count": len(swaps)}
 
 
 class ExecuteSwapRequest(BaseModel):
     close_symbol: str
     open_symbol: str
+    book: str | None = None
 
 
 @app.post("/portfolio/execute-swap")
 def execute_swap_endpoint(req: ExecuteSwapRequest, current_user: User = Depends(get_current_user)):
     import auto_portfolio as ap
 
-    result = ap.execute_swap(req.close_symbol, req.open_symbol, user_id=current_user.id)
+    # price_basis stays "live": a human clicking Swap intends a live fill.
+    # Only the automated auto-swap path uses the close basis (§12 Task 1).
+    result = ap.execute_swap(req.close_symbol, req.open_symbol,
+                             user_id=current_user.id, book=_book_of(req))
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("reason", "swap failed"))
 
@@ -525,26 +614,29 @@ def execute_swap_endpoint(req: ExecuteSwapRequest, current_user: User = Depends(
 
 
 @app.post("/portfolio/undo-swap")
-def undo_swap_endpoint(current_user: User = Depends(get_current_user)):
+def undo_swap_endpoint(req: BookRequest | None = None,
+                       current_user: User = Depends(get_current_user)):
     import auto_portfolio as ap
 
-    result = ap.undo_last_swap(user_id=current_user.id)
+    result = ap.undo_last_swap(user_id=current_user.id, book=_book_of(req))
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("reason", "undo failed"))
     return result
 
 
 @app.post("/portfolio/reset")
-def portfolio_reset_endpoint(current_user: User = Depends(get_current_user)):
+def portfolio_reset_endpoint(req: BookRequest | None = None,
+                             current_user: User = Depends(get_current_user)):
     import auto_portfolio as ap
 
-    data = ap.reset(user_id=current_user.id)
+    data = ap.reset(user_id=current_user.id, book=_book_of(req))
     return {"ok": True, "capital": data.get("capital", 0)}
 
 
 class RecalculateRequest(BaseModel):
     min_date: str | None = None
     position_pct: float | None = None
+    book: str | None = None
 
 
 # In-memory job store for background recalculate jobs.
@@ -560,14 +652,18 @@ def portfolio_recalculate_endpoint(
 ):
     import threading, uuid, time
     job_id = uuid.uuid4().hex[:12]
-    _RECALC_JOBS[job_id] = {"status": "running", "started": time.time()}
+    # Validate the book on the request thread — inside _run it would only ever
+    # surface as a job error the caller has to poll for.
+    _bk = _book_of(req)
+    _RECALC_JOBS[job_id] = {"status": "running", "started": time.time(), "book": _bk}
 
     def _run():
         import auto_portfolio as ap
         from config import PORTFOLIO
         try:
             pct = req.position_pct if req.position_pct else PORTFOLIO.get("position_pct", 0.10)
-            result = ap.recalculate(position_pct=pct, min_date=req.min_date, user_id=current_user.id)
+            result = ap.recalculate(position_pct=pct, min_date=req.min_date,
+                                    user_id=current_user.id, book=_bk)
             summary = ap.get_summary(result["data"])
             summary["files_scanned"] = result.get("files_scanned", 0)
             summary["added"] = result.get("added", 0)

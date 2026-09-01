@@ -148,6 +148,41 @@ def check_candle_structure(latest: pd.Series, atr: float,
     return is_valid, upper_wick, body_top_pct
 
 
+def check_pinned_range(df: pd.DataFrame, lookback_days: int = 60,
+                       max_range_pct: float = 10.0, max_atr_pct: float = 1.5) -> tuple:
+    """
+    Detect a stock trading in an abnormally tight, flat range — the signature
+    of a name pinned near a pending cash-merger price (collapsed volatility,
+    no real trend structure). A stock this quiet cannot be a genuine Stage 2
+    breakout, regardless of what SMA/MACD/RSI happen to read near a flat price.
+
+    Requires BOTH the absolute high-low range over the lookback AND the
+    current ATR to be below threshold — range alone would also catch a
+    stock consolidating tightly before a real breakout, and ATR alone would
+    catch any quiet low-beta defensive name; both together is deal-pin
+    specific. Deliberately an ABSOLUTE floor, not relative to the stock's own
+    rolling average width (e.g. Is_Consolidating) — a stock pinned for months
+    already has a tiny rolling average, so a relative measure never flags it.
+
+    Returns (is_pinned, range_pct, atr_pct). Returns (False, 0.0, 0.0) when
+    there isn't enough history or ATR hasn't been computed — permissive
+    default, matching the rest of the codebase's warmup handling.
+    """
+    if len(df) < lookback_days or 'ATR' not in df.columns:
+        return False, 0.0, 0.0
+    close = float(df['close'].iloc[-1])
+    if close <= 0:
+        return False, 0.0, 0.0
+    window = df.iloc[-lookback_days:]
+    range_pct = float((window['high'].max() - window['low'].min()) / close * 100)
+    atr = df['ATR'].iloc[-1]
+    if pd.isna(atr):
+        return False, range_pct, 0.0
+    atr_pct = float(atr / close * 100)
+    is_pinned = range_pct < max_range_pct and atr_pct < max_atr_pct
+    return is_pinned, range_pct, atr_pct
+
+
 def calculate_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """Calculate RSI using Wilder's EMA — matches TradingView's standard RSI indicator."""
     delta = df['close'].diff()

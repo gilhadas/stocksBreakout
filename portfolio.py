@@ -207,6 +207,16 @@ class Portfolio:
         """
         Update current prices for all positions.
         If price_map is None, fetches via yfinance.
+
+        Deliberately does NOT trail stops or auto-close on a stop breach — this
+        book is manual (bought/sold by hand via /manual-portfolio/buy|sell), and
+        its stops are set on demand by /manual-portfolio/compute-stops using a
+        wider ATR×3.0 / 20-day-swing-low rule, not the auto books' champion
+        ATR×2.0 trail. `auto_portfolio.refresh_prices` therefore skips this file
+        by design; exits here are alert-only (the evaluator and monitor still
+        report them, a human decides). Decided 2026-08-11, closing issue #7 —
+        do not "fix" this by wiring it into refresh_prices without that call
+        being re-made, or hand-set stops get overwritten.
         """
         if price_map is None:
             price_map = self._fetch_current_prices()
@@ -602,7 +612,18 @@ class Portfolio:
     def get_positions_as_exit_format(self) -> List[dict]:
         """
         Convert portfolio positions to the format expected by exit evaluator and monitor.
-        Returns list of dicts: {symbol, mode, entry, stop, target, timeframe}
+        Returns list of dicts: {symbol, mode, entry, entry_date, stop, target, timeframe}
+
+        ``entry_date`` is load-bearing, not decoration: `orchestrator.evaluate_exits`
+        derives `days_held` from it (parsing '%Y-%m-%d') and falls back to **0** when
+        it is absent, and `days_held` is the sole input to the max-hold exit rule.
+        Omitting it meant every position sourced from portfolio.json reported
+        `days_held=0` forever, so "Max hold period reached" could never fire for this
+        book no matter how long a position was held — while positions from
+        auto_portfolio.json, whose dicts are built separately in breakout_scanner.py
+        and *do* carry the field, correctly reported 92/113/… days in the same run.
+        Found 2026-07-30 from a daily exit alert on 14 positions opened 2026-05-07
+        (84 days) that were all still being reported as 0 days held.
         """
         from config import MODES
         result = []
@@ -612,6 +633,7 @@ class Portfolio:
                 'symbol': pos['symbol'],
                 'mode': mode,
                 'entry': pos['entry_price'],
+                'entry_date': pos.get('entry_date', ''),
                 'stop': pos['stop'],
                 'target': pos['target'],
                 'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],

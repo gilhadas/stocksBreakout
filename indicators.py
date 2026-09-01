@@ -15,6 +15,7 @@ from quantkit.indicators import (  # noqa: F401, F403
     calculate_gap_percent,
     check_volume_divergence,
     check_candle_structure,
+    check_pinned_range,
     calculate_rsi,
     calculate_stochastic_rsi,
     calculate_supertrend,

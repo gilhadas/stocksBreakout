@@ -58,12 +58,26 @@ RUN adduser \
 # on requirements.txt: with two indexes both serving `torch`, pip picks by
 # version and the CUDA build can win. Installing it first makes requirements.txt
 # a no-op for torch (>=2.0.0 already satisfied) and the choice deterministic.
+# Pinned to EC2's exact torch build via deploy/constraints-ec2-20260802.txt so
+# the Oracle ARM rebuild changes only architecture, not version too. Extracted
+# as an explicit install target rather than passed as `-c` — this step's
+# --index-url is scoped to PyTorch's own index (deliberately, see above), which
+# doesn't host fsspec or torch's other transitive deps, so a full-file `-c`
+# here makes pip try to resolve every pinned package (fsspec, etc.) against an
+# index that can't serve them and fails with ResolutionImpossible. Grepping
+# just the torch line keeps this pinned to the same single source of truth
+# without invoking constraint mode.
+# TODO(post-migration): remove this pin once the Oracle cutover is validated —
+# it should not freeze dependencies on ordinary future builds.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+    --mount=type=bind,source=deploy/constraints-ec2-20260802.txt,target=/tmp/constraints.txt \
+    python -m pip install --index-url https://download.pytorch.org/whl/cpu \
+        "$(grep '^torch==' /tmp/constraints.txt)"
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=requirements.txt,target=requirements.txt \
-    python -m pip install -r requirements.txt
+    --mount=type=bind,source=deploy/constraints-ec2-20260802.txt,target=/tmp/constraints.txt \
+    python -m pip install -c /tmp/constraints.txt -r requirements.txt
 
 # ── Application source ────────────────────────────────────────────────────────
 # --chown ensures appuser can write to scanner_output/ at runtime.

@@ -25,21 +25,143 @@ _NY_TZ          = ZoneInfo('America/New_York')
 _SIGNALS_DIR    = 'scanner_output/signals'
 _PORTFOLIO_PATH = 'scanner_output/portfolio/auto_portfolio.json'
 
+# ── Book variants (live A/B: does swapping a weak holding actually pay?) ──────
+#
+# A "book" is a portfolio variant. Books are FILES keyed by user_id in the path
+# (there is no portfolio table in the DB — see CLAUDE.md §23.1), so a variant is
+# simply a second filename in the same per-user directory. That layout already
+# exists: auto_portfolio.json, portfolio.json and scalp_portfolio.json sit side
+# by side today.
+#
+# The control book keeps suffix '' — i.e. the exact filename it has always had.
+# That is load-bearing: every caller that omits book= resolves to the same file
+# it resolved to before this dimension existed, so there is no migration, no S3
+# key churn, and no behaviour change on the default path.
+BOOKS = {
+    'control':  {
+        'suffix': '',
+        'label':  'Control (no swaps)',
+        'auto_swap': False,
+        'max_swaps_per_day': 0,
+    },
+    'autoswap': {
+        'suffix': '_autoswap',
+        'label':  'Auto-swap',
+        'auto_swap': True,
+        'max_swaps_per_day': 3,
+    },
+}
+DEFAULT_BOOK = 'control'
 
-def _portfolio_path_for(user_id: str | None = None) -> str:
-    """Return the portfolio file path for the given user.
+
+def _book_cfg(book: str | None) -> dict:
+    """Validate a book name and return its config.
+
+    Raises rather than defaulting on an unknown name. A typo must not silently
+    create a third book: these files are the only record that a position was
+    ever held, so a stray 'autswap' book would quietly accumulate real trades
+    that nothing else reads.
+    """
+    name = book or DEFAULT_BOOK
+    try:
+        return BOOKS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown book {name!r} — expected one of {sorted(BOOKS)}"
+        ) from None
+
+
+def _portfolio_path_for(user_id: str | None = None,
+                        book: str | None = DEFAULT_BOOK) -> str:
+    """Return the portfolio file path for the given user and book variant.
 
     Background agents call load()/save() with no user_id and always get the
     flat legacy path so they are unaffected by the multi-user change.
     The API layer always passes the logged-in user's UUID → per-user path.
+
+    `book` selects the variant via its filename suffix; the default 'control'
+    has an empty suffix, so this function is byte-identical to its pre-book
+    behaviour for every existing caller.
     """
+    suffix = _book_cfg(book)['suffix']
     if not user_id:
-        return _PORTFOLIO_PATH
-    return f'scanner_output/portfolio/{user_id}/auto_portfolio.json'
+        if not suffix:
+            return _PORTFOLIO_PATH
+        return _PORTFOLIO_PATH.replace('.json', f'{suffix}.json')
+    return f'scanner_output/portfolio/{user_id}/auto_portfolio{suffix}.json'
 
 INITIAL_CAPITAL    = 100_000
 POSITION_SIZE_PCT  = 0.05      # 5% of capital per trade
 MIN_MINERVINI      = 7         # V9-H filter: breakout signals only
+# Never admit a signal older than this, and never even load the file.
+# Two reasons, and the correctness one matters more than the performance one:
+#   1. CORRECTNESS — a signal from weeks ago describes a setup that no longer
+#      exists. Entries are NOT priced at today's price — _fetch_entry_and_current
+#      backdates entry_price to the close on the signal's own date (deliberately
+#      not trusting the CSV's Price column, see HZ1), which is the right price
+#      for that day but the wrong day to be opening a position on: the stop/
+#      target are sized off stale volatility, current_price already reflects
+#      weeks of unrelated drift, and date_added being backdated means days_held
+#      is large from the instant the position is created — a signal that would
+#      have been stopped out weeks ago shows up today as if it just triggered,
+#      possibly already past a MAX_HOLD_BARS threshold on the very next exit
+#      check. Verified 2026-08-05: LSCC signal dated 2026-04-27 backfilled
+#      today resolves entry_price=119.23 (the 04-27 close) vs current_price=
+#      138.0 (today's) — a stale entry wearing today's date, not today's price.
+#   2. COST — scan_and_add's file loop is bounded ONLY by `processed_files`.
+#      list_files() reads S3, so a book whose processed_files is empty or far
+#      behind re-downloads and parses the ENTIRE archive on every run. On
+#      2026-07-28 that was 858 CSVs; one book (8 positions, 10 processed) was
+#      replaying 848 of them per scan. That is what OOM-killed three consecutive
+#      wide scans — memory grew with files consumed, so the process expanded to
+#      fill whatever mem_limit it was given (died at 1.37 GiB under a 1400m cap,
+#      then at 2.45 GiB under a 2500m cap). See CLAUDE.md §18.
+# The caller-side guard in scan_and_add_all_users() does NOT cover this: it fires
+# only when processed_files AND positions are both empty, so a book with any
+# position falls through it. This bound is inside the loop itself, so it holds
+# regardless of caller. An explicit min_date= still overrides it, which is what
+# deliberate backfills use.
+SIGNAL_MAX_AGE_DAYS = 7        # calendar days; covers a weekend + holiday gap
+
+# How much older than the load window `processed_files` is allowed to get.
+#
+# `processed_files` used to accumulate forever — 860 filenames per book, the
+# dominant payload of a 29-64 KB book JSON that is written to S3 on every scan.
+# The bookmark had grown bigger than the data it bookmarks.
+#
+# Pruning is safe because the age bound above is the real backstop: a pruned
+# entry is by construction older than `stale_cutoff`, so on the next run it is
+# retired at the `date_str < stale_cutoff` branch WITHOUT being loaded. The
+# `fname in processed` check merely short-circuits that; it is an optimisation,
+# not the guard.
+#
+# ⚠ That guarantee INVERTS if anyone raises SIGNAL_MAX_AGE_DAYS: files pruned
+# under a 7-day bound become loadable again under a 14-day one, and weeks-old
+# signals would be admitted as fresh positions. Hence a margin rather than an
+# exact match, and `test_prune_window_exceeds_load_window` pins the relationship.
+# 7 + 23 = 30 days, matching cleanup_outputs.py's retention for signals/*.csv.
+PROCESSED_PRUNE_MARGIN_DAYS = 23
+
+# How long a position may go without any market data before it is settled out.
+#
+# When yfinance returns no history for a symbol, refresh_prices used to fall back
+# to the STORED current_price for both the display mark and the exit basis. That
+# makes the position permanently unexitable: basis_close == the frozen mark, the
+# trail cannot move (an empty frame is below ATR_TRAIL_FLOOR_BARS), and the frozen
+# mark sits above the stop, so `basis_close <= p['stop']` can never become true.
+#
+# Measured 2026-08-12: PRA/JHG/HOLX/STEL — four completed-merger names that had
+# stopped trading — held $24,905 (24.9%) of the main book in exactly this state,
+# guaranteed to return 0% forever. A real broker settles the deal cash back into
+# buying power; this book had no equivalent, so the capital was sterilised.
+#
+# 5 calendar days spans a weekend plus a flaky session, so a transient yfinance
+# failure cannot close anything, while a genuinely dead symbol is released within
+# a week. Staleness is tracked as a `stale_since` date stamped on the position
+# (cleared on any successful fetch) rather than a run counter, because refresh
+# runs at least twice a weekday and a counter would halve the effective window.
+STALE_PRICE_MAX_DAYS = 5
+
 TRAIL_PCT          = 0.08      # 8% trailing stop from highest close since entry
 MAX_ADDS_PER_SCAN  = 10        # Max new positions admitted per trading day (across all files for that day)
 MAX_PORTFOLIO_ATR_RISK = 0.12  # Max total portfolio risk as ATR% (12% = aggressive)
@@ -93,18 +215,19 @@ def _empty() -> dict:
     }
 
 
-def load(user_id: str | None = None) -> dict:
+def load(user_id: str | None = None, book: str | None = DEFAULT_BOOK) -> dict:
     from utils import load_json
-    data = load_json(_portfolio_path_for(user_id))
+    data = load_json(_portfolio_path_for(user_id, book))
     if data is not None:
         data.setdefault('skipped_cash', [])   # backfill for older saved files
+        data.setdefault('swap_advice', {})    # swap-advisor daily dedup stamp
         return data
     return _empty()
 
 
-def _save(data: dict, user_id: str | None = None):
+def _save(data: dict, user_id: str | None = None, book: str | None = DEFAULT_BOOK):
     from utils import save_json, _is_cloud, _to_local_abs
-    path = _portfolio_path_for(user_id)
+    path = _portfolio_path_for(user_id, book)
     data['last_updated'] = datetime.now(_NY_TZ).isoformat()
     if _is_cloud():
         # On cloud (Streamlit Cloud / S3), skip fcntl — S3 is the source of truth
@@ -121,6 +244,184 @@ def _save(data: dict, user_id: str | None = None):
                 save_json(data, path)
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+# ── Forking a variant book off control ───────────────────────────────────────
+#
+# `load()` returns _empty() — a plausible fresh $100k book — when a file does not
+# exist. For the control book that is correct: a new user starts empty. For a
+# VARIANT book it is a silent trap. The A/B only means anything if both arms
+# start from identical state and diverge solely through swap policy; a variant
+# that materializes empty diverges because it started somewhere else entirely,
+# and nothing anywhere errors. Observed 2026-08-11: an unforked autoswap book
+# was scanned into from $100k/0 positions while its control held 14 — the
+# comparison was measuring starting state, not the treatment.
+#
+# So the invariant is enforced at the WRITE boundary (see _load_for_write): the
+# first thing that would modify an unforked variant clones control into it first.
+# Reads stay pure — load() is called from API GETs, page renders and
+# book_compare, and a page render must never create a book in S3.
+
+
+def is_forked(data: dict) -> bool:
+    """True once a book carries a fork stamp (either arm of a forked pair)."""
+    return bool(data.get('fork'))
+
+
+def _book_has_state(data: dict) -> bool:
+    """True if a book has ever been used for anything.
+
+    This is the idempotency key for ensure_forked, and the single most important
+    predicate in the experiment: if it ever wrongly returns False for a book that
+    has diverged, the next write re-clones control over the top and destroys
+    however many weeks of accumulated divergence, silently. Deliberately broad —
+    any trace of use at all counts. Same predicate fork_books.fork_user uses for
+    its --force guard, so the manual and automatic paths cannot disagree.
+    """
+    return bool(
+        data.get('positions') or data.get('closed')
+        or data.get('processed_files') or data.get('fork')
+    )
+
+
+def ensure_forked(user_id: str | None = None,
+                  book: str | None = DEFAULT_BOOK,
+                  *, force: bool = False) -> dict:
+    """Clone the control book into `book` if it has never been used.
+
+    No-op for the control book itself, and no-op for any variant that already has
+    state (unless `force`). Returns the variant's data either way.
+
+    Both books are stamped with the same fork record, so neither can be read as
+    "the original" and book_compare has a `since` date on both sides. An empty
+    control (genuinely new user) still forks — to an empty, stamped variant —
+    because both arms then fill from the same scans, which is exactly the
+    apples-to-apples state wanted.
+    """
+    import copy
+
+    cfg = _book_cfg(book)
+    name = book or DEFAULT_BOOK
+    # Keyword args throughout: load() is called by keyword everywhere else in the
+    # codebase, and several test suites stub it as `lambda **kw: ...`.
+    if name == DEFAULT_BOOK or not cfg['suffix']:
+        return load(user_id=user_id, book=name)
+
+    existing = load(user_id=user_id, book=name)
+    if _book_has_state(existing) and not force:
+        return existing
+
+    control = load(user_id=user_id, book=DEFAULT_BOOK)
+    stamp = datetime.now(_NY_TZ)
+    fork_date = stamp.strftime('%Y-%m-%d')
+
+    clone = copy.deepcopy(control)
+    clone['fork'] = {
+        'date':   fork_date,
+        'at':     stamp.isoformat(),
+        'source': DEFAULT_BOOK,
+        'peer':   DEFAULT_BOOK,
+        'book':   name,
+    }
+    # Fresh advice/undo state — these describe the control book's history, not
+    # the variant's. Carried over, the variant's very first scan would think it
+    # had already advised or already swapped today.
+    clone.pop('last_swap', None)
+    clone['swap_advice'] = {}
+    _save(clone, user_id=user_id, book=name)
+
+    # Stamp control too, so both sides agree on when the clock started.
+    if control.get('fork', {}).get('date') != fork_date or force:
+        control['fork'] = {
+            'date':   fork_date,
+            'at':     stamp.isoformat(),
+            'source': DEFAULT_BOOK,
+            'peer':   name,
+            'book':   DEFAULT_BOOK,
+        }
+        _save(control, user_id=user_id, book=DEFAULT_BOOK)
+
+    return clone
+
+
+def _load_for_write(user_id: str | None = None,
+                    book: str | None = DEFAULT_BOOK) -> dict:
+    """load(), but forks a never-used variant book off control first.
+
+    Every function that reaches a _save() must load through this rather than
+    load(), or it can be the one that writes into an unforked variant and
+    invalidates the experiment. reset() is the deliberate exception — it intends
+    an empty book, and forking there would make Reset mean "restore control's
+    positions".
+
+    Costs exactly one book read in every case, the same as the load() it
+    replaces: ensure_forked already returns the data it read (or wrote), so
+    there is no second read to discard.
+    """
+    return ensure_forked(user_id, book)
+
+
+# Deleted users' books are moved here, never removed. A book is the only record
+# that a user ever traded — §20's "bound the read window, never prune" rule
+# applies to it at least as much as to the signal archive.
+_DELETED_DIR = 'scanner_output/portfolio/_deleted'
+
+
+def archive_user_portfolio(user_id: str) -> dict:
+    """Move a user's portfolio files out of the live namespace.
+
+    The users DB holds identity only — a single ``users`` table, no portfolio
+    rows — so a user's book is stored solely as JSON under
+    ``scanner_output/portfolio/<user_id>/`` and *nothing cascades* when the row
+    is deleted. Left alone the directory keeps looking exactly like a live book
+    that no user owns, which is how two orphans with ~$99k of open positions
+    each survived long enough to be misread as production state.
+
+    Each file is copied to ``_deleted/<user_id>/`` and the original removed only
+    after the copy reads back. A file that cannot be read or verified is left in
+    place: an unmoved book is recoverable, a lost one is not.
+
+    Idempotent — safe to re-run after a partial failure, and a user with no
+    directory is a no-op success.
+
+    Raises:
+        RuntimeError: if any file could not be archived. The caller must treat
+            this as fatal and leave the user row intact, so the operation stays
+            retryable instead of silently orphaning the book.
+    """
+    from utils import list_files, load_json, save_json, delete_file
+
+    src_dir = f'scanner_output/portfolio/{user_id}'
+    dst_dir = f'{_DELETED_DIR}/{user_id}'
+
+    archived, failed = [], []
+    for name in sorted(list_files(src_dir, '*.json')):
+        src, dst = f'{src_dir}/{name}', f'{dst_dir}/{name}'
+        try:
+            payload = load_json(src)
+            if payload is None:
+                failed.append(f'{name}: unreadable')
+                continue
+            save_json(payload, dst)
+            # save_json swallows S3 errors, so the write is not proof of a copy.
+            # Read it back before removing the only remaining original.
+            if load_json(dst) is None:
+                failed.append(f'{name}: copy not verified at {dst}')
+                continue
+            delete_file(src)
+            archived.append(name)
+        except Exception as exc:
+            failed.append(f'{name}: {exc}')
+
+    result = {'user_id': user_id, 'dest': dst_dir,
+              'archived': archived, 'failed': failed}
+
+    if failed:
+        raise RuntimeError(
+            f'archive_user_portfolio({user_id}): archived {len(archived)} file(s), '
+            f'{len(failed)} failed — {"; ".join(failed)}'
+        )
+    return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -143,6 +444,93 @@ def _date_from_filename(fname: str) -> str:
     return datetime.now(_NY_TZ).strftime('%Y-%m-%d')
 
 
+# Per-run signal-file cache, owned by scan_and_add_all_users().
+#
+# scan_and_add() is called once per registered user, and each call independently
+# re-listed S3 and re-downloaded the same in-window files — N users meant N x the
+# same GETs for byte-identical content. This makes the archive read once per run.
+#
+# None = disabled (a lone scan_and_add call, a backtest, a test). A dict = an
+# active multi-user run. Deliberately not a module-lifetime cache: signal files
+# are appended to during the trading day, and a stale frame would silently make
+# a book miss the day's signals.
+_SCAN_FILE_CACHE: 'dict[str, pd.DataFrame | None] | None' = None
+
+
+def _load_signal_frame(fname: str):
+    """Load one signal CSV, through the per-run cache when one is active.
+
+    Always hands out a COPY. scan_and_add mutates what it gets — `df_raw.columns
+    = [c.strip() ...]` rewrites the columns in place — so sharing one frame
+    across users would let the first book's edits reach the second. That is
+    cross-user data corruption, not a performance detail.
+    """
+    from utils import load_data
+
+    path = f"{_SIGNALS_DIR}/{fname}"
+    if _SCAN_FILE_CACHE is None:
+        return load_data(path)
+    if fname not in _SCAN_FILE_CACHE:
+        _SCAN_FILE_CACHE[fname] = load_data(path)
+    df = _SCAN_FILE_CACHE[fname]
+    return None if df is None else df.copy()
+
+
+_NON_BREAKOUT_TYPES = ['BOUNCE', 'CONTINUATION', 'SMA20_CROSS', 'TREND_CONFIRM']
+
+
+def _v9h_mask(df, *, type_bypass: bool):
+    """The V9-H admission filter: GOLD/PREMIUM, plus a Minervini gate.
+
+    `type_bypass` is the one axis on which the two callers genuinely differ, and
+    it was previously an undocumented accident — two hand-written copies that had
+    drifted apart:
+
+      * ``scan_and_add`` (True): BOUNCE / CONTINUATION / SMA20_CROSS /
+        TREND_CONFIRM skip the Minervini gate, because those detectors never
+        compute a Minervini score. Without the bypass they would all be rejected.
+      * ``rebuild_skipped_cash`` (False): applies the gate to every row, so "missed
+        trades" is computed STRICTER than admission — a BOUNCE signal that would
+        have been admitted does not show up as missed.
+
+    That asymmetry is preserved here rather than silently fixed: changing it would
+    change what the UI reports, which is a product decision, not a refactor. It is
+    now visible in one place instead of implied by two divergent copies.
+
+    Note the third branch, which is live today: when `MinerviniScore` is absent
+    entirely, there is NO Minervini gate at all. Both of the newest signal files
+    (28 and 24 columns) take that branch.
+    """
+    import pandas as pd
+
+    mask = df['Quality'].isin(['GOLD', 'PREMIUM'])
+    if 'MinerviniScore' not in df.columns:
+        return mask
+
+    minervini_ok = (pd.to_numeric(df['MinerviniScore'], errors='coerce')
+                    .fillna(0) >= MIN_MINERVINI)
+    if type_bypass and 'Type' in df.columns:
+        is_breakout = ~df['Type'].isin(_NON_BREAKOUT_TYPES)
+        return mask & (minervini_ok | ~is_breakout)
+    return mask & minervini_ok
+
+
+def _prune_processed(processed: set[str]) -> list[str]:
+    """Bound `processed_files` to the window in which it can still do any work.
+
+    Anything older than the load window is unreachable — the age bound retires
+    it without a read whether or not it is remembered — so keeping it only
+    inflates the book JSON that gets written to S3 on every scan.
+
+    Returns a sorted list, ready to persist. See PROCESSED_PRUNE_MARGIN_DAYS for
+    why the window is deliberately wider than SIGNAL_MAX_AGE_DAYS.
+    """
+    cutoff = (datetime.now(_NY_TZ).date()
+              - timedelta(days=SIGNAL_MAX_AGE_DAYS + PROCESSED_PRUNE_MARGIN_DAYS)
+              ).isoformat()
+    return sorted(f for f in processed if _date_from_filename(f) >= cutoff)
+
+
 def _mode_from_filename(fname: str) -> str:
     """Extract mode (swing/daytrade/longterm) from filename."""
     for mode in ('daytrade', 'longterm', 'scalping', 'swing'):
@@ -156,7 +544,10 @@ def _mode_from_filename(fname: str) -> str:
 def scan_and_add(min_date: str | None = None,
                  position_pct: float | None = None,
                  user_id: str | None = None,
-                 notify: bool = True) -> dict:
+                 notify: bool = True,
+                 book: str | None = DEFAULT_BOOK,
+                 user_label: str | None = None,
+                 allow_stale: bool = False) -> dict:
     """
     Scan signal CSV files and add new V9-H signals.
 
@@ -172,15 +563,25 @@ def scan_and_add(min_date: str | None = None,
             - With min_date: process ALL files on or after min_date, regardless
               of whether they were previously processed. This lets you "re-scan
               from a date" and pick up signals you might have missed.
+            - Still bounded by SIGNAL_MAX_AGE_DAYS unless allow_stale=True; a
+              min_date older than that is clamped, logged, and reported back as
+              result['stale_clamped'].
         position_pct: Position size as a fraction of initial capital (e.g. 0.05
             for 5%, 0.10 for 10%). Defaults to POSITION_SIZE_PCT (10%).
+        allow_stale: Let min_date reach past the SIGNAL_MAX_AGE_DAYS bound. Only
+            for deliberate history rebuilds (recalculate); admitting weeks-old
+            signals into a live book backdates date_added and sizes stops off
+            stale volatility.
     Returns summary dict with counts.
     """
     import pandas as pd
+    import memory_trace as memt   # no-op unless SB_MEM_TRACE=1
     from utils import list_files, load_data
 
+    memt.mark('scan_and_add:start', user=(user_id or 'default')[:8])
+
     pos_pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
-    data      = load(user_id=user_id)
+    data      = _load_for_write(user_id=user_id, book=book)
     processed = set(data.get('processed_files', []))
     open_syms = open_symbols(data)
 
@@ -196,6 +597,8 @@ def scan_and_add(min_date: str | None = None,
     # list_files() returns newest-first; alphabetical sort gives oldest-first
     # for timestamped filenames and works for both local and S3.
     all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    memt.mark('scan_and_add:listed', archive=len(all_fnames),
+              processed=len(processed))
     if not all_fnames:
         return _build_result(added_syms, skipped_dup, skipped_cash, skipped_no_v9c, 0, data)
 
@@ -205,6 +608,36 @@ def scan_and_add(min_date: str | None = None,
     # for the same date arrived (swing + longterm + daytrade backfill), the top
     # 3 from each file got admitted ahead of higher-conviction signals from
     # sibling files.  Pooling lets the date's globally-best signals win.
+    # Cutoff for the no-min_date path. Computed once; string compare is safe
+    # because _date_from_filename() returns YYYY-MM-DD.
+    stale_cutoff = (datetime.now(_NY_TZ).date()
+                    - timedelta(days=SIGNAL_MAX_AGE_DAYS)).isoformat()
+    stale_retired = 0
+
+    # `min_date` overrides the `processed` BOOKMARK — that is what "re-scan from a
+    # date" means and what backfills need. It must not silently also override the
+    # AGE BOUND, which is a correctness guard, not an optimisation (§20): a
+    # weeks-old signal admitted today gets a backdated `date_added` (so `days_held`
+    # is large the instant the position exists) and a stop/target sized off stale
+    # volatility. The two were one branch, so any min_date bypassed both.
+    #
+    # The reachable path was not hypothetical: pages/portfolio_page.py's "Filter by
+    # date" picker defaults to the FIRST OF THE CURRENT MONTH and allows back to
+    # 2023 — so "Scan Signals" with the box ticked on the 20th backfilled 19 days
+    # of stale signals into a live book, with no warning.
+    #
+    # Callers that genuinely rebuild history (recalculate) pass allow_stale=True.
+    stale_clamped = None
+    if min_date and not allow_stale and min_date < stale_cutoff:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            f"scan_and_add: min_date={min_date} is older than the "
+            f"{SIGNAL_MAX_AGE_DAYS}d signal age bound — clamping to {stale_cutoff}. "
+            f"Pass allow_stale=True to admit signals older than this on purpose."
+        )
+        stale_clamped = {'requested': min_date, 'applied': stale_cutoff}
+        min_date = stale_cutoff
+
     files_by_date: dict[str, list[str]] = {}
     for fname in all_fnames:
         date_str = _date_from_filename(fname)
@@ -214,7 +647,31 @@ def scan_and_add(min_date: str | None = None,
         else:
             if fname in processed:
                 continue
+            if date_str < stale_cutoff:
+                # Retire it permanently rather than just skipping: marking it
+                # processed means the next run short-circuits on the cheap set
+                # lookup above instead of re-deriving the date, and it lets a
+                # far-behind book self-heal in one pass instead of re-walking
+                # hundreds of filenames forever. The file is never loaded, so
+                # this costs no S3 read.
+                processed.add(fname)
+                stale_retired += 1
+                continue
         files_by_date.setdefault(date_str, []).append(fname)
+
+    if stale_retired:
+        # scan_and_add has no module-level logger; use the same local-import
+        # pattern the rest of this file uses (_log is bound per-function here).
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            f"scan_and_add: retired {stale_retired} signal file(s) older than "
+            f"{stale_cutoff} ({SIGNAL_MAX_AGE_DAYS}d) without loading them")
+
+    # The §18 checkpoint: `to_load` is what the age bound actually saved. If this
+    # is in the hundreds, the archive is being replayed and memory will track it.
+    memt.mark('scan_and_add:filtered',
+              to_load=sum(len(v) for v in files_by_date.values()),
+              retired=stale_retired, dates=len(files_by_date))
 
     for date_str in sorted(files_by_date.keys()):
         adds_this_scan = 0                                  # per-day cap
@@ -223,7 +680,14 @@ def scan_and_add(min_date: str | None = None,
         per_file_dfs = []
         for fname in date_files:
             files_scanned += 1
-            df_raw = load_data(f"{_SIGNALS_DIR}/{fname}")
+            # Report the four accumulators that grow with (files × rows). If RSS
+            # tracks these rather than plateauing, the archive is being replayed.
+            memt.tick('signal_files', files_scanned, every=10,
+                      entry_cache=len(_ENTRY_PRICE_CACHE),
+                      split_cache=len(_SPLIT_CACHE),
+                      price_cache=len(_CURRENT_PRICE_CACHE),
+                      skipped_cash=len(data.get('skipped_cash', [])))
+            df_raw = _load_signal_frame(fname)
             if df_raw is None or df_raw.empty:
                 processed.add(fname)
                 continue
@@ -234,18 +698,7 @@ def scan_and_add(min_date: str | None = None,
                 processed.add(fname)
                 continue
             # V9-H filter: GOLD or PREMIUM (Minervini bypass for non-breakout types)
-            mask = df_raw['Quality'].isin(['GOLD', 'PREMIUM'])
-            if 'MinerviniScore' in df_raw.columns and 'Type' in df_raw.columns:
-                is_breakout = ~df_raw['Type'].isin(
-                    ['BOUNCE', 'CONTINUATION', 'SMA20_CROSS', 'TREND_CONFIRM']
-                )
-                minervini_ok = (pd.to_numeric(df_raw['MinerviniScore'], errors='coerce')
-                                .fillna(0) >= MIN_MINERVINI)
-                mask = mask & (minervini_ok | ~is_breakout)
-            elif 'MinerviniScore' in df_raw.columns:
-                mask = mask & (pd.to_numeric(df_raw['MinerviniScore'], errors='coerce')
-                               .fillna(0) >= MIN_MINERVINI)
-            df_filtered = df_raw[mask].copy()
+            df_filtered = df_raw[_v9h_mask(df_raw, type_bypass=True)].copy()
 
             # Selective mode: stack a stricter filter on top of V9-H. Drops daytrade
             # entirely (canonical 5-yr data: ≤15d holds = net loss) plus per-row gates.
@@ -497,14 +950,12 @@ def scan_and_add(min_date: str | None = None,
             except Exception:
                 pass
 
-        processed.add(fname)
-
-    data['processed_files'] = sorted(processed)
+    data['processed_files'] = _prune_processed(processed)
 
     # Sort skipped list: best priority first so the UI surfaces top missed trades
     data['skipped_cash'].sort(key=lambda e: e.get('priority_score', 0), reverse=True)
 
-    _save(data, user_id=user_id)
+    _save(data, user_id=user_id, book=book)
 
     # ── Notify on newly added positions ──────────────────────────────────────
     if added_syms and notify:
@@ -577,8 +1028,29 @@ def scan_and_add(min_date: str | None = None,
         except Exception as _e:
             _logger.warning(f"Health check failed: {_e}")
 
+    # ── Swap advisor / auto-swap ──────────────────────────────────────────────
+    # The cap or a cash shortfall just turned away fresh signals. Are any of them
+    # better than something already held? The control book only ASKS (Telegram);
+    # the autoswap book ACTS. That difference is the entire experiment.
+    #
+    # Isolated exactly like the notification block above: a swap failure must
+    # never take down the scan that produced the signals.
+    if notify and (skipped_cap or skipped_cash):
+        try:
+            _run_swap_stage(data, user_id=user_id, book=book,
+                            user_label=user_label,
+                            skipped_now=len(skipped_cap) + len(skipped_cash))
+        except Exception as _e:
+            _logger.warning(f"Swap stage failed [{book}]: {_e}")
+
+    memt.mark('scan_and_add:end', loaded=files_scanned, added=len(added_syms),
+              entry_cache=len(_ENTRY_PRICE_CACHE),
+              split_cache=len(_SPLIT_CACHE),
+              price_cache=len(_CURRENT_PRICE_CACHE),
+              skipped_cash=len(data.get('skipped_cash', [])))
+
     return _build_result(added_syms, skipped_dup, skipped_cash,
-                         skipped_no_v9c, files_scanned, data)
+                         skipped_no_v9c, files_scanned, data, stale_clamped)
 
 
 def _queue_ib_order(pos: dict):
@@ -1068,7 +1540,7 @@ def _find_stop_hit_date(symbol: str, stop: float,
     return fallback
 
 
-def _build_result(added, dup, cash, no_v9c, files, data):
+def _build_result(added, dup, cash, no_v9c, files, data, stale_clamped=None):
     return {
         'added':           len(added),
         'added_symbols':   added,
@@ -1077,6 +1549,10 @@ def _build_result(added, dup, cash, no_v9c, files, data):
         'skipped_cash_syms': cash,
         'skipped_no_v9c':  no_v9c,
         'files_scanned':   files,
+        # {'requested': ..., 'applied': ...} when a min_date was pulled forward to
+        # the age bound, else None. Returned rather than only logged so the caller
+        # can say so — a silently narrowed window looks identical to "no signals".
+        'stale_clamped':   stale_clamped,
         'data':            data,
     }
 
@@ -1090,7 +1566,14 @@ def scan_and_add_all_users(min_date: str | None = None,
     Called by cron after each scanner run to keep all portfolios up-to-date
     without requiring each user to manually trigger recalculate.
 
-    Returns a dict: {email: scan_and_add result} for each user.
+    Every user has one book per entry in BOOKS (the live A/B: control vs
+    autoswap). Both books see the SAME signal stream on the SAME days — that is
+    the whole point, since the only permitted difference between them is the
+    swap policy.
+
+    Returns a dict: {'email' or 'email [book]': scan_and_add result}. The
+    control book keeps the bare email key so existing log-scraping and the
+    `_added` sum in breakout_scanner.py are unaffected.
     """
     import logging
     _log = logging.getLogger(__name__)
@@ -1108,26 +1591,49 @@ def scan_and_add_all_users(min_date: str | None = None,
     from datetime import date as _date
     today = str(_date.today())
 
-    results = {}
-    for user in users:
-        try:
-            data = load(user_id=user.id)
-            # First-run guard: if user has no processed_files and no positions,
-            # only pick up signals from today onwards to avoid flooding them
-            # with all historical backfill files.
-            user_min_date = min_date
-            if not data.get('processed_files') and not data.get('positions'):
-                user_min_date = today
-                _log.info(f"scan_and_add [{user.email}]: new user — using min_date={today}")
+    # Every user sees the same signal files, so read each one once for the whole
+    # run instead of once per book. Scoped to this call and always cleared, so a
+    # later scan never sees a frame from an earlier one.
+    global _SCAN_FILE_CACHE
+    _SCAN_FILE_CACHE = {}
 
-            result = scan_and_add(min_date=user_min_date, position_pct=position_pct,
-                                  user_id=user.id)
-            added = result.get('added', 0)
-            _log.info(f"scan_and_add [{user.email}]: {added} position(s) added")
-            results[user.email] = result
-        except Exception as exc:
-            _log.error(f"scan_and_add [{user.email}]: {exc}")
-            results[user.email] = {'error': str(exc)}
+    results = {}
+    n_books = 0
+    try:
+        for user in users:
+            for book in BOOKS:
+                n_books += 1
+                key = user.email if book == DEFAULT_BOOK else f'{user.email} [{book}]'
+                try:
+                    # _load_for_write, not load: this guard must see the book as it
+                    # will be AFTER forking. An unforked variant reads as empty, so a
+                    # plain load() would send it down the new-book path with
+                    # min_date=today while its control processed the full window —
+                    # the two arms would consume different files on day one.
+                    data = _load_for_write(user_id=user.id, book=book)
+                    # First-run guard: if user has no processed_files and no positions,
+                    # only pick up signals from today onwards to avoid flooding them
+                    # with all historical backfill files.
+                    user_min_date = min_date
+                    if not data.get('processed_files') and not data.get('positions'):
+                        user_min_date = today
+                        _log.info(f"scan_and_add [{key}]: new book — using min_date={today}")
+
+                    result = scan_and_add(min_date=user_min_date, position_pct=position_pct,
+                                          user_id=user.id, book=book,
+                                          user_label=user.email)
+                    added = result.get('added', 0)
+                    _log.info(f"scan_and_add [{key}]: {added} position(s) added")
+                    results[key] = result
+                except Exception as exc:
+                    _log.error(f"scan_and_add [{key}]: {exc}")
+                    results[key] = {'error': str(exc)}
+    finally:
+        _cached = len(_SCAN_FILE_CACHE)
+        _SCAN_FILE_CACHE = None
+        if _cached:
+            _log.info(f"scan_and_add_all_users: {_cached} signal file(s) read once "
+                      f"for {n_books} book(s) across {len(users)} user(s)")
 
     return results
 
@@ -1162,16 +1668,18 @@ def refresh_prices_all_users() -> dict:
 
     results = {}
     for user in users:
-        try:
-            result = refresh_prices(user_id=user.id)
-            closed = result.get('closed', [])
-            _log.info(f"refresh_prices [{user.email}]: {result.get('updated', 0)} updated"
-                      + (f", closed {', '.join(closed)}" if closed else ", 0 closed"))
-            results[user.email] = _slim(result)
-        except Exception as exc:
-            # Isolate per-user failures: one bad book must not stop the rest.
-            _log.error(f"refresh_prices [{user.email}]: {exc}")
-            results[user.email] = {'error': str(exc)}
+        for book in BOOKS:
+            key = user.email if book == DEFAULT_BOOK else f'{user.email} [{book}]'
+            try:
+                result = refresh_prices(user_id=user.id, book=book)
+                closed = result.get('closed', [])
+                _log.info(f"refresh_prices [{key}]: {result.get('updated', 0)} updated"
+                          + (f", closed {', '.join(closed)}" if closed else ", 0 closed"))
+                results[key] = _slim(result)
+            except Exception as exc:
+                # Isolate per-book failures: one bad book must not stop the rest.
+                _log.error(f"refresh_prices [{key}]: {exc}")
+                results[key] = {'error': str(exc)}
 
     return results
 
@@ -1184,36 +1692,80 @@ def _close_basis_history(hist: 'pd.DataFrame', now_et: 'datetime') -> 'pd.DataFr
 
     The champion exit is CLOSE-based (an intraday dip below the trail must NOT
     exit — low-based triggering gave 2022 −24.8% in the restore isolation).
-    yfinance history fetched during market hours includes today's *partial* bar,
-    whose Close is really the live price; deciding exits on it makes the live
-    system low-based whenever refresh runs intraday (the 10:00 ET cron).
-
-    Rule: drop today's partial bar unless we're in the late window (>= 15:30 ET,
-    where the near-close price is a fair proxy for today's close — the 15:45
-    cron) or the session is over (>= 16:00 ET, bar is final).
+    Thin wrapper over ``utils.close_basis_history`` — kept here (rather than
+    inlined) so existing imports/tests of this name are unaffected; the
+    logic itself is shared with ``orchestrator.evaluate_exits``, which has
+    the same partial-bar problem for its rule-based exit checks.
     """
-    if hist is None or hist.empty:
-        return hist
-    last_ts = hist.index[-1]
-    last_date = last_ts.date() if hasattr(last_ts, 'date') else last_ts
-    in_late_window = (now_et.hour, now_et.minute) >= (15, 30)
-    if last_date == now_et.date() and now_et.hour < 16 and not in_late_window:
-        return hist.iloc[:-1]
-    return hist
+    from utils import close_basis_history
+    return close_basis_history(hist, now_et)
 
 
-def refresh_prices(user_id: str | None = None) -> dict:
+def _apply_stale_price(p: dict, has_data: bool, today: str,
+                       max_days: int = STALE_PRICE_MAX_DAYS) -> bool:
+    """
+    Track how long a position has gone without market data.
+
+    Mutates ``p['stale_since']`` in place: cleared on any successful fetch,
+    stamped with ``today`` on the first failure. Returns True once the gap has
+    reached ``max_days``, meaning the position can never be priced or exited
+    again and must be settled out at its last known mark.
+
+    Counting from a stamped DATE rather than a run counter is deliberate:
+    refresh_prices runs at least twice a weekday (docker/crontab 10:00 and
+    15:45), so a counter would halve the intended window.
+
+    ``max_days=0`` closes on the first failed fetch. That is the operator path
+    for settling symbols already known to be dead — it reuses this same tested
+    branch rather than hand-editing the book JSON.
+    """
+    if has_data:
+        p.pop('stale_since', None)
+        return False
+
+    since = p.get('stale_since')
+    if not isinstance(since, str) or not since:
+        p['stale_since'] = today
+        since = today
+
+    try:
+        gap = (datetime.strptime(today, '%Y-%m-%d')
+               - datetime.strptime(since, '%Y-%m-%d')).days
+    except ValueError:
+        # Malformed stamp — restart the clock rather than closing on bad data.
+        p['stale_since'] = today
+        return max_days <= 0
+
+    return gap >= max_days
+
+
+def refresh_prices(user_id: str | None = None,
+                   book: str | None = DEFAULT_BOOK,
+                   stale_max_days: int = STALE_PRICE_MAX_DAYS) -> dict:
     """
     Fetch current prices for all open positions.
     Auto-close any position where the close-basis price <= stop (close-based —
-    mirrors the backtest champion exit; intraday dips do not trigger).
-    Returns {'closed': [symbols], 'data': data}
+    mirrors the backtest champion exit; intraday dips do not trigger), or where
+    it has been held past its mode's MAX_HOLD_BARS (calendar days, mirroring
+    simulate()'s MaxHold exit — exit_evaluator.py already recommends this same
+    close, but recommending it was never enough on its own: this is the only
+    function that actually closes a position, and it had no hold-period check
+    at all, so an EXIT_FULL "Max hold" notification could recur indefinitely
+    with no way for it to ever be acted on automatically).
+
+    Positions whose symbol has returned no market data for ``stale_max_days``
+    calendar days are settled out at their last known mark — see
+    STALE_PRICE_MAX_DAYS for why holding them forever was the alternative.
+    Pass ``stale_max_days=0`` to settle known-dead symbols immediately.
+
+    Returns {'closed': [symbols], 'updated': int, 'data': data}
     """
     import yfinance as yf
+    from config import MAX_HOLD_BARS
 
-    data = load(user_id=user_id)
+    data = _load_for_write(user_id=user_id, book=book)
     if not data['positions']:
-        _save(data, user_id=user_id)
+        _save(data, user_id=user_id, book=book)
         return {'closed': [], 'updated': 0, 'data': data}
 
     symbols = [p['symbol'] for p in data['positions']]
@@ -1233,12 +1785,35 @@ def refresh_prices(user_id: str | None = None) -> dict:
     closed_now = []
     still_open = []
 
+    # A wholesale fetch failure (network down, rate limit) must never be read as
+    # every symbol delisting at once, so staleness is only assessed when at least
+    # one symbol came back. This is the difference between settling a dead name
+    # and liquidating the whole book on a bad afternoon.
+    any_data = bool(hists)
+
     for p in data['positions']:
-        sym     = p['symbol']
-        hist    = hists.get(sym)
-        current = float(hist['Close'].dropna().iloc[-1]) if hist is not None and not hist.empty \
-                  else p.get('current_price', p['entry_price'])
+        sym      = p['symbol']
+        hist     = hists.get(sym)
+        has_data = hist is not None and not hist.empty
+        current  = float(hist['Close'].dropna().iloc[-1]) if has_data \
+                   else p.get('current_price', p['entry_price'])
         p['current_price'] = round(current, 4)   # live price — display only
+
+        # Symbol has gone quiet: settle it out rather than holding a position
+        # that can no longer be priced, trailed, or stopped out.
+        if any_data and _apply_stale_price(p, has_data, now_str, stale_max_days):
+            exit_px = float(current)
+            pnl     = round((exit_px - p['entry_price']) * p['shares'], 2)
+            data['closed'].append({
+                **p,
+                'date_closed':  now_str,
+                'exit_price':   round(exit_px, 4),
+                'pnl':          pnl,
+                'pnl_pct':      round((exit_px - p['entry_price']) / p['entry_price'] * 100, 2),
+                'close_reason': 'no_market_data',
+            })
+            closed_now.append(sym)
+            continue
 
         # Close-based basis: outside the late window, decisions use the last
         # COMPLETED daily bar, so a morning run only catches yesterday's
@@ -1269,6 +1844,32 @@ def refresh_prices(user_id: str | None = None) -> dict:
                 'close_reason': 'atr_trail_stop',
             })
             closed_now.append(sym)
+            continue
+
+        # MaxHold — calendar days since date_added, mode-specific cap. date_added
+        # is 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' (promote_position_mode re-stamps
+        # with a time component); slicing to the first 10 chars handles both.
+        max_hold = MAX_HOLD_BARS.get(p.get('mode', 'swing'), 30)
+        days_held = None
+        added = (p.get('date_added') or '')[:10]
+        if added:
+            try:
+                days_held = (now_et.date() - datetime.strptime(added, '%Y-%m-%d').date()).days
+            except ValueError:
+                pass
+        if max_hold > 0 and days_held is not None and days_held >= max_hold:
+            exit_px = basis_close
+            pnl     = round((exit_px - p['entry_price']) * p['shares'], 2)
+            pnl_pct = round((exit_px - p['entry_price']) / p['entry_price'] * 100, 2)
+            data['closed'].append({
+                **p,
+                'date_closed':  now_str,
+                'exit_price':   round(exit_px, 4),
+                'pnl':          pnl,
+                'pnl_pct':      pnl_pct,
+                'close_reason': 'max_hold',
+            })
+            closed_now.append(sym)
         else:
             still_open.append(p)
 
@@ -1277,8 +1878,41 @@ def refresh_prices(user_id: str | None = None) -> dict:
     if closed_now:
         for t in data['closed'][-len(closed_now):]:
             data['capital'] += t['pnl']
-    _save(data, user_id=user_id)
+    # Record today's equity point while every price is already in hand. This is
+    # the only place in the auto-book pipeline that holds a full valuation, and
+    # the A/B needs a time series (the book schema has none — everything else is
+    # point-in-time).
+    _record_equity_point(data)
+    _save(data, user_id=user_id, book=book)
     return {'closed': closed_now, 'updated': len(hists), 'data': data}
+
+
+def _record_equity_point(data: dict, when: str | None = None) -> dict:
+    """Append or overwrite today's point in data['equity_history'].
+
+    Idempotent per date: refresh_prices runs at least twice a weekday
+    (docker/crontab 10:00 and 15:45), and an append-per-run would double-count
+    days and skew any Sharpe computed off the series. The later run wins, so the
+    stored point is the closest to the session close.
+
+    Shape mirrors portfolio.py:281-297's snapshots so the two are comparable.
+    """
+    day = when or datetime.now(_NY_TZ).strftime('%Y-%m-%d')
+    market_value = sum((p.get('current_price') or p.get('entry_price') or 0)
+                       * (p.get('shares') or 0) for p in data.get('positions', []))
+    cash = available_cash(data)
+    point = {
+        'date':            day,
+        'total_value':     round(cash + market_value, 2),
+        'cash':            round(cash, 2),
+        'market_value':    round(market_value, 2),
+        'positions_count': len(data.get('positions', [])),
+    }
+    hist = [h for h in data.get('equity_history', []) if h.get('date') != day]
+    hist.append(point)
+    hist.sort(key=lambda h: h.get('date', ''))
+    data['equity_history'] = hist
+    return point
 
 
 # ── ATR always-on trail (live exit logic) ─────────────────────────────────────
@@ -1341,7 +1975,8 @@ def _compute_atr_series(hist: 'pd.DataFrame', period: int = 14) -> 'pd.Series':
 def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
                              atr_mult: float = 0.0,
                              atr_period: int = 14,
-                             user_id: str | None = None) -> dict:
+                             user_id: str | None = None,
+                             book: str | None = DEFAULT_BOOK) -> dict:
     """
     Walk through every trading day from each position's date_added to today.
 
@@ -1361,9 +1996,9 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
     import yfinance as yf
     import pandas as pd
 
-    data = load(user_id=user_id)
+    data = _load_for_write(user_id=user_id, book=book)
     if not data['positions']:
-        _save(data, user_id=user_id)
+        _save(data, user_id=user_id, book=book)
         return {'closed': [], 'checked': 0, 'data': data}
 
     use_atr    = atr_mult > 0
@@ -1477,16 +2112,21 @@ def simulate_trailing_stops(trail_pct: float = TRAIL_PCT,
     # Realized P&L flows back into capital
     for t in data['closed'][-len(closed_now):] if closed_now else []:
         data['capital'] += t['pnl']
-    _save(data, user_id=user_id)
+    _save(data, user_id=user_id, book=book)
     return {'closed': closed_now, 'checked': len(data['positions']) + len(closed_now),
             'data': data}
 
 
 # ── Missed-trade discovery ───────────────────────────────────────────────────
 
-def rebuild_skipped_cash(user_id: str | None = None) -> dict:
+MISSED_TRADE_MAX_AGE_DAYS = 90    # a "missed trade" older than a quarter is not actionable
+
+
+def rebuild_skipped_cash(user_id: str | None = None,
+                         max_age_days: int = MISSED_TRADE_MAX_AGE_DAYS,
+                         book: str | None = DEFAULT_BOOK) -> dict:
     """
-    Re-scan every signal file (including already-processed ones) to find
+    Re-scan recent signal files (including already-processed ones) to find
     V9-C signals that were NEVER taken (not open, not closed).
 
     These represent missed opportunities — either due to insufficient cash
@@ -1495,30 +2135,48 @@ def rebuild_skipped_cash(user_id: str | None = None) -> dict:
     Rebuilds data['skipped_cash'] from scratch (de-duped by symbol,
     keeping the first occurrence).  Does NOT touch positions/closed/processed_files.
 
+    Bounded by `max_age_days`. This used to walk the ENTIRE archive TWICE with no
+    bound — the same defect §18 fixed in scan_and_add, still live here and reached
+    from a Streamlit button inside the 320 MiB dashboard container: 860 files x 2
+    reads = 1,720 S3 GETs, plus a yfinance quote per unique symbol. Pass
+    max_age_days=0 for the old unbounded behaviour.
+
     Returns {'found': count, 'data': data}
     """
-    import pandas as pd
-    from utils import list_files, load_data
+    from utils import list_files
 
-    data      = load(user_id=user_id)
+    data      = _load_for_write(user_id=user_id, book=book)
     taken_syms = ({p['symbol'] for p in data['positions']} |
                   {t['symbol'] for t in data['closed']})
 
     all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    if max_age_days:
+        cutoff = (datetime.now(_NY_TZ).date()
+                  - timedelta(days=max_age_days)).isoformat()
+        all_fnames = [f for f in all_fnames if _date_from_filename(f) >= cutoff]
 
-    # Collect all symbols that appear in signal files so we know which
-    # skipped_cash entries were sourced from CSVs vs. added via live
-    # BREAKOUT detection (feedback agent). Live entries are preserved —
-    # only signal-file-sourced entries are rebuilt.
+    # ONE pass over the window. The old first pass existed only to collect
+    # `signal_syms`, which is a subset of what the second pass already read, so
+    # every file was downloaded and parsed twice. Keep the filtered frame from
+    # this pass and reuse it below.
     signal_syms: set[str] = set()
+    per_file: list[tuple] = []          # (fname, date_str, file_mode, v9h_frame)
     for fname in all_fnames:
-        df = load_data(f"{_SIGNALS_DIR}/{fname}")
+        df = _load_signal_frame(fname)
         if df is None or df.empty:
             continue
         df.columns = [c.strip() for c in df.columns]
-        col = 'Symbol' if 'Symbol' in df.columns else ('symbol' if 'symbol' in df.columns else None)
-        if col:
-            signal_syms.update(str(s).strip().upper() for s in df[col] if str(s).strip().upper() != 'NAN')
+        if 'Symbol' not in df.columns and 'symbol' in df.columns:
+            df = df.rename(columns={'symbol': 'Symbol'})
+        if 'Symbol' in df.columns:
+            signal_syms.update(str(s).strip().upper() for s in df['Symbol']
+                               if str(s).strip().upper() != 'NAN')
+        if 'Quality' not in df.columns or 'Symbol' not in df.columns:
+            continue
+        # type_bypass=False — deliberately stricter than admission; see _v9h_mask.
+        per_file.append((fname, _date_from_filename(fname),
+                         _mode_from_filename(fname),
+                         df[_v9h_mask(df, type_bypass=False)]))
 
     # Keep live-breakout entries (not in any signal file) so they survive the rebuild.
     # Re-validate their stop/target in case the original scanner used bad price data.
@@ -1538,29 +2196,10 @@ def rebuild_skipped_cash(user_id: str | None = None) -> dict:
     seen_syms = {e['symbol'].upper() for e in live_entries}
 
     if not all_fnames:
-        _save(data, user_id=user_id)
+        _save(data, user_id=user_id, book=book)
         return {'found': len(data['skipped_cash']), 'data': data}
 
-    for fname in all_fnames:
-        date_str  = _date_from_filename(fname)
-        file_mode = _mode_from_filename(fname)
-
-        df = load_data(f"{_SIGNALS_DIR}/{fname}")
-        if df is None or df.empty:
-            continue
-
-        df.columns = [c.strip() for c in df.columns]
-        if 'Symbol' not in df.columns and 'symbol' in df.columns:
-            df = df.rename(columns={'symbol': 'Symbol'})
-        if 'Quality' not in df.columns or 'Symbol' not in df.columns:
-            continue
-
-        mask = df['Quality'].isin(['GOLD', 'PREMIUM'])
-        if 'MinerviniScore' in df.columns:
-            mask = mask & (pd.to_numeric(df['MinerviniScore'], errors='coerce')
-                           .fillna(0) >= MIN_MINERVINI)
-        v9h = df[mask]
-
+    for fname, date_str, file_mode, v9h in per_file:
         for _, row in v9h.iterrows():
             sym = str(row.get('Symbol', '')).strip().upper()
             if not sym or sym == 'NAN':
@@ -1616,7 +2255,7 @@ def rebuild_skipped_cash(user_id: str | None = None) -> dict:
             seen_syms.add(sym)
 
     data['skipped_cash'].sort(key=lambda e: e.get('priority_score', 0), reverse=True)
-    _save(data, user_id=user_id)
+    _save(data, user_id=user_id, book=book)
     return {'found': len(data['skipped_cash']), 'data': data}
 
 
@@ -1632,6 +2271,7 @@ def add_position_direct(
     vol_ratio: float = 0.0,
     position_pct: float | None = None,
     user_id: str | None = None,
+    book: str | None = DEFAULT_BOOK,
 ) -> dict:
     """
     Directly add a position without scanning CSV files.
@@ -1644,16 +2284,28 @@ def add_position_direct(
     from utils import save_json, load_json, _is_cloud, _to_local_abs
     import fcntl, os
 
-    path = _portfolio_path_for(user_id)
+    # NOTE: this function deliberately bypasses _save() — it needs load, dedup
+    # check and save to happen inside ONE lock acquisition. It must therefore
+    # resolve the path through _portfolio_path_for with the same `book`, or a
+    # swap would close in one book and open its replacement in another.
+    path = _portfolio_path_for(user_id, book)
     abs_path = _to_local_abs(path)
     lock_path = abs_path + '.lock'
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+    # ⚠ Fork BEFORE taking the lock, never inside it. ensure_forked writes the
+    # variant through _save(), which acquires this exact lock file on its own
+    # descriptor — and fcntl.flock does not recurse, so a second acquisition from
+    # the same process blocks forever against itself. Doing it here keeps the
+    # load/dedup/save below in one uninterrupted lock acquisition, which is the
+    # whole reason this function bypasses _save() in the first place.
+    ensure_forked(user_id, book)
 
     with open(lock_path, 'w') as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             # Re-load inside lock to get latest state
-            data = load(user_id=user_id)
+            data = load(user_id=user_id, book=book)
 
             if symbol.upper() in open_symbols(data):
                 return {'added': False, 'reason': 'duplicate'}
@@ -1697,12 +2349,13 @@ def add_position_direct(
 
 # ── Mode promotion (exit_evaluator PROMOTE_MODE) ─────────────────────────────
 
-def promote_position_mode(symbol: str, new_mode: str, user_id: str | None = None) -> dict:
+def promote_position_mode(symbol: str, new_mode: str, user_id: str | None = None,
+                          book: str | None = DEFAULT_BOOK) -> dict:
     """Change a position's mode (e.g. daytrade → swing) and re-stamp date_added
     so MAX_HOLD_BARS starts counting from the promotion date, not original entry.
     Returns {'promoted': bool, 'reason': str, 'old_mode': str}.
     """
-    data = load(user_id=user_id)
+    data = _load_for_write(user_id=user_id, book=book)
     sym = symbol.upper()
     for p in data['positions']:
         if p['symbol'].upper() == sym:
@@ -1711,16 +2364,17 @@ def promote_position_mode(symbol: str, new_mode: str, user_id: str | None = None
                 return {'promoted': False, 'reason': 'same_mode', 'old_mode': old}
             p['mode'] = new_mode
             p['date_added'] = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
-            _save(data, user_id=user_id)
+            _save(data, user_id=user_id, book=book)
             return {'promoted': True, 'reason': 'ok', 'old_mode': old}
     return {'promoted': False, 'reason': 'not_found', 'old_mode': ''}
 
 
 # ── Manual close (UI) ─────────────────────────────────────────────────────────
 
-def close_position(symbol: str, exit_price: float, reason: str = 'manual', user_id: str | None = None) -> dict:
+def close_position(symbol: str, exit_price: float, reason: str = 'manual', user_id: str | None = None,
+                   book: str | None = DEFAULT_BOOK) -> dict:
     """Close a specific position at given price."""
-    data = load(user_id=user_id)
+    data = _load_for_write(user_id=user_id, book=book)
     now_str    = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
     still_open = []
     closed_rec = None
@@ -1744,13 +2398,14 @@ def close_position(symbol: str, exit_price: float, reason: str = 'manual', user_
     data['positions'] = still_open
     if closed_rec:
         data['capital'] += closed_rec['pnl']  # realized P&L flows back into capital
-    _save(data, user_id=user_id)
+    _save(data, user_id=user_id, book=book)
     return closed_rec or {}
 
 
 # ── Rebalance ────────────────────────────────────────────────────────────────
 
-def rebalance(dry_run: bool = True, user_id: str | None = None) -> dict:
+def rebalance(dry_run: bool = True, user_id: str | None = None,
+              book: str | None = DEFAULT_BOOK) -> dict:
     """
     Enforce portfolio balance rules on EXISTING positions.
 
@@ -1771,7 +2426,7 @@ def rebalance(dry_run: bool = True, user_id: str | None = None) -> dict:
 
     from config import CASH_MANAGEMENT
 
-    data = load(user_id=user_id)
+    data = _load_for_write(user_id=user_id, book=book)
     positions = data['positions']
     capital = data['capital']
 
@@ -1969,7 +2624,7 @@ def rebalance(dry_run: bool = True, user_id: str | None = None) -> dict:
                         f"({a['reason']})")
 
     # Execute trims (reduce shares, free cash)
-    data = load(user_id=user_id)  # reload after closes
+    data = load(user_id=user_id, book=book)  # reload after closes
     for a in actions_trim:
         for p in data['positions']:
             if p['symbol'] == a['symbol']:
@@ -1985,7 +2640,7 @@ def rebalance(dry_run: bool = True, user_id: str | None = None) -> dict:
                     f"(freed ${freed:,.0f}, {a['reason']})"
                 )
                 break
-    _save(data, user_id=user_id)
+    _save(data, user_id=user_id, book=book)
 
     print(f"\n  ✓ Rebalance complete. Closed {len(actions_close)}, trimmed {len(actions_trim)}.")
     return {'closed': actions_close, 'trimmed': actions_trim}
@@ -2011,15 +2666,29 @@ def _refresh_current_prices(data: dict):
 
 # ── Reset ─────────────────────────────────────────────────────────────────────
 
-def reset(user_id: str | None = None) -> dict:
+def reset(user_id: str | None = None, book: str | None = DEFAULT_BOOK) -> dict:
+    """Empty a book. Deliberately does NOT go through _load_for_write.
+
+    ⚠ The fork stamp is carried across, and that is load-bearing rather than
+    cosmetic. _book_has_state() treats a stamp as "this book has been used", so a
+    reset that dropped it would leave the variant looking never-forked — and the
+    very next write would re-clone control over the top. Reset would then mean
+    "restore control's positions" on a variant and "empty the book" on control,
+    and recalculate() (reset + rescan) would silently resurrect control's book
+    into the variant. Reset means empty, on every book.
+    """
+    prior = load(user_id, book)
     data = _empty()
-    _save(data, user_id=user_id)
+    if prior.get('fork'):
+        data['fork'] = prior['fork']
+    _save(data, user_id=user_id, book=book)
     return data
 
 
 def recalculate(position_pct: float = POSITION_SIZE_PCT,
                 min_date: str | None = None,
-                user_id: str | None = None) -> dict:
+                user_id: str | None = None,
+                book: str | None = DEFAULT_BOOK) -> dict:
     """
     Reset the portfolio and rescan all signal files from scratch.
 
@@ -2041,15 +2710,28 @@ def recalculate(position_pct: float = POSITION_SIZE_PCT,
     """
     from utils import save_json
 
-    pre_reset = load(user_id=user_id)
-    backup_path = _portfolio_path_for(user_id).replace(
-        'auto_portfolio.json',
-        f'pre_recalculate_{datetime.now(_NY_TZ).strftime("%Y%m%dT%H%M%S")}.json',
-    )
+    pre_reset = _load_for_write(user_id=user_id, book=book)
+    # Derive the backup path from the resolver, never by patching the filename.
+    # This used to be `_portfolio_path_for(user_id).replace('auto_portfolio.json', …)`,
+    # which silently NO-OPS for any book whose filename is not exactly
+    # 'auto_portfolio.json' — the "backup" path would then equal the live path and
+    # the backup would overwrite the very book it exists to protect. The reset
+    # below is otherwise unrecoverable, so that failure destroys the portfolio.
+    live_path   = _portfolio_path_for(user_id, book)
+    stamp       = datetime.now(_NY_TZ).strftime('%Y%m%dT%H%M%S')
+    backup_path = live_path.rsplit('/', 1)[0] + f'/pre_recalculate_{stamp}.json'
+    if backup_path == live_path:                     # belt and braces
+        raise RuntimeError(f'refusing to back up {live_path} onto itself')
     save_json(pre_reset, backup_path)
 
-    reset(user_id=user_id)
-    result = scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id, notify=False)
+    reset(user_id=user_id, book=book)
+    # allow_stale=True: this call exists to rebuild a book from history, so the
+    # SIGNAL_MAX_AGE_DAYS bound must not apply — clamping it would silently
+    # produce exactly the thin rebuild the docstring above warns about (the
+    # 2026-07-17 incident). scan_and_add's default stays False so the ordinary
+    # "Scan Signals + date filter" path cannot backfill stale signals unnoticed.
+    result = scan_and_add(min_date=min_date, position_pct=position_pct, user_id=user_id,
+                          notify=False, book=book, allow_stale=True)
     _save_entry_price_cache()
 
     result['backup_path'] = backup_path
@@ -2105,9 +2787,14 @@ def get_summary(data: dict) -> dict:
 
 _SWAP_WEAK_PNL_PCT    = -2.0   # position must be down ≥2% to be considered weak
 _SWAP_STOP_PROXIMITY  = 0.04   # OR within 4% of its stop
-_SWAP_MIN_FRESH_DAYS  = 5      # skipped signal must be ≤5 trading days old
+_SWAP_MIN_FRESH_DAYS  = 5      # skipped signal must be ≤5 CALENDAR days old
 _SWAP_MIN_SCORE_DELTA = 20.0   # skipped priority_score must beat pos score by ≥20pts
 _SWAP_MIN_MOMENTUM    = 0.0    # skipped signal must be up since signal date (not falling)
+# scan_and_add_all_users fires up to 4x/weekday (docker/crontab 9:35, 15:45,
+# 16:30, 19:30). Advice that CHANGES between runs is worth a second message;
+# beyond that it is noise, and Notifier has no per-user routing so every book
+# lands in the same Telegram chat.
+_SWAP_ADVICE_MAX_SENDS_PER_DAY = 2
 
 
 def _position_weakness_score(pos: dict) -> float:
@@ -2163,6 +2850,8 @@ def suggest_swaps(
     min_score_delta: float = _SWAP_MIN_SCORE_DELTA,
     notify: bool = True,
     user_id: str | None = None,
+    book: str | None = DEFAULT_BOOK,
+    data: dict | None = None,
 ) -> list[dict]:
     """Compare open positions against top skipped signals and suggest swaps.
 
@@ -2172,10 +2861,17 @@ def suggest_swaps(
          weak position's implied score + min_score_delta
       3. The skipped signal has positive momentum since signal date
 
-    Returns list of swap dicts, sorted by improvement desc.
+    Returns list of swap dicts, ordered WORST-POSITION-FIRST (not by improvement
+    — the docstring used to claim otherwise; the order is deliberate, since the
+    UI and the Telegram message lead with the position most in need of action).
     Sends a notification if notify=True and any swaps found.
+
+    Args:
+        data: an already-loaded book, to avoid a redundant re-read when the
+            caller (e.g. the scan tail) has one in hand. Read-only here.
     """
-    data      = load(user_id=user_id)
+    if data is None:
+        data = load(user_id=user_id, book=book)
     positions = data.get('positions', [])
     skipped   = data.get('skipped_cash', [])
 
@@ -2248,14 +2944,18 @@ def suggest_swaps(
     for pos in weak_positions:
         if len(swaps) >= max_suggestions:
             break
+        # The gate is `delta >= min_score_delta`. This used to seed
+        # `best_delta = min_score_delta - 1` and test `delta > best_delta`,
+        # which admits anything above min_score_delta − 1 — i.e. the documented
+        # 20.0 threshold actually behaved as > 19.0.
         best_skip = None
-        best_delta = min_score_delta - 1
+        best_delta = None
 
         for s in fresh_skipped:
             if s['symbol'] in used_skipped:
                 continue
             delta = s.get('priority_score', 0) - pos['_implied_score']
-            if delta > best_delta:
+            if delta >= min_score_delta and (best_delta is None or delta > best_delta):
                 best_delta = delta
                 best_skip  = s
 
@@ -2291,9 +2991,18 @@ def suggest_swaps(
             'open_target':     best_skip.get('target'),
             'open_momentum':   best_skip.get('missed_pnl_pct'),
             'open_priority':   best_skip.get('priority_score'),
+            'open_sector':     best_skip.get('sector'),
+            'open_rsi':        best_skip.get('rsi'),
             'score_improvement': round(best_delta, 1),
             'signal_date':     best_skip.get('date_added', '')[:10],
             'skip_reason':     best_skip.get('skip_reason', ''),
+            # Kept so the message can say WHY the position is weak, rather than
+            # only that something else outscored it.
+            'close_implied_score': round(pos['_implied_score'], 1),
+            'close_stop_dist_pct': round(
+                (current - (pos.get('stop') or 0)) / current * 100, 2
+            ) if current else None,
+            'close_days_held': _days_held(pos),
         }.items()})
 
     if not swaps or not notify:
@@ -2301,30 +3010,10 @@ def suggest_swaps(
 
     try:
         from notifier import Notifier
-        # A field cleaned to None by _clean_nan above can't satisfy an explicit
-        # numeric format spec (unlike NaN, which formats fine as "nan") —
-        # without this, one None field would raise inside the loop and the
-        # broad except below would silently drop the WHOLE notification batch,
-        # not just the affected swap.
-        def _fmt(v, spec='.1f'):
-            return format(v, spec) if v is not None else 'N/A'
-
-        lines = []
-        for sw in swaps:
-            lines.append(
-                f"• CLOSE {sw['close_symbol']} ({_fmt(sw['close_pnl_pct'], '+.1f')}%) → "
-                f"OPEN {sw['open_symbol']} [{sw['open_quality']}]  "
-                f"R:R {sw['open_rr']} | WinProb {sw['open_win_prob']}% | "
-                f"+{_fmt(sw['open_momentum'])}% since signal  "
-                f"(score +{_fmt(sw['score_improvement'], '.0f')}pts)"
-            )
+        subject, body = _format_swap_message(swaps)
         Notifier().send_all(
-            subject=f"⚡ Swap Advisor: {len(swaps)} opportunity{'s' if len(swaps) > 1 else ''}",
-            message=(
-                "Better signals are available to replace weaker positions:\n\n"
-                + "\n".join(lines)
-                + "\n\nThese are suggestions only — review before acting."
-            ),
+            subject=subject,
+            message=body,
             signals=None,
             notification_type='signals',
             force=True,
@@ -2334,6 +3023,279 @@ def suggest_swaps(
         _log.getLogger(__name__).warning(f"Swap advisor notification failed: {_e}")
 
     return swaps
+
+
+def _fmt_num(v, spec='.1f') -> str:
+    """Format a number that _clean_nan may have turned into None.
+
+    NaN formats fine under an explicit numeric spec ("nan"); None raises. Without
+    this guard one None field raises mid-loop and the broad except around the
+    notification drops the WHOLE batch rather than the affected swap.
+    """
+    try:
+        return format(v, spec) if v is not None else 'N/A'
+    except (TypeError, ValueError):
+        return 'N/A'
+
+
+def _format_swap_message(swaps: list[dict],
+                         *,
+                         executed: list[dict] | None = None,
+                         book_label: str | None = None,
+                         skipped_count: int = 0) -> tuple[str, str]:
+    """Render the swap notification. Returns (subject, body).
+
+    The body repeats the headline on line 1 because Telegram never receives the
+    subject — Notifier.send_all calls send_telegram(message, signals) with no
+    subject argument (notifier.py:137 → :218), and Telegram is the channel that
+    is actually read. Plain text only: send_telegram posts without parse_mode.
+    """
+    executed = executed or []
+    n = len(swaps) + len(executed)
+    tag = f"  [{book_label}]" if book_label else ""
+    subject = f"⚡ Swap Advisor: {n} opportunit{'ies' if n != 1 else 'y'}"
+
+    lines = [f"⚡ SWAP ADVISOR — {n} suggestion(s){tag}", ""]
+    if skipped_count:
+        lines.append(f"Today's scan skipped {skipped_count} signal(s) it could not fund.")
+    lines.append("These outscore a position already held by "
+                 f"{_SWAP_MIN_SCORE_DELTA:.0f}+ points:")
+    lines.append("")
+
+    def _render(sw, i, verb):
+        upside = None
+        if sw.get('open_entry') and sw.get('open_target'):
+            try:
+                upside = (sw['open_target'] - sw['open_entry']) / sw['open_entry'] * 100
+            except (TypeError, ZeroDivisionError):
+                upside = None
+        held = [f"{_fmt_num(sw.get('close_pnl_pct'), '+.1f')}%"]
+        if sw.get('close_stop_dist_pct') is not None:
+            held.append(f"{_fmt_num(sw['close_stop_dist_pct'])}% above stop")
+        if sw.get('close_days_held') is not None:
+            held.append(f"held {sw['close_days_held']}d")
+        if sw.get('close_quality'):
+            held.append(str(sw['close_quality']))
+        out = [
+            f"{i}) {verb:<7} {sw['close_symbol']:<6} " + "  ·  ".join(held),
+            f"   OPEN    {sw['open_symbol']:<6} {sw.get('open_quality') or '?'}"
+            f" · {sw.get('open_type') or '?'}"
+            + (f" · {sw['open_sector']}" if sw.get('open_sector') else ""),
+            f"           entry ${_fmt_num(sw.get('open_entry'), '.2f')}"
+            f" → target ${_fmt_num(sw.get('open_target'), '.2f')}"
+            + (f" ({_fmt_num(upside, '+.1f')}%)" if upside is not None else "")
+            + f"  stop ${_fmt_num(sw.get('open_stop'), '.2f')}",
+            f"           R:R {_fmt_num(sw.get('open_rr'), '.2f')}"
+            f" · Vol {_fmt_num(sw.get('open_vol'), '.2f')}x"
+            f" · RSI {_fmt_num(sw.get('open_rsi'), '.0f')}"
+            f" · {_fmt_num(sw.get('open_momentum'), '+.1f')}% since signal",
+            f"   why     held score {_fmt_num(sw.get('close_implied_score'), '.0f')}"
+            f" vs candidate {_fmt_num(sw.get('open_priority'), '.0f')}"
+            f"  (+{_fmt_num(sw.get('score_improvement'), '.0f')})",
+        ]
+        return out
+
+    i = 0
+    for sw in executed:
+        i += 1
+        lines += _render(sw, i, 'CLOSED') + [""]
+    for sw in swaps:
+        i += 1
+        lines += _render(sw, i, 'CLOSE') + [""]
+
+    if executed:
+        lines.append(f"{len(executed)} swap(s) were EXECUTED automatically in this book.")
+        lines.append("Reverse the most recent with POST /portfolio/undo-swap.")
+    if swaps:
+        lines.append("Information, not a recommendation — nothing above was traded.")
+        lines.append("Act via: mobile → Portfolio → Swap, or")
+        lines.append(f'  POST /portfolio/execute-swap {{"close_symbol":"{swaps[0]["close_symbol"]}",'
+                     f' "open_symbol":"{swaps[0]["open_symbol"]}"}}')
+
+    body = "\n".join(lines)
+    # Telegram hard-limits at 4096 chars; leave room for send_telegram's own
+    # "🚨 " prefix and trailing newlines.
+    if len(body) > 3500:
+        body = body[:3500].rsplit("\n", 1)[0] + f"\n… truncated ({n} total)"
+    return subject, body
+
+
+# ── Auto-swap stage (the live A/B) ───────────────────────────────────────────
+
+_SWAP_LEDGER_PATH = 'scanner_output/swap_ledger.jsonl'
+
+
+def _days_held(pos: dict) -> int | None:
+    """Calendar days since a position was opened, or None if unparseable."""
+    raw = str(pos.get('date_added') or '')[:10]
+    try:
+        opened = datetime.strptime(raw, '%Y-%m-%d').date()
+    except ValueError:
+        return None
+    return (datetime.now(_NY_TZ).date() - opened).days
+
+
+def _append_swap_ledger(rec: dict) -> None:
+    """Append one line to the swap ledger — the experiment's primary readout.
+
+    Aggregate equity curves need months to separate: both books trade the same
+    signals on the same days, so the difference is a small residual on two
+    highly-correlated series. Per-swap attribution answers "was THIS swap
+    right?" one decision at a time, which is readable in weeks.
+
+    Best-effort local append. Never raises: losing a ledger line must not cost a
+    trade or abort a scan.
+    """
+    import json as _json
+    import logging as _log
+    try:
+        from utils import _to_local_abs
+        import os as _os
+        path = _to_local_abs(_SWAP_LEDGER_PATH)
+        _os.makedirs(_os.path.dirname(path), exist_ok=True)
+        with open(path, 'a') as fh:
+            fh.write(_json.dumps(rec, default=str) + "\n")
+    except Exception as _e:
+        _log.getLogger(__name__).warning(f"swap ledger append failed: {_e}")
+
+
+def _run_swap_stage(data: dict,
+                    *,
+                    user_id: str | None,
+                    book: str | None,
+                    user_label: str | None = None,
+                    skipped_now: int = 0) -> list[dict]:
+    """Tail of scan_and_add: advise (control) or execute (autoswap) swaps.
+
+    Both books run the SAME `suggest_swaps` gate — the only difference is what
+    happens to the result. That is deliberate: the A/B measures the advisor's
+    judgment as it already exists, so nothing new is calibrated here.
+
+    Deduped by a per-book daily stamp rather than Notifier's cache, because that
+    cache is a single GLOBAL file keyed on subject alone when signals is None
+    (notifier.py:94-98) — relying on it would let one book's alert suppress
+    another's. scan_and_add_all_users fires up to 4x/weekday (docker/crontab
+    9:35, 15:45, 16:30, 19:30), so without a stamp the same advice re-sends all
+    day.
+    """
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+
+    cfg = _book_cfg(book)
+    if not data.get('positions') or not data.get('skipped_cash'):
+        return []
+
+    max_n = cfg['max_swaps_per_day'] if cfg['auto_swap'] else 3
+    swaps = suggest_swaps(max_suggestions=max_n, notify=False,
+                          user_id=user_id, book=book, data=data)
+    if not swaps:
+        return []
+
+    today = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
+    stamp = data.get('swap_advice') or {}
+    key = '|'.join(sorted(f"{s['close_symbol']}>{s['open_symbol']}" for s in swaps))
+    if stamp.get('date') == today:
+        if stamp.get('key') == key:
+            _logger.info(f"swap stage [{book}]: identical advice already handled today")
+            return swaps
+        if stamp.get('sends', 0) >= _SWAP_ADVICE_MAX_SENDS_PER_DAY:
+            _logger.info(f"swap stage [{book}]: daily send quota spent")
+            return swaps
+
+    executed, pending = [], swaps
+    if cfg['auto_swap']:
+        executed, pending = _execute_swap_batch(
+            swaps, user_id=user_id, book=book,
+            budget=cfg['max_swaps_per_day'] - int(stamp.get('executed', 0) or 0)
+            if stamp.get('date') == today else cfg['max_swaps_per_day'],
+            logger=_logger,
+        )
+
+    try:
+        from notifier import Notifier
+        subject, body = _format_swap_message(
+            pending, executed=executed,
+            book_label=f"{user_label} · {cfg['label']}" if user_label else cfg['label'],
+            skipped_count=skipped_now,
+        )
+        Notifier().send_all(subject=subject, message=body, signals=None,
+                            notification_type='signals', force=True)
+    except Exception as _e:
+        _logger.warning(f"swap notification failed [{book}]: {_e}")
+
+    # Re-load: _execute_swap_batch wrote through close_position /
+    # add_position_direct, so the caller's `data` is stale for everything except
+    # the stamp we are about to set. Through the seam like every other writer —
+    # the book is certainly forked by now (scan_and_add did it), so this is
+    # defence in depth rather than a live case, but a uniform "if you _save, you
+    # read through _load_for_write" rule is what the structural test enforces and
+    # what stops the next writer added here from quietly bypassing the fork.
+    fresh = _load_for_write(user_id=user_id, book=book)
+    prior = fresh.get('swap_advice') or {}
+    same_day = prior.get('date') == today
+    fresh['swap_advice'] = {
+        'date':     today,
+        'key':      key,
+        'sends':    (prior.get('sends', 0) if same_day else 0) + 1,
+        'executed': (prior.get('executed', 0) if same_day else 0) + len(executed),
+        'sent_at':  datetime.now(_NY_TZ).isoformat(),
+        'swaps':    pending,
+        'done':     executed,
+    }
+    _save(fresh, user_id=user_id, book=book)
+    return swaps
+
+
+def _execute_swap_batch(swaps, *, user_id, book, budget, logger):
+    """Execute up to `budget` swaps. Returns (executed, not_executed).
+
+    Prices both legs on the CLOSE basis so the auto-swap book's exits are priced
+    identically to the control book's — see execute_swap's price_basis arg. A
+    failure is logged and skipped, never raised: one bad symbol must not stop the
+    rest of the batch or the scan around it.
+    """
+    executed, pending = [], []
+    for sw in swaps:
+        if len(executed) >= max(0, budget):
+            pending.append(sw)
+            continue
+        try:
+            res = execute_swap(sw['close_symbol'], sw['open_symbol'],
+                               user_id=user_id, book=book, price_basis='close')
+        except Exception as exc:
+            logger.warning(f"auto-swap {sw['close_symbol']}→{sw['open_symbol']} raised: {exc}")
+            pending.append(sw)
+            continue
+        if not res.get('ok'):
+            logger.warning(f"auto-swap {sw['close_symbol']}→{sw['open_symbol']} "
+                           f"declined: {res.get('reason')}")
+            pending.append(sw)
+            continue
+
+        closed, opened = res.get('closed') or {}, res.get('opened') or {}
+        logger.info(f"AUTO-SWAP [{book}]: closed {sw['close_symbol']} "
+                    f"@ {closed.get('exit_price')} → opened {sw['open_symbol']} "
+                    f"@ {opened.get('entry_price')}")
+        _append_swap_ledger({
+            'ts':            datetime.now(_NY_TZ).isoformat(),
+            'user_id':       user_id,
+            'book':          book,
+            'close_symbol':  sw['close_symbol'],
+            'close_price':   closed.get('exit_price'),
+            'close_pnl':     closed.get('pnl'),
+            'close_pnl_pct': closed.get('pnl_pct'),
+            'close_entry':   closed.get('entry_price'),
+            'open_symbol':   sw['open_symbol'],
+            'open_price':    opened.get('entry_price'),
+            'open_stop':     opened.get('stop'),
+            'open_target':   opened.get('target'),
+            'score_improvement': sw.get('score_improvement'),
+            'price_basis':   'close',
+        })
+        executed.append({**sw, '_executed': True,
+                         'exec_close_price': closed.get('exit_price'),
+                         'exec_open_price':  opened.get('entry_price')})
+    return executed, pending
 
 
 def _fetch_live_price(symbol: str) -> Optional[float]:
@@ -2348,20 +3310,63 @@ def _fetch_live_price(symbol: str) -> Optional[float]:
     return None
 
 
-def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None) -> dict:
+def _fetch_close_basis_price(symbol: str) -> Optional[float]:
+    """Fetch the last COMPLETED daily close for `symbol`. None on failure.
+
+    The close-basis twin of `_fetch_live_price`. Before 16:00 ET, yfinance's
+    last row is today's *partial* bar, so `_fetch_live_price` returns an
+    intraday quote — which is the right thing for a human clicking Swap and the
+    wrong thing for an automated one.
+
+    Every other exit in this system is close-based (§12 Task 1): the champion
+    validation measured low/intraday triggering at 2022 −24.8% versus −10.75%
+    close-based. An automated swap priced intraday would make the auto-swap book
+    differ from the control in *how* exits are priced, not only in *which*
+    positions close — which is a confound, not a treatment effect.
+    """
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(symbol.replace(' ', '-')).history(period='7d')
+        if hist is None or hist.empty:
+            return None
+        basis = _close_basis_history(hist, datetime.now(_NY_TZ))
+        if basis is None or basis.empty:
+            return None
+        return float(basis['Close'].dropna().iloc[-1])
+    except Exception:
+        return None
+
+
+def _swap_price(symbol: str, price_basis: str) -> Optional[float]:
+    """Resolve a swap leg's price under the requested basis."""
+    if price_basis == 'close':
+        return _fetch_close_basis_price(symbol)
+    return _fetch_live_price(symbol)
+
+
+def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None,
+                 book: str | None = DEFAULT_BOOK,
+                 price_basis: str = 'live') -> dict:
     """Close a weak position and open a fresh one from the skipped_cash list.
 
-    Uses live (yfinance) prices for BOTH the close exit and the new entry.
     The skipped signal's stop/target levels (technical S/R) are preserved;
-    `add_position_direct` auto-adjusts the stop if the live entry drifted
-    above the signal's original stop.
+    `add_position_direct` auto-adjusts the stop if the entry drifted above the
+    signal's original stop.
+
+    Args:
+        price_basis: 'live' (default) prices both legs at the current quote —
+            correct for a human-initiated swap, who intends a live fill.
+            'close' prices both legs at the last COMPLETED daily bar, matching
+            every other exit in the system (§12 Task 1). The automated
+            auto-swap book uses 'close' so its exits are priced identically to
+            the control book's.
 
     Returns {'ok': bool, 'reason': str, 'closed': {...}, 'opened': {...}}.
     """
     close_sym = close_symbol.upper()
     open_sym  = open_symbol.upper()
 
-    data = load(user_id=user_id)
+    data = _load_for_write(user_id=user_id, book=book)
 
     open_pos = next(
         (p for p in data.get('positions', []) if p['symbol'].upper() == close_sym),
@@ -2378,19 +3383,19 @@ def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None
     if skip_rec is None:
         return {'ok': False, 'reason': f'{open_sym} not in skipped signals'}
 
-    exit_price = _fetch_live_price(close_sym)
+    exit_price = _swap_price(close_sym, price_basis)
     if exit_price is None or exit_price <= 0:
-        return {'ok': False, 'reason': f'live price unavailable for {close_sym}'}
+        return {'ok': False, 'reason': f'{price_basis} price unavailable for {close_sym}'}
 
-    entry_price = _fetch_live_price(open_sym)
+    entry_price = _swap_price(open_sym, price_basis)
     if entry_price is None or entry_price <= 0:
-        return {'ok': False, 'reason': f'live price unavailable for {open_sym}'}
+        return {'ok': False, 'reason': f'{price_basis} price unavailable for {open_sym}'}
 
     # Snapshot pre-swap state for undo
     pre_position = dict(open_pos)
     pre_skipped  = dict(skip_rec)
 
-    closed = close_position(close_sym, exit_price, reason='swap', user_id=user_id)
+    closed = close_position(close_sym, exit_price, reason='swap', user_id=user_id, book=book)
     if not closed:
         return {'ok': False, 'reason': f'close failed for {close_sym}'}
 
@@ -2409,6 +3414,7 @@ def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None
         quality=quality,
         vol_ratio=vol,
         user_id=user_id,
+        book=book,
     )
     if not result.get('added'):
         return {
@@ -2418,7 +3424,7 @@ def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None
         }
 
     # Remove the consumed skipped signal and stash undo snapshot
-    data2 = load(user_id=user_id)
+    data2 = load(user_id=user_id, book=book)
     data2['skipped_cash'] = [
         s for s in data2.get('skipped_cash', [])
         if s.get('symbol', '').upper() != open_sym
@@ -2431,7 +3437,7 @@ def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None
         'pre_skipped':   pre_skipped,
         'closed_record': closed,
     }
-    _save(data2, user_id=user_id)
+    _save(data2, user_id=user_id, book=book)
 
     return {
         'ok': True,
@@ -2448,7 +3454,8 @@ def execute_swap(close_symbol: str, open_symbol: str, user_id: str | None = None
     }
 
 
-def undo_last_swap(user_id: str | None = None) -> dict:
+def undo_last_swap(user_id: str | None = None,
+                   book: str | None = DEFAULT_BOOK) -> dict:
     """Reverse the most recent `execute_swap()`.
 
     Restores the original position (with its original entry/shares/date),
@@ -2457,7 +3464,7 @@ def undo_last_swap(user_id: str | None = None) -> dict:
 
     Returns {'ok': bool, 'reason': str}.
     """
-    data = load(user_id=user_id)
+    data = _load_for_write(user_id=user_id, book=book)
     snap = data.get('last_swap')
     if not snap:
         return {'ok': False, 'reason': 'no recent swap to undo'}
@@ -2512,7 +3519,7 @@ def undo_last_swap(user_id: str | None = None) -> dict:
         )
 
     data['last_swap'] = None
-    _save(data, user_id=user_id)
+    _save(data, user_id=user_id, book=book)
     return {
         'ok': True,
         'reason': 'ok',

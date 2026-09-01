@@ -1,12 +1,20 @@
 # stocksBreakout — server deployment (single Linux VM). See deploy/README.md.
 #
-# Three services share one built image:
+# Three services share one built image (the `x-app` anchor):
 #   scanner-cron  — supercronic runs docker/crontab (all scheduled scans + the
 #                   surge monitor, which the crontab starts at 08:00 ET weekdays)
 #   api           — FastAPI mobile server (uvicorn :8000)
-#   cloudflared   — Cloudflare tunnel; serves gilhadas-stocks.com from this box
+#   dashboard     — Streamlit admin/scanning UI (:8501)
 # Plus one service built from a sibling repo checkout (../TradeManagment):
 #   journal       — Trade Journal SPA (nginx :80, journal.gilhadas-stocks.com)
+# Plus two from upstream images:
+#   cloudflared   — Cloudflare tunnel; serves the gilhadas-stocks.com names
+#   tailscale     — private-network access path into the box
+#
+# ⚠ This VM also runs an UNRELATED compose project (`daytrade`, from
+# /opt/daytrade/docker-compose.yml). `docker compose` acts on whichever project
+# your cwd belongs to, so always run these from the repo root — and never
+# `docker system prune -a`, which is not scoped to one project.
 #
 # Prerequisites on the VM (see deploy/README.md):
 #   - .env at repo root (copy deploy/.env.example, fill in secrets)
@@ -15,11 +23,23 @@
 # Bring up:    docker compose up -d --build
 # Logs:        docker compose logs -f scanner-cron
 # Manual scan: docker compose run --rm scanner-cron \
-#                python3 breakout_scanner.py input/ALL.txt --mode swing --cron --no-notify
+#                python3 breakout_scanner.py input/all.txt --mode swing --cron --no-notify
+#              ^ lowercase. Linux is case-sensitive and the file is `all.txt`;
+#                an `ALL.txt` in the crontab once silently killed every scheduled
+#                scan for a week.
 
 # Memory limits (added 2026-07-23 after the box wedged for 7h)
 # ---------------------------------------------------------------------------
-# The VM is a t3.small: 2 GB RAM total, no swap, six containers, and until now
+# ⚠ The machine described below is RETIRED. Production moved to an Oracle Cloud
+# VM on 2026-08-02 (aarch64, 11 GiB RAM, 2 GiB swap) — roughly 3x the headroom
+# any of this was tuned for. The history is kept because the FAILURE it
+# describes is still exactly why these caps exist; only the machine changed.
+# Do not assume the numbers transfer: re-measure after any host or architecture
+# change, and take the measurement under a GENEROUS cap (a tight one makes the
+# process thrash the ceiling and report a HIGHER peak than it needs — measured
+# 1231.8 MB @1500m vs 1002.2 MB @2048m for the identical scan).
+#
+# The VM was a t3.small: 2 GB RAM total, no swap, six containers, and until then
 # no per-container limit anywhere. With no cgroup limit the *host* OOM killer
 # picks its victims by badness score — on 2026-07-22 18:00 ET it took out the
 # network daemons rather than the scan that caused the pressure, so the box kept
@@ -33,8 +53,8 @@
 # brings back — while the tunnel and Tailscale survive and the box stays
 # reachable. oom_score_adj tells the host killer to avoid those two lifelines.
 # Caps are ceilings, not reservations, so they may sum above physical RAM.
-# These numbers assume the 2 GB t3.small + the 4 GB swapfile from
-# deploy/setup-swap.sh; revisit them if the box is resized or migrated.
+# Numbers were last re-measured on aarch64 for the Oracle box (scanner-cron
+# 2048m vs a ~1 GiB measured working set); revisit on any resize or migration.
 
 # Log rotation (added 2026-07-23) — plain json-file has no rotation by default.
 # Found 9.6GB of stale Docker BUILD CACHE (not container logs) eating the 30GB
@@ -43,6 +63,20 @@
 # cache isn't bounded by this block (only `docker builder prune` clears it;
 # there's no cache-size compose setting), but container log growth is a
 # separate, ongoing risk this DOES close off — cap it now before it compounds.
+#
+# VERIFIED 2026-08-11 on the running containers (not just in this file): all six
+# report `json-file max-size=10m max-file=3` under `docker inspect`, so the
+# anchor reaches every service — the three that take it via `<<: *app` and the
+# three that take it directly. Bounded at 30 MB/container, 180 MB total; actual
+# usage was 2.3 MB. Closes the "log caps unconfirmed" item.
+#
+# ⚠ Two gaps this does NOT close, both out of scope for this file:
+#   - The co-tenant `daytrade` project's 4 containers are UNCAPPED, on the same
+#     45 GB disk this deployment depends on.
+#   - There is no /etc/docker/daemon.json, so there is no daemon-wide default —
+#     any container created outside this compose file is unbounded.
+# Disk *space* is alerted on hourly by deploy/disk-alert.sh (host cron), so
+# either would surface as a disk alert rather than silently filling the volume.
 x-logging: &logging
   logging:
     driver: json-file
@@ -83,22 +117,78 @@ services:
     # loads FinBERT (~440 MB of weights + torch runtime) on the 16:30 ET swing
     # scan; it is the one that must die first if anything does.
     #
-    # 1024m → 1400m (2026-07-28). At 1024m this cap was not a safety margin, it
-    # was the binding constraint: the cgroup OOM killer fired FOUR times on
-    # 2026-07-27 (10:37, 12:25, 16:52, 20:45 ET) with anon-rss ~1007-1009 MiB
-    # each time, i.e. the scan wants marginally more than 1 GiB and died every
-    # run. The 16:52 kill is what took `swing-close` down. Measured peak is
-    # ~1.01 GiB, so 1400m leaves ~390 MiB of headroom.
+    # History: 1024m → 1400m (§15) → 2500m (§17) → 1500m (§21, current).
+    # The first three were all sized from TRUNCATED peaks — see the warning at
+    # the end of this block, which is the lesson worth keeping.
     #
-    # This deliberately spends some of the protection the caps were added for:
-    # caps now sum to 2424m against 1907 MiB of RAM, so the scan can push the
-    # host further into swap before its own cgroup stops it. That is judged
-    # acceptable only because (a) the 4 GB swapfile from deploy/setup-swap.sh is
-    # in place and near-untouched, and (b) cloudflared/tailscale still carry
-    # oom_score_adj: -500, so the host killer avoids the two lifelines whose loss
-    # caused the 7h outage. The real fix is a bigger instance — t3.small's 2 GB
-    # is below the README's own 4 GB minimum. Revisit on resize.
-    mem_limit: 1400m
+    # Applying a change: `git pull` then `docker compose up -d scanner-cron`.
+    # A stop/start alone restarts containers with their OLD limits.
+    #
+    # Also measured and still true (§16/§17), so don't re-litigate them:
+    #   * FinBERT costs a FLAT ~704 MiB once the model loads — 12 MiB baseline →
+    #     115 on import → 704 on first inference, identical for a 64-headline
+    #     batch. Scoring fewer headlines saves nothing; it is residency, not
+    #     inference volume.
+    #   * Freeing the model after use returns only 132 MiB of 742 (18%); the
+    #     rest is torch/transformers runtime and allocator arenas that never
+    #     return to the OS. It also loads at the END of the scan, so freeing it
+    #     afterwards cannot lower peak.
+    #   * int8 dynamic quantization shifts FinBERT confidence by up to 0.32,
+    #     straddling the 0.80/0.88 FINBERT_PROMOTION thresholds — it would
+    #     silently change which positions are opened. Not a drop-in.
+    #
+    # 2026-07-30: 2500m -> 1500m, sized from the FIRST measurement that was not
+    # truncated by the OOM killer. One instrumented wide all.txt scan (1363
+    # symbols, SB_MEM_TRACE=1) completed cleanly in 26 min at peak RSS 1013.6MB
+    # / cgroup 912.2MB — 36.5% of the 2500m cap. 1500m leaves ~64% headroom over
+    # that peak.
+    #
+    # Why this is now safe when 1400m was not: every earlier figure was a
+    # CEILING, not demand. The process expanded to fill whatever cap it was
+    # given (died ~1.37GiB under 1400m, ~2.45GiB under 2500m) because
+    # utils._s3_fs() rebuilt a botocore client per S3 call, ~12.8MB each, never
+    # released — 858 archive files ≈ 11GB of demand (§19). With that fixed and
+    # ingestion bounded (§20), the same scan reads ONE file (to_load=1, "1
+    # signal file(s) read once for 3 book(s)") and peak is a real working set:
+    # ~704MB flat FinBERT residency + ~300MB scan.
+    #
+    # ⚠ Peak == cap on every observation means unbounded growth, not
+    # under-provisioning. If a scan ever again peaks near this limit, RAISING it
+    # is the wrong move — that is the signature of a leak, and it cost three
+    # wrong diagnoses (§15 raised the cap, §17 resized the box, §18 found the
+    # replay) before §19 measured the real per-call term.
+    #
+    # 2026-08-02: 1500m -> 2048m for the Oracle aarch64 box (§23). This IS the
+    # "peak == cap" case the warning above forbids raising for — so it was only
+    # raised after proving the growth is FLAT, by two independent measurements.
+    #
+    #   (a) FinBERT residency isolated on ARM, across a 256x workload range:
+    #       baseline 9.3MB -> import 114.8MB -> 1st inference 923.1MB
+    #       -> 16 headlines 923.1MB -> 64: 923.1MB -> 256: 923.1MB
+    #       Unchanged at every batch size — the same flat signature §16 found on
+    #       x86 (704.4MB). aarch64 model residency is +218.7MB.
+    #
+    #   (b) THE DECISIVE ONE — two full all.txt scans, same flags, cap the only
+    #       difference:
+    #         1500m: completed 1846s, peak RSS 1231.8MB, cgroup 1500.0/1500=100%
+    #         2048m: completed 1794s, peak RSS 1002.2MB, cgroup  887.6/2048=43.3%
+    #       Peak went DOWN when given a bigger cap — the exact inverse of the
+    #       §15/§17 pathology, where the process expanded to fill whatever cap it
+    #       was given (~1.37GiB under 1400m, ~2.45GiB under 2500m). With headroom
+    #       the working set settles instead of thrashing against the ceiling.
+    #
+    #   ⚠ Corrects an over-attribution made mid-diagnosis: run (b)'s 1231.8MB was
+    #   largely a PRESSURE ARTIFACT of being pinned at the cap, not a genuine ARM
+    #   cost. The real aarch64 working set (1002.2MB) is within 1.1% of the x86
+    #   baseline (§21: 1013.6MB). FinBERT's +218.7MB is real but does not
+    #   propagate to whole-scan peak — peak is a high-water mark, not a sum.
+    #
+    #   2048m leaves ~104% headroom over the 1002.2MB natural peak, still binds
+    #   hard (17% of the box's 11927MB, so the cgroup killer always fires before
+    #   the host killer — the inversion that is the whole point of these caps),
+    #   and still trips on a 2x regression.
+    #   Do NOT raise further without an equivalent flat-vs-growing measurement.
+    mem_limit: 2048m
 
   # ── Mobile API server ──────────────────────────────────────────────────────
   api:
@@ -121,7 +211,12 @@ services:
     # replaces the anchor's entirely, so HF_HOME must be repeated here or the
     # container falls back to the root-ownership pitfall on ~/.cache.
     environment:
+      # Server-side calls stay on the compose network (no tunnel round trip).
       API_BASE_URL: http://api:8000
+      # Handed to the BROWSER for the Google OAuth link, so it must be publicly
+      # resolvable — http://api:8000 is a Docker-internal name no browser can
+      # reach, which is exactly how Google login broke here. See app.py.
+      PUBLIC_API_BASE_URL: https://api.gilhadas-stocks.com
       HF_HOME: /app/scanner_output/.hf_cache
     ports:
       # Loopback only — reach it with: ssh -L 8501:localhost:8501 <vm>

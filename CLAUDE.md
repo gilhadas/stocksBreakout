@@ -1366,3 +1366,1401 @@ mutation-tested (revert one line ⇒ that one test fails). 564 pass.
 - Whether one wide scan alone fits in 1400m is still unconfirmed — the first clean
   single-scan run is the datapoint. If it OOMs again, the box genuinely is too small
   (t3.small = 1907 MiB usable vs the README's own 4 GB minimum) and t3.medium is the fix.
+
+## 17. t3.small is definitively too small — resize required (2026-07-28)
+
+§16's open question ("does one wide scan alone fit in 1400m?") is answered: **no.**
+
+### Evidence
+Manual re-run of the OOM-killed Monday longterm job, nothing else on the box, §16
+serialization active (mutex verified HELD, so genuinely a solo scan):
+
+- 07:40:17 ET → `rc=137` (SIGKILL) at **08:52:55 ET — 72 min in**
+- memory 162 MiB → 1.143 GiB → **1.361 GiB of the 1.367 GiB cap = 99.55%**
+- host: 108 MiB available of 1907; cgroup OOM kill **#13**
+
+Composition at peak: ~704 MiB FinBERT resident + **~690 MiB held by the scan itself**.
+So FinBERT is only half the problem, and serialization — while necessary, it removed a
+2–3× concurrency multiplier — was never going to be sufficient.
+
+⚠ This retires §15's headroom claim. "1400m leaves ~390 MiB over the measured peak of
+1.01 GiB" was wrong because 1.01 GiB was where the *killer intervened*, not where demand
+stopped. Every OOM measurement in §15/§16 is truncated for the same reason; treat any
+"peak" taken from a killed process as a lower bound only.
+
+### Action: resize to t3.medium AND raise the cap — both, or nothing changes
+`mem_limit: 1400m` binds regardless of host RAM, so a resize on its own leaves the scan
+dying at exactly the same point. `compose.yaml` now carries **2500m**, which **must not be
+applied while the box is still t3.small** (2500m > 1907 MiB ⇒ the cgroup can never bind and
+the *host* killer fires instead — the §9 failure mode the caps exist to prevent).
+
+Order: resize first → `git pull` → `docker compose up -d scanner-cron`. A stop/start alone
+brings containers back with their OLD limits.
+
+t3.medium (2 vCPU / 4 GiB, ~$35/mo vs t3.small's ~$17.52 in eu-central-1) is same-arch, so
+no rebuild; the Elastic IP holds the address and every container has `restart:
+unless-stopped`. Note it has the **same CPU baseline and credit rate** as t3.small — it only
+doubles RAM. Scans will not get faster; the 72-min duration is network-bound on 1375
+yfinance calls. Changing instance type needs `ec2:ModifyInstanceAttribute`, which is **not**
+in `deploy/iam-recovery-policy.json` — use the AWS console.
+
+### Software levers measured, and why neither is the answer yet
+- **Free the model after use — no.** `del pipeline` + `gc.collect()` returns only **132 MiB
+  of 742 (18%)**; the rest is torch/transformers import overhead plus allocator arenas that
+  never return to the OS. It is also the wrong timing — FinBERT loads at the *end* of the
+  scan, so freeing it afterwards cannot lower peak.
+- **int8 dynamic quantization — unsafe as a drop-in.** Labels agreed 8/8 on a sample, but
+  confidence moved up to **0.32** ("Board approves a $2bn buyback" 0.865 → 0.648; "Guidance
+  cut" 0.762 → 0.442). `FINBERT_PROMOTION` gates on `min_score` **0.80** (HIGH→PREMIUM) and
+  **0.88** (PREMIUM→GOLD), and promotions feed `scan_and_add_all_users()` — so this would
+  silently change which positions are opened. Would need threshold recalibration plus a
+  backtest. (Measured on macOS/qnnpack; the container has fbgemm and needs its own run.)
+- **Process isolation — structurally right, blocked on the above.** Since ~610 MiB never
+  returns in-process, running FinBERT in a short-lived subprocess reclaims 100% on exit. But
+  the cgroup counts all processes, so it only lowers peak once the parent stops holding
+  ~690 MiB at that moment.
+
+### Open
+**Profile what the scan still holds after detection completes.** By the FinBERT stage the
+scan is finished and `results` is just a list of signal dicts, yet ~690 MiB is resident. If
+that were released before enrichment, peak would fall to ~700–800 MiB and would fit even on
+t3.small. This is the cheapest and largest remaining win, and it is not yet investigated.
+
+### Silver lining: §15's ping fix is proven in a real failure
+The kill produced `/137` and Healthchecks recorded `last_ping` **one second** after the
+exit, flipping the check to `down` immediately instead of waiting out its 3 h grace. Under
+the old `cmd && curl … || true` no ping would have been sent at all and supercronic would
+have logged "job succeeded" — the exact blindness that let the Monday failure sit unnoticed
+since Jul 23. First correctly-reported kill.
+
+## 18. The real OOM cause: scan_and_add replays the whole S3 archive (2026-07-28)
+
+§17 concluded "t3.small is too small, resize." That was **wrong** — or rather, it fixed a
+real but secondary problem. The resize happened, the cap went to 2500m, and the very next
+wide scan died anyway.
+
+### The datapoint that exposed it
+| cap | died at |
+|---|---|
+| 1400m | ~1.37 GiB |
+| 2500m | **~2.45 GiB** |
+
+The process **expands to fill whatever ceiling it is given**. That is a leak signature, not
+a sizing problem, and it means every "measured peak" in §15/§16/§17 was just the cap.
+**Standing lesson: if peak == cap on every observation, suspect unbounded growth, not
+under-provisioning.**
+
+### Root cause
+`scan_and_add()`'s file loop was bounded **only** by the book's `processed_files` set, and
+`list_files()` reads **S3**. So a book whose `processed_files` was empty or far behind
+re-downloaded and re-parsed the entire archive on every scan.
+
+On 2026-07-28: **858** signal CSVs on S3 back to 2026-04-06, against per-book backlogs of
+858 / 858 / **848** / 61 — roughly **2,600 S3 downloads + pandas loads per run**, plus a
+yfinance quote per candidate.
+
+Evidence chain:
+- all three killed runs died **40+ min after** writing their signals CSV (detection itself
+  takes ~26 min and completed fine every time)
+- the last log lines before each kill were yfinance 404s on **CTRA**/**OS** — delisted
+  tickers from *old archived* signals, not among that day's signals
+- memory tracked files consumed, so it never plateaued
+
+**Why the existing guard missed it:** `scan_and_add_all_users()` (auto_portfolio.py:1119)
+fires only when `processed_files` **and** `positions` are *both* empty. The book doing the
+most damage had 8 positions and 10 processed files — it fell straight through. The guard
+is also caller-side, so it cannot protect the loop.
+
+### Fix
+`SIGNAL_MAX_AGE_DAYS = 7`, enforced **inside** the loop, so it holds regardless of caller.
+Stale files are *retired* into `processed_files` without ever being loaded — no S3 read —
+which also lets a far-behind book self-heal in a single pass. An explicit `min_date=` still
+overrides, so deliberate backfills are unaffected.
+
+This is a **correctness** fix as much as a performance one. ⚠ Corrected 2026-08-05: this was
+originally written as "entries are priced at TODAY's price" — verified false by a direct call
+(`_fetch_entry_and_current('LSCC', '2026-04-27', ...)` → entry_price=119.23, the 04-27 close,
+vs current_price=138.0 today). Entries backdate to the close on the signal's own date
+(deliberately distrusting the CSV's `Price` column — HZ1); the real correctness risk is that
+`date_added` being backdated makes `days_held` large the instant the position exists, and the
+stop/target are sized off stale volatility. The conclusion — don't admit weeks-old signals —
+still holds, just not for the originally-stated reason.
+
+`tests/test_scan_add_stale_window.py` — 5 tests, mutation-verified (removing the bound fails
+3, including the production shape: positions present + processed_files far behind).
+
+⚠ **`tests/test_exit_from_portfolio.py::TestV9HFilter` had to change too**, and the reason
+is worth remembering: its 6 fixtures used a hardcoded `20260318` filename. Three of them
+broke outright; the other three — the *rejection* tests — kept passing **for the wrong
+reason**, blocked by the new age bound before the V9-H filter they exist to test ever ran.
+Dates are now derived from today. Verified non-vacuous by re-running with
+`SIGNAL_MAX_AGE_DAYS = 365`: still green, so the rejections are filter-driven.
+
+### Status of §17's resize
+Not wasted — t3.small was genuinely below the README's own 4 GB minimum and the legitimate
+working set is ~700 MiB–1 GiB — but it was **not** the fix, and the 2500m cap is now far
+larger than needed. Once this fix is confirmed in production, consider whether the cap can
+come back down.
+
+## 19. The leak under §18: every S3 read builds a new botocore client (2026-07-29)
+
+§18 fixed a real defect — replaying 858 archive files is wrong on correctness grounds
+alone — but it fixed the *symptom*. The per-file cost that made the replay fatal is a
+separate, still-live bug one layer down, and it is now measured rather than inferred.
+
+### Tooling built for this (all new, all off by default)
+- **`memory_trace.py`** — stdlib-only tracer (no psutil; the container is rebuilt from
+  `requirements.txt` and a debug tool that needs a new dependency is useless during an
+  incident). Inert unless `SB_MEM_TRACE=1`. RSS via `/proc` on Linux and `task_info` on
+  macOS; **also reports the cgroup charge**, which is what the OOM killer enforces and
+  which §17 showed diverges sharply from anon-RSS. `tracemalloc` is *separately* gated
+  behind `SB_MEM_TRACE_ALLOC=1` because it roughly doubles the footprint it measures.
+- **Marks wired into the OOM path** — `orchestrator.scan_watchlist` (per-symbol tick,
+  detection/earnings/missed-movers boundaries), `breakout_scanner.run_scan_mode` (stage
+  brackets around detection / enrichment / save / scan_and_add), and
+  `auto_portfolio.scan_and_add` (per-file tick reporting the four accumulators that grow
+  with files×rows). All no-ops when the env var is unset.
+- **`debug_memory_scan.py`** — three modes: `replay` (archive A/B, bounded vs unbounded,
+  **one process per arm** so one arm's unreleased arenas cannot inflate the other's
+  baseline), `scan` (real detection, subsampled), `finbert` (residency isolation).
+- **`tests/test_memory_trace.py`** — 18 tests, each mutation-verified. 587 pass overall.
+
+⚠ **The harness's first draft wrote a probe portfolio into the production S3 bucket**
+(`save_json` mirrors to S3 whenever AWS creds are present) and then read it back on the
+next arm, so arm A saw arm B's `processed_files` and loaded zero files — a silently
+invalid A/B. Deleted from the bucket; the sandbox is now pinned by a test.
+
+### The measurement that isolates it
+Same real signal CSV read 20 times from S3, macOS local:
+
+| arm | per-read growth | 20 reads |
+|---|---|---|
+| `utils._s3_fs()` per read (**current behaviour**) | **+12.8 MB, perfectly linear** | +256 MB |
+| one filesystem constructed once, reused | +13.4 MB once, then **+0.0 MB** | +13.4 MB |
+
+**Root cause: `utils.py:189`, `skip_instance_cache=True`.** That flag defeats fsspec's
+instance cache, so every S3 operation constructs a fresh `S3FileSystem` → a fresh
+aiobotocore/botocore client → botocore re-parses its S3 service-model JSON, and none of it
+is released. `tracemalloc` attribution on a 40-file replay names it outright:
+**`json/decoder.py:361  +410 MB across 5.5M blocks`**, with `botocore/loaders.py:307` and
+`botocore/model.py:777` immediately behind it. The flag was added deliberately (commit
+`4007cd0`) to dodge an AioSession kwarg bug in s3fs ≥2025 + aiobotocore ≥3.x — so the fix
+is to memoize the constructed filesystem, **not** to simply drop the flag.
+
+### Why this explains every earlier observation
+- **"Expands to fill whatever ceiling it is given."** 858 files × ~12.8 MB ≈ 11 GB of
+  demand. The process hits a 1400m cap ~107 files in and a 2500m cap ~191 files in — so
+  peak always equals the cap and never the demand. §15/§16/§17 each measured a ceiling.
+- **Kills landed 40+ min *after* the signals CSV was written** — that is the replay loop.
+- **The synthetic replay arm grew only +13.7 MB over 400 files**, because stubbing
+  `load_data` removes exactly this layer. The real-archive arm grew **+957 MB over 150
+  files**. That gap *is* the bug.
+- **§17's unexplained "~690 MiB held by the scan itself"** is very likely the same thing:
+  a normal scan still makes ~10–20 S3 calls (`list_files`, `save_data`, per-user portfolio
+  load/save), at ~12.8 MB each.
+
+### What is NOT the leak (measured, so stop suspecting these)
+- **Detection.** 400 symbols traced end to end: peak 150 MB, **net −55 MB**. Flat per
+  symbol. The missed-movers second data pass is also flat.
+- **FinBERT.** Reproduces §16 to the megabyte: +81.8 MB on import, **+695.5 MB on first
+  inference**, and **+0.0 MB for a 4× larger batch**. A large but *bounded, one-time*
+  residency — and confirmation that "score fewer headlines" saves nothing.
+- **The pipeline's own data structures.** `rejection_reasons`, the pooled DataFrames, and
+  the entry/split/price caches together account for ~14 MB per 400 files.
+
+### ⚠ §18's age bound does NOT make this safe on its own
+Counted against the real archive: the 7-day window still holds **31 files** (up to 10/day
+— several modes × several scans). A book with an empty or far-behind `processed_files` set
+therefore still makes **33 `_s3_fs()` calls ≈ 422 MB**, and five such books ≈ **2.06 GB —
+over the current 2500m cap**. Steady state (book current, ~5-10 new files/day) is ~40-65
+calls ≈ 510-830 MB per scan. So "confirm §18 in production" was never sufficient; the
+per-call term had to go too.
+
+### Fix APPLIED (2026-07-29, `utils.py`)
+`_s3_fs()` now memoizes one `S3FileSystem` per `(key, secret, region)` at module scope,
+under a lock. **`skip_instance_cache=True` is preserved** — the memo wraps *around*
+fsspec's instance cache rather than re-enabling it, so the `4007cd0` AioSession workaround
+still holds. All 7 call sites go through a new `_s3_call(op)` which, on any error, discards
+the cached filesystem, rebuilds, and retries **once** before letting the caller's existing
+local-disk fallback take over. Every op passed to it is a whole-object read, whole-object
+overwrite, or listing — all idempotent, so the retry is safe.
+
+`list_files` already called `invalidate_cache(prefix)` before every `ls`; that pre-existing
+call is exactly what makes reuse safe, since listings are the one thing fsspec caches
+across calls. It is now pinned by a test.
+
+Measured before → after:
+
+| measurement | before | after |
+|---|---|---|
+| 20 reads of one S3 object | +255.7 MB (12.8 MB each, linear) | **+0.7 MB total** |
+| …wall clock | 7.1 s | **1.7 s** |
+| `replay --real-archive --files 150` | **+957.3 MB**, verdict CLIMBING | **−48.0 MB**, verdict working set |
+
+Risk was tested, not assumed: survives repeated `asyncio.run()` boundaries (s3fs uses its
+own process-global IO loop, not the caller's), 8-16 concurrent threads share one instance
+with zero errors, object reads through the production shape (`fs.open` → `read_csv`) show
+no staleness across an overwrite of different size, the Streamlit branch is untouched, and
+a deliberately poisoned cached filesystem self-heals on the next call. 9 new tests
+(`tests/test_s3_fs_reuse.py`), each mutation-verified; **596 pass**.
+
+~~**Still to do:** re-verify on the box~~ → **CONFIRMED ON THE BOX 2026-07-30**, see §21.
+
+## 20. Signal ingestion, Phase 0: bound it (2026-07-29)
+
+§18 and §19 each fixed a symptom of one design problem: the S3 **file archive is used as a
+work queue**. This is the first of a planned two-step correction. Phase 0 adds no new
+components — it bounds what production reads. (Phase 1+, a derived SQLite index, is
+planned but deliberately **not** started until these numbers are confirmed in production.)
+
+### Measured, real archive (860 files, 2.1 MB)
+
+| Lever | Before | After |
+|---|---|---|
+| **S3 calls per `scan_and_add_all_users`** (3 books = production today) | 99 | **37** |
+| …5 books / 8 books | 165 / 264 | **41 / 47** |
+| **`processed_files` persisted per book** | 860 entries | **53** (30d window) |
+| **`rebuild_skipped_cash` archive reads** | **1,720** (walked twice) | **638** (90d, single pass) |
+
+Cost is now O(files + books) instead of O(files × books).
+
+### What changed
+- **`_prune_processed()`** — `processed_files` is persisted only for the window in which it
+  can still do work. Safe *because* the age bound is the real guard: a pruned entry is by
+  construction older than `stale_cutoff`, so the next run retires it at
+  `auto_portfolio.py:246-255` **without a read**. `PROCESSED_PRUNE_MARGIN_DAYS = 23`
+  (7+23=30, matching `cleanup_outputs.py`) — a margin, not an exact match, because the
+  guarantee **inverts if anyone raises `SIGNAL_MAX_AGE_DAYS`**: previously-pruned files
+  become loadable again and weeks-old signals get admitted at today's price. Pinned by
+  `test_prune_window_exceeds_load_window`.
+- **`_SCAN_FILE_CACHE`** — scoped to one `scan_and_add_all_users()` call, cleared in a
+  `finally`. ⚠ Hands out `.copy()`: `scan_and_add` rewrites `df_raw.columns` **in place**,
+  so a shared frame would let one book's edits reach another — cross-user corruption, not a
+  perf detail. Deliberately not module-lifetime: signal files are appended to during the
+  day, and a surviving frame would make a book miss that day's signals.
+- **`rebuild_skipped_cash`** — the unfixed §18 twin, reachable from a Streamlit button in
+  the **320 MiB** dashboard container. Now bounded (`MISSED_TRADE_MAX_AGE_DAYS = 90`,
+  `max_age_days=0` restores the old unbounded behaviour) and single-pass: the old first
+  walk existed only to collect `signal_syms`, a subset of what the second walk already
+  read.
+- **`_v9h_mask(df, *, type_bypass)`** — one filter replacing two hand-written copies that
+  had silently drifted. `scan_and_add` passes `True` (BOUNCE/CONTINUATION/SMA20_CROSS/
+  TREND_CONFIRM skip the Minervini gate — those detectors never compute a score);
+  `rebuild_skipped_cash` passes `False`, so "missed trades" is computed **stricter than
+  admission**. That asymmetry is preserved, not fixed — changing it changes what the UI
+  reports, which is a product decision. It is now visible in one place.
+- Removed a stray `processed.add(fname)` that sat outside the file loop on a leaked loop
+  variable — dead, and a landmine for exactly this refactor.
+
+### Retention decision: keep everything
+Archive growth is **7.3 files/day → 6.6 MB/year → 66 MB per decade**. Storage is not the
+cost; *walking* it is. Deleting history is irreversible and destroys the research
+substrate. **Do not prune S3.** Bound each consumer's read window instead — and note the
+repo currently has four inconsistent local windows (`SIGNAL_MAX_AGE_DAYS=7`,
+`scan_feedback_agent._KEEP_DAYS=7`, `cleanup_outputs.py=30`, `cron-setup.sh=90`) and no S3
+pruning at all.
+
+⚠ **`SIGNAL_MAX_AGE_DAYS` is a correctness bound, not a performance knob.** (Corrected
+2026-08-05 — see §18's correction above: entries backdate to the signal's own date, not
+today's; widening the window still admits setups that already played out, via a stale
+`date_added`/`days_held` and stale stop/target sizing, not via a mispriced entry.)
+
+### Traps found while measuring, worth remembering
+- **A sandbox that maps every user to one book hides this entire class of bug.** The first
+  A/B reported *zero* improvement because books 2..N read book 1's freshly-saved
+  `processed_files` and skipped everything. Per-user book paths are mandatory when
+  measuring multi-book behaviour.
+- **`rebuild_skipped_cash` fires a live 5-day yfinance fetch per symbol** whenever
+  `entry_price == price` (it reads that as "yfinance fell back to the CSV value"). A test
+  stub returning `(price, price)` turns a hermetic unit test into a network test — 31 s
+  vs 0.02 s.
+
+### Tests
+`tests/test_scan_file_cache.py` (7), `tests/test_rebuild_skipped_cash_bound.py` (4), and
+`tests/test_scan_add_stale_window.py` extended to 7. Five mutations verified (no prune, no
+`.copy()`, cache never cleared, rebuild unbounded, stale files loaded) — each fails only
+its own tests. **609 pass.**
+
+### Standing lesson
+**If peak == cap on every observation, you are measuring the ceiling, not the demand.**
+The only way out is a probe that reports growth *per unit of work consumed* while the
+process is still alive — which is what `SB_MEM_TRACE=1` now provides. Note also that the
+first verdict heuristic in `debug_memory_scan.py` called +575 MB then +232 MB a "plateau"
+because the ratio halved; a process still paying 3 MB per file has not stopped growing.
+Judge the per-item *rate*, not the ratio between halves.
+
+## 21. §19 + §20 deployed and confirmed on the box (2026-07-30)
+
+Closes the gate that §19 ("re-verify on the box") and §20 ("Phase 1 … deliberately not
+started until these numbers are confirmed in production") both blocked on. Deployed via
+PR #2 → `14ecc2a`; box rebuilt with `docker compose up -d --build` (all app services, not
+just `scanner-cron` — `utils.py` is shared, and `sb-api` had been up 42 h holding exactly
+the kind of idle pool §19's memoization introduces).
+
+### The replay A/B, run inside `sb-scanner-cron` on Linux
+
+| | pre-fix (recorded §19) | **measured on the box 2026-07-30** |
+|---|---|---|
+| `replay --real-archive --files 150` | +957.3 MB, **CLIMBING** | **+40.1 MB, "working set"** |
+| per-item rate, 1st half | ~6.4 MB/item | **+0.01 MB/item** |
+| per-item rate, 2nd half | still climbing | **+0.00 MB/item** |
+
+~600× reduction in the per-file cost. The +40 MB is one-time working set (111 entry/split
+cache entries plus pandas), not growth. Arm A loads 0 files, which is correct rather than a
+null result: the harness replays the *oldest* files, all long past the 7-day bound, so they
+are retired without a read — §18's age bound doing its job.
+
+**Judged on the per-item rate, not the totals.** The macOS totals were unstable run to run
+(−44.9 MB, then +5.8 MB, for the identical command) because RSS totals move with allocator
+behaviour. The rate is the stable, decisive figure — §20's own standing lesson, and the
+reason the earlier ratio-based verdict heuristic was wrong.
+
+### ⚠ The harness reported a broken measurement as a benign result (`076e1dd`)
+
+Running §19's own verification locally produced `files loaded 0` in **both** arms and
+printed *"The age bound avoided 0 file loads and −2.6MB of growth"* — then exited 0.
+
+Root cause: `debug_memory_scan.py` never called `load_dotenv()`. It imports
+`auto_portfolio` and `utils`, neither of which imports `config` (where `load_dotenv()`
+normally happens), so locally `utils._is_cloud()` was False, `list_files` fell back to an
+empty local dir, and nothing was measured. Invisible in the container, where compose's
+`env_file: .env` supplies the credentials as real env vars — which is precisely why it
+survived: the tool works where it is deployed and lies where it is developed.
+
+Fixed both halves: `load_dotenv()` at import, and the unbounded arm loading 0 files now
+exits 1 with a diagnostic. That arm exists to load everything, so zero is definitionally an
+environment fault, never a finding.
+
+⚠ **Trap for the mutation-testing method itself.** Verifying that guard means flipping
+`return 1` → `return 0` — **byte-length-identical**, so the `.pyc` validity check
+(mtime-second, size) does not trip and a stale bytecode cache silently serves the old
+code. It masked the *restore* here and briefly looked like the guard was broken. **`touch`
+the file after every mutation and after the restore**, or the mutation test can pass or
+fail for reasons unrelated to the change.
+
+### `orchestrator`'s signal-CSV upload never self-healed (`6bfa62f`)
+
+`save_results` mirrored the signals CSV to S3 via a bare `_s3_fs().put()` — the only
+`_s3_fs()` call site outside `utils.py`, so the only S3 access that did **not** go through
+`_s3_call`'s drop-rebuild-retry after §19. Worse than the count suggests: `scanner-cron`
+runs for days, it sits on the write path for the signal CSVs every consumer reads, and its
+`except` only logs a warning — so a stale pool means the day's signals silently never reach
+S3 while the scan reports success. Now wrapped; `put()` overwrites a whole object, so the
+retry is idempotent like every other op `_s3_call` takes. Test covers both the behavioural
+half (one stale-pool failure survived, dead filesystem discarded) and the structural half
+(no `_s3_fs().put` anywhere in the file).
+
+### The in-situ half of the gate — PASSED (2026-07-30 09:35 ET scan)
+
+One instrumented wide `all.txt` scan (1363 symbols, `SB_MEM_TRACE=1`), completed cleanly:
+
+| probe | pre-fix | measured |
+|---|---|---|
+| `to_load=` (files pulled per book) | 858 | **1** |
+| files read for 3 books | ~2,600 loads | **1, read once for 3 books** |
+| `STAGE 4-scan_and_add_all_users` | 40+ min, climbing → SIGKILL | **12.6 s, Δ +27.3 MB** |
+| `STAGE 1-detection` | — | +18.3 MB in 1459 s |
+| peak RSS | filled whatever cap existed | **1013.6 MB** |
+| **cgroup peak vs cap** | **~98% of cap, 13 times** | **912.2 MB / 2500 MB = 36.5%** |
+| outcome | rc=137 | **completed, 26 min** |
+
+The last row is the proof. Peak had always equalled the cap (1.37 GiB under 1400m, 2.45 GiB
+under 2500m) — the leak signature. It now sits at **36.5%** and finishes. Composition is a
+real working set: ~704 MB flat FinBERT residency + ~300 MB scan.
+
+⚠ **Read the probes from `scanner_output/logs/scanner_YYYYMMDD.log`, not `cron_*.log`.**
+`breakout_scanner.py:1715` sets the *stderr* handler to `ERROR`, so INFO — which is every
+`[MEM]` line — goes only to the dated FileHandler. The cron log captures errors alone. A
+watcher pointed at `cron_swing.log` reported "no probes found" while 501 `[MEM]` lines sat
+in the other file, i.e. a successful run looked like a failed measurement.
+
+### Cap lowered 2500m → 1500m (`61d80cb`)
+Sized from the untruncated peak above: ~64% headroom over 912 MB. Caps now sum to **2524m**
+against ~3900 MB usable, down from 3524m. `compose.yaml`'s self-contradictory comments are
+fixed too — the header had still described the box as a t3.small, and the cap rationale
+still named "the ~690 MiB the scan holds after detection" as the open lead, which §19
+identified as the same s3fs per-call leak. `SB_MEM_TRACE` removed from the box's `.env`
+(restored from `.env.bak.20260730`), tracing verified off.
+
+### Still open
+- **Phase 1** — recommendation is now **defer, and build Parquet not SQLite if ever**:
+  Phase 0 already took the hot path to ~1–2 CSV GETs of ~11 steady-state S3 ops; the index
+  would be 6–10 MB over a 2.1 MB corpus; and expressing `_v9h_mask` in SQL would re-fork the
+  filter §20 just unified — where a missing `MinerviniScore` column means *no gate at all*
+  (`auto_portfolio.py:246-247`), so getting it wrong changes live admissions. Cheaper
+  follow-ups instead: hoist the per-book archive LIST into `_SCAN_FILE_CACHE` (the only fix
+  whose benefit grows with the archive), batch `rebuild_skipped_cash`'s yfinance calls (the
+  real bottleneck there, not S3), and close the `min_date` hole at
+  `auto_portfolio.py:346-348`, which bypasses **both** the `processed` bookmark and
+  `stale_cutoff` — a correctness gap, since entries price at today's price.
+
+## 22. Three production bugs found while shipping §21 (2026-07-30)
+
+All three were found by *using* the system rather than reading it, and all three share a
+shape: **a check or a config that fails silently, so the broken state looks like a normal
+one.**
+
+### 22.1 The verification harness lied where it was developed (`076e1dd`)
+`debug_memory_scan.py --real-archive` needs AWS credentials for `utils._is_cloud()`, but
+nothing on its import path loads `.env` — it imports `auto_portfolio` and `utils`, neither
+of which imports `config`, which is where `load_dotenv()` normally happens. Locally that
+made `_is_cloud()` False, `list_files` fall back to an empty local dir, and **both** A/B
+arms load zero files. It then printed *"The age bound avoided 0 file loads and −2.6MB of
+growth"* and **exited 0**. Invisible in the container, where compose's `env_file: .env`
+supplies credentials as real env vars — the tool worked where it was deployed and lied
+where it was developed. Fixed: `load_dotenv()` at import, plus the unbounded arm loading 0
+files now exits 1 loudly (that arm exists to load everything; zero is an environment fault,
+never a finding).
+
+⚠ **Trap for the mutation-testing method itself.** Verifying that guard means flipping
+`return 1` → `return 0` — **byte-length-identical**, so the `.pyc` validity check
+(mtime-second, size) does not trip and stale bytecode serves the old code. It masked the
+*restore* and briefly made a working guard look broken. **`touch` the file after every
+mutation and after the restore.**
+
+### 22.2 `orchestrator`'s signal-CSV upload never self-healed (`6bfa62f`)
+`save_results` mirrored the day's signals to S3 via a bare `_s3_fs().put()` — the only
+`_s3_fs()` call site outside `utils.py`, so the only S3 access that did **not** go through
+§19's `_s3_call` drop-rebuild-retry. `scanner-cron` runs for days (a stale idle pool is
+exactly what reuse introduces), it sits on the write path every consumer reads, and its
+`except` only logs a warning — so the failure mode is *the day's signals silently never
+reaching S3 while the scan reports success*.
+
+### 22.3 `portfolio.json` positions always reported `days_held=0` (`575b000`)
+Found from a daily Telegram exit alert naming 24 positions. 14 of them live in
+`portfolio.json`, opened 2026-05-07 (84 days), yet every run reported `DaysHeld 0` — so
+"Max hold period reached" could never fire for that book. The tell was an asymmetry in one
+log: auto_portfolio positions in the *same* evaluation correctly showed 92/113/99 days.
+Cause: both books feed one exit run but their dicts are built in different places —
+`breakout_scanner.py` sets `entry_date` explicitly, `Portfolio.get_positions_as_exit_format()`
+omitted it. `orchestrator.evaluate_exits` does `pos.get('entry_date', '')` and leaves
+`days_held` at 0, so the omission produced no error, no warning — just a rule that never
+fired for half its input.
+
+**Two related things NOT fixed, both needing a human decision:** `portfolio.json` is never
+touched by `refresh_prices` (only `auto_portfolio.json` books are), so its stops never trail
+and its breaches never auto-close — which is why those 14 re-alert daily, several genuinely
+deep below their stops (ASTS −18%, AMZN −11%). And all 14 carry `target: 0`, which is the
+`TP: $0.0` and the meaningless negative R:R in the notification.
+
+> **RESOLVED 2026-08-11 — decision made, issue #7 closed as "working as intended."**
+> `portfolio.json` is **alert-only by design** and `refresh_prices` correctly skips it.
+> It is a *manual* book: positions are bought/sold by hand via `/manual-portfolio/buy|sell`,
+> and its stops are set on demand by `/manual-portfolio/compute-stops` using a **wider
+> ATR×3.0 / 20-day-swing-low** rule — deliberately not the auto books' champion ATR×2.0
+> trail. Auto-trailing it would overwrite hand-set stops with a different methodology, and
+> auto-closing would sell a position the human owns the decision on. The evaluator and
+> monitor still report exits there; a human acts on them. Pinned by a docstring note on
+> `Portfolio.update_prices` so this is not re-filed as a bug a fourth time.
+>
+> Two premises of the paragraph above no longer hold, and both are worth recording:
+> the `days_held=0` half **was** a real bug and is fixed (`575b000`, verified in the
+> 2026-08-10 exit log — real values 6/12/14, not zeros); and **the 14 positions no longer
+> exist.** Production state 2026-08-11: `scanner_output/portfolio/portfolio.json` has 0
+> positions and was *re-created 2026-08-02* during the Oracle migration (§25), the
+> `cf699841…/portfolio.json` book has 0 positions and last changed 2026-04-23, and the
+> second user has no `portfolio.json` at all. So the daily re-alerting described here
+> stopped on its own at the migration — the alerts seen since are from the auto books,
+> which do trail and close correctly. **Lesson: a "still open" note describing live
+> production state has a shelf life; re-verify the state before acting on it.** (This one
+> was carried forward for 12 days across a host migration that silently reset it.)
+
+### 22.4 Streamlit Cloud login: settings were read from the environment only (`ef8ea65`, `ec3d938`)
+Reported as "streamlit stopped working with google auth"; the pasted error was
+`HTTPConnectionPool(host='127.0.0.1', port=8000) … Errno 111`.
+
+**`Errno 111` is Linux's ECONNREFUSED — macOS is 61.** That single digit ruled out the Mac
+and pointed at a Linux host with no `API_BASE_URL`.
+
+Two distinct defects, and the first fix was **not sufficient**:
+1. `app.py` used one URL for two consumers. `api_base` is server-side (in the container,
+   `http://api:8000` over the compose network) but the Google button renders a **link the
+   browser follows**, and `http://api:8000` is a Docker-internal name no browser resolves.
+   The old code papered over this with
+   `api_base.replace('127.0.0.1:8000', 'gilhadas-stocks.com')`, which only fires when
+   `api_base` is the *default* — it worked on the retired Mac deployment and became a silent
+   no-op the moment `API_BASE_URL` was set, i.e. from the §9 cutover onward. Its result was
+   assigned to a `redirect_uri` local that was never read. → added `PUBLIC_API_BASE_URL`.
+2. **The actual cause:** every setting was read with `os.getenv()`. **Streamlit Cloud has no
+   way to set an OS environment variable** — its config lives in `st.secrets`, and `.env`
+   does not exist in the Cloud checkout. So setting the secret could not have helped; the
+   code was not looking there. `GOOGLE_CLIENT_ID` had the same defect with a quieter
+   symptom: it resolved to `''`, so the Google button rendered "not configured yet" rather
+   than failing visibly. → added `_setting()`: `st.secrets` → `os.getenv` → default,
+   mirroring `utils._is_cloud()`'s precedence (including the try/except, since `st.secrets`
+   raises when no secrets file exists — the normal case in the container).
+
+Three deployments now resolve correctly, each pinned by a test: container (env), Streamlit
+Cloud (secret), secret-beats-env, and neither → default.
+**Streamlit Cloud still needs `API_BASE_URL = "https://api.gilhadas-stocks.com"` set in its
+own Secrets** — a console change no commit can make.
+
+## 23. Deleting a user orphaned their book; and two manual-scan traps (2026-08-04)
+
+Started from an ordinary question — "I ran a manual longterm scan from Streamlit, how do I
+use it in auto portfolio?" — and turned up three unrelated defects, each of the same shape
+as §22's: **state that looks live but isn't, and nothing that says so.**
+
+### 23.1 Portfolios are files keyed by path; the DB has no portfolio table
+The users DB is a **single `users` table** (`trading_api_kit/models.py`; `api/models.py` is
+one of the shadow duplicates — `api/server.py:18` imports from the kit). A portfolio lives
+*only* as JSON at `scanner_output/portfolio/<user_id>/`, keyed by user id in the **path**,
+so `db.delete(user)` cascades to nothing.
+
+`delete_user` (`trading_api_kit/admin_routes.py`) was, in full, `db.delete(user);
+db.commit()`. Every deletion therefore left a book behind that is indistinguishable from a
+live one. Two such orphans — **16 and 17 open positions, ~$99k deployed each** — survived
+long enough to be read back mid-investigation and reported as "the live books." The data
+was fine; what it *meant* was wrong. The user's actual book was empty, which is what
+Streamlit was correctly showing all along.
+
+**Fixed:** the kit gained a `register_user_delete_hook` registry — it owns identity and
+must not know about `scanner_output/`. Hooks run **before** `db.delete(user)` and a failure
+aborts with a 500, because once the id is gone nothing ties the files to a person and
+cleanup becomes archaeology (exactly how the two orphans became unattributable).
+`api/server.py` registers `auto_portfolio.archive_user_portfolio()`, which moves each file
+to `portfolio/_deleted/<user_id>/` and removes the original **only after reading the copy
+back** — `save_json` swallows S3 errors, so a successful-looking write is not proof of a
+copy. Archive, never delete: a book is the only record a user ever traded (§20's rule).
+`utils.delete_file()` added as the missing half of the local+S3 pair; its existence check
+sits *inside* the `_s3_call` op so the rebuild-and-retry cannot turn "already gone" into an
+error, and unlike `save_json` it does **not** swallow S3 failures.
+
+Backfilled the same day: 5 directories archived (2 orphans, avivss's book, and the
+`__test_recalc_fix__` / `__test_scan_add_isolation__` probes that had leaked into the
+production bucket — the §19 trap again), positions verified 16/16, 17/17, 16/16 after the
+move. Empty leftovers removed from the box (`0c6edf84…/`, `_prerefresh_backup_/`) and the
+Mac. `tests/test_user_delete_cleanup.py` — 11 tests, each mutation-verified.
+
+⚠ **One of those mutations caught a bug in the test, not the code.** The "host app
+registers the hook" test grepped `inspect.getsource(api.server)` for
+`register_user_delete_hook` and **passed with the call deleted**, because the *import*
+line contains the same string. Rewritten to import the module and assert the registered
+hook actually reaches `archive_user_portfolio`. A substring assertion cannot distinguish
+using a name from importing it.
+
+**Identity facts worth not re-deriving:** production has exactly **two** users
+(`cf699841…` = gil.hadas@gmail.com, `6cf6c4a5…` = gil.hadas+1@gmail.com). `users.db` is
+**per-box and never synced to S3** (`api/database.py`), so the repo's local copy is a stale
+Mac artifact — always read the box's. There is **no default
+`scanner_output/portfolio/auto_portfolio.json`** in production; `scan_and_add_all_users()`
+writes per-user books only, so an unauthenticated Streamlit session (`user_id=None`) loads
+an empty legacy book and correctly reports "No open positions."
+
+### 23.2 A manual Streamlit scan is not a small cron scan
+`pages/scan_page.py::_run_scan` calls `orchestrator.scan_watchlist` + `save_results`
+**directly**, so the signals CSV lands in S3 like any other and `scan_and_add` — which is
+mode-agnostic (`signals_*.csv`) — consumes it on the next `--cron` run. Nothing needs
+importing. But the manual path skips two things that only exist in the CLI:
+
+- **`MAX_SIGNALS_PER_SCAN = 20`** and the same-day symbol dedup live in
+  `breakout_scanner.py:497`. Measured 2026-08-04: manual longterm = **187 rows / 109
+  GOLD+PREMIUM**, vs a cron file's 20 rows / ≤19. Since the pooled cap groups by *date*, an
+  ad-hoc scan's GOLD rows outrank the day's swing signals for the same 10 slots.
+
+- ⚠ **Never admit premarket.** `_fetch_entry_and_current` fetches **daily bars**; before
+  the open today's bar does not exist, `hist` is empty, and it returns
+  `(csv_price, csv_price)` — falling back to the exact column the system deliberately
+  distrusts (HZ1: ~32% of scanner rows carry impossible prices). Clicking "Scan Signals"
+  premarket, or adding a premarket cron line, removes the book's price insulation. This is
+  a correctness regression, not a timing preference. To admit earlier, add a standalone
+  `scan_and_add_all_users()` cron line at ~9:40 ET (today's earliest is ~10:05, because the
+  call is a *tail* of the 9:35 scan and that scan takes ~26 min).
+
+### 23.3 The pooled ranking trusts an R:R a later guard can invalidate — issue #3
+`scan_and_add`'s priority sort ranks on the CSV's `R:R` column, but the stop-distance guard
+(`auto_portfolio.py:562`) can rewrite the stop afterwards. CAPR on 2026-08-04: csv price
+$4.20 / stop $2.47 / target $23.73 → **R:R 11.27**, which won it slot 9 of 10 ahead of
+every other PREMIUM. Real close was $3.85, putting the stop **35.8%** below entry — over
+the 30% guard — so the stop becomes `entry × 0.95` and the admitted position's R:R is
+nothing like 11.27. **Systematic, not a one-off:** the guard fires precisely on the
+widest-stop signals, which are exactly the ones a raw `(target−entry)/(entry−stop)`
+flatters most, so the ranking preferentially promotes the candidates whose R:R is most
+fictitious — deep-dip BOUNCE rows (Dist −80%+, RSI < 20), the falling-knife shape §12
+already flagged. Filed as issue #3; the fix changes admission order, so per §11 it must be
+judged on the `--realistic-sizing` arm with the >15d WR halt criterion.
+
+> **🔴 OVERTURNED 2026-08-11 — measured against the archive. Issue #3 closed as invalid;
+> the proposed fix would have CREATED the pathology it was written to remove.**
+>
+> Measured over all **894** signal files (10,245 GOLD/PREMIUM rows) by replaying the guard
+> condition `stop >= price or (price − stop)/price > 0.30` and recomputing R:R both ways:
+>
+> | | measured |
+> |---|---|
+> | rows where the guard actually fires | **15 / 10,245 = 0.15%** (all `BOUNCE`; 2.2% of BOUNCE rows) |
+> | of those 15, R:R = **2.0** | **14** |
+> | modal R:R across all eligible rows | **2.5 — 92.7% of rows** |
+> | within-file R:R distinctness | **9.3%** |
+> | rows with R:R > 5 | 35 (0.34%) |
+>
+> **"Systematic, not a one-off" was wrong — it is exactly a one-off.** 14 of the 15
+> guard-firing rows carry R:R **2.0, *below* the modal 2.5**, so they rank *worse* than
+> average: raw R:R is not flattering them at all. CAPR (11.27, the dataset maximum) is a
+> single row in 894 files. And because R:R is ~constant (92.7% at 2.5, 9.3% distinctness),
+> **R:R barely decides the ranking in the first place** — the Dist/Vol tiebreaks do. Same
+> degenerate-ranking shape already measured in §26 on the skipped list.
+>
+> **The fix sketch inverts.** Ranking on the *guarded* R:R gives those 15 rows **12–93**
+> instead of 2.0 — CAPR alone goes 11.27 → **93.0**, i.e. from slot 9 to slot 1. Mechanism:
+> the guard tightens the stop to 5% but leaves the target untouched, so the denominator
+> collapses and manufactures a huge ratio. The guarded R:R is *far more* fictitious than the
+> raw one, and ranking on it would systematically promote precisely the deep-dip
+> falling-knife BOUNCE names this section set out to demote.
+>
+> **Bonus divergence found on the way:** `backtest_regime_compare.py:860` takes `stop_loss`
+> straight from the signal and **never applies the 30% guard at all**. So the guard is a
+> live-only behaviour, the backtest models a wider stop than production would take, and no
+> `--realistic-sizing` run could have validated either version of this change. Untouched —
+> at 0.15% of rows it is not worth perturbing the baselines for, but it is a real
+> live-vs-backtest gap of the same class as §13.1's tiebreak divergence.
+>
+> **Method, for re-running:** iterate `utils.list_files('scanner_output/signals','*.csv')`,
+> filter `Quality in (GOLD, PREMIUM)`, apply the guard condition to `Price`/`Stop`, and
+> compare `(Target−Price)/(Price−Stop)` against `(Target−Price)/(Price−Price×0.95)`. Run it
+> inside `sb-scanner-cron` (`-w /app`) so the S3 credentials and memoized client are in play.
+>
+> **Standing lesson: measure the distribution before implementing a ranking fix.** The
+> issue's reasoning was mechanically sound and still landed on a change that would have made
+> live admissions worse — because it assumed the flattered rows were winning, and never
+> checked that R:R is 92.7% constant or that the guard fires on 0.15% of rows.
+
+### 23.4 A correlated-cluster warning that did not survive checking
+Initial read of the manual longterm file was that its 8 GOLD rows would fill a fresh $100k
+book with a §10-style correlated cohort. Checking the sectors overturned it: Energy,
+Healthcare, Technology ×2, Finance ×2 (+ STEL, banking), Industrial — RSI 60–72, Dist +2%
+to +18% (all inside the 25% tiebreak cap), volume 1.8–4.5×. Textbook Stage-2 continuation
+across six sectors, i.e. the *opposite* of the Feb-2026 crypto-beta cluster the concern was
+extrapolated from. The two genuinely weak rows (CAPR, LII) turned out self-limiting: both
+end up on tight stops (CAPR's rewritten to 5% by the guard above, LII's 2.4% away), bounding
+combined downside near ~$500 on a $100k book. **Verdict: no action** — blocking the file
+would have discarded 8 good signals to avoid 2 bounded ones. Lesson: §10's correlated-cluster
+finding is about *thematic concentration*, not about filling the cap; check the sector spread
+before invoking it.
+
+⚠ Note `QUALITY_SIZING` is **2.0× for GOLD *and* PREMIUM**, so the 5% base becomes 10% per
+position — right at `max_single_position_pct`. Ten slots is therefore the **entire** book,
+not half of it: a fresh account goes 0 → fully deployed in one morning, making one day's
+prices its whole cost basis. That is designed behaviour and matches §11's realistic-sizing
+arm, but the backtests spread entries over many days and never concentrate this way.
+
+### Still open
+- The Oracle migration (2026-08-02) still has no section of its own; §9 describes the
+  retired EC2 deployment. Section numbering here does not reserve a slot for it.
+- Issue #3 (R:R ranking) unfixed by design — needs a validated backtest arm.
+- Issue #4 (chart NaN serialization) — fixed same day, `cb40ab1`, deployed.
+
+## 24. `monitor` healthcheck was the SWING/VALIDATE bug a third time (2026-08-05)
+
+Found while working the standing todo list, not from a page. Healthchecks.io reported
+`monitor` down daily after 16:00 ET while supercronic logged every run as succeeded — the
+same disagreement §15 exists to explain, but §15's fix (the `/$?` ping shape) was already
+correctly in place here. This was a different bug wearing the same symptom.
+
+**Root cause:** one UUID (`HC_UUID_MONITOR`) fed three differently-timed crontab lines —
+a single 9:45 ping, a `*/15 10-15` block (10:00–15:45), and a single 16:00 ping — but the
+Healthchecks schedule was `*/15 9-16 * * 1-5`, which expects a *uniform* 15-min cadence
+across the whole 9:00–16:45 range. No 5-field cron expression can say "boundary hours get
+one minute, middle hours get four," so the schedule was structurally unable to match
+reality: it wanted phantom pings at 9:00/9:15/9:30 (before any line fires) and
+16:15/16:30/16:45 (after the last line fires), and flipped down ~2h after every 16:00
+ping, every single day.
+
+This is §9's SWING/VALIDATE bug for the third time — "a shared UUID across genuinely
+different times can't be expressed without either false alarms or a grace window loose
+enough to miss a real outage" — just with three time-shapes sharing one UUID instead of
+two. `HC_UUID_MONITOR` was the one name from §9's original list that was never audited
+for this when the others were split.
+
+**Fix:** same pattern as SWING/SWING_CLOSE and VALIDATE/VALIDATE_LEARN. Split into
+`MONITOR_OPEN` (45 9 * * 1-5), `MONITOR` (retargeted to `*/15 10-15 * * 1-5` — the one
+block that already was a clean single expression), and `MONITOR_CLOSE` (0 16 * * 1-5).
+New UUIDs created via the Healthchecks API, added to the box's `.env` (not committed —
+secrets convention), `docker/crontab` updated, committed (`f12494e`), and deployed via
+`docker compose up -d --build scanner-cron` (env vars and the crontab are both baked into
+the image, so a bare restart would not have picked either up). Verified inside the
+running container, not just from the build log: `env | grep HC_UUID_MONITOR` shows all
+three, and `grep HC_UUID_MONITOR /app/docker/crontab` shows each line pointing at its own
+UUID. `tests/test_crontab_parity.py` has no hardcoded UUID names, so nothing there needed
+updating.
+
+**Lesson:** a fix applied to two instances of a bug does not imply the third instance was
+checked. §9 split SWING and VALIDATE by name because those were the ones that had already
+alarmed; MONITOR shared the identical structural flaw (three cron lines, one UUID) from
+day one and simply hadn't been caught yet. When a bug shape is identified, grep for every
+other instance of the shape, not just the ones already reported.
+
+## 25. Production migrated off EC2 onto the Oracle box (2026-08-02)
+
+Written 2026-08-05 to close the gap MEMORY.md has flagged since the cutover — §9 above
+still describes the retired EC2 deployment in the present tense. This section documents
+the box actually running production today, verified directly rather than recalled.
+
+### What changed
+Production moved from the AWS EC2 instance (§9, `i-015657f7d29bb673e`) to the **Oracle
+Cloud VM already referenced — and explicitly called "unrelated" — throughout §9's own
+text**: `82.70.210.194` (`il-jerusalem-1`, hostname `instance-20260615-1424`), which since
+2026-06-15 has independently run the separate `daytrade` engine/web/IB-Gateway/Caddy
+stack. That box now runs **both** systems side by side as two independent
+`docker compose` projects:
+
+```
+NAME             STATUS         CONFIG FILES
+daytrade         running(3)     /opt/daytrade/docker-compose.yml
+stocksbreakout   running(6)     /home/ubuntu/stocksBreakout/compose.yaml
+```
+
+`stocksbreakout`'s six containers: `sb-scanner-cron`, `sb-api`, `sb-cloudflared`,
+`sb-tailscale`, `sb-journal` (Trade Journal SPA), and — new since the cutover —
+`sb-dashboard` (the Streamlit admin/scan UI, previously loopback-only via SSH tunnel, now
+also public at `dashboard.gilhadas-stocks.com`, commit `6f631cd`). `deploy/README.md` and
+`deploy/OPERATIONS.md` still describe the old three-container EC2 layout and its IP —
+**both are stale and unrewritten**; treat this section and direct box inspection as
+authoritative until they're updated.
+
+**The EC2 box is stopped, not terminated** — `t3.medium`, `eu-central-1b`, confirmed via
+`aws ec2 describe-instances`. Its `StateTransitionReason` shows a brief manual
+start-then-stop on 2026-08-04 (09:27→09:30 GMT); cause not recorded. Its two CloudWatch
+alarms (`stocksbreakout-instance-check-failed-reboot`,
+`stocksbreakout-system-check-failed-recover`) are both sitting in `ALARM` state, which is
+expected and harmless — their actions (`ec2:reboot`, `ec2:recover`) are no-ops on a
+stopped instance, they do not start it — but it means the AWS console will show red for
+this instance indefinitely, which reads as an active incident to anyone who doesn't know
+the history. Worth an explicit disable or a note if that alarm noise ever gets confusing.
+MEMORY.md's `project_server_deployment_cutover_jul2026` describes the T+7-soak-then-decide
+plan but the follow-through (terminate, or downgrade the instance type, or keep as a cold
+fallback) isn't recorded as done.
+
+### Why Oracle, not just fixing EC2
+Not stated in any commit message, so this is inference, not a documented decision: EC2 had
+just come through three consecutive memory firefighting rounds (§15 OOM-killed cron jobs,
+§16 concurrency, §17 resize to t3.medium) and the Oracle box was already paid for, already
+running, and — per `free -h` on 2026-08-05 — sitting on 11 GiB RAM with under 2 GiB in use,
+roughly 3× the headroom t3.medium ever had. If the actual reason was something else, it
+isn't written down anywhere this session found.
+
+### Architecture is a bigger change than "same containers, new host"
+Oracle's VM is **aarch64**, EC2's was **x86_64** — this was a cross-architecture rebuild,
+not a redeploy. Chain of build fixes, all in git:
+- `eb83fcd` — snapshotted EC2's exact 133-package dependency set
+  (`deploy/constraints-ec2-20260802.txt`) so the ARM rebuild wasn't *also* a 6-week
+  dependency upgrade — two confounded variables at once otherwise.
+- `d63347f` / `26f4264` — wired the constraints into the Dockerfile, then fixed it: the
+  first pass fed the full constraint file to the `torch` install step, whose
+  `--index-url` is scoped to `download.pytorch.org` and can't serve `fsspec` (a torch
+  dependency) at all — `ResolutionImpossible`. Fixed by extracting just the torch line as
+  an explicit target; the full constraint still applies to the normal-PyPI-index step.
+- `5a1bd70` — macOS `tar` had been embedding `._*` AppleDouble sidecars (the
+  `com.apple.provenance` xattr) into the transferred mobile web build; 40 files became
+  105. `.dockerignore` covered `.DS_Store` but not `._*`; they would have been baked into
+  the image and served by `StaticFiles`. Found only because the file count looked wrong.
+- `c8d7140` — the scanner memory cap needed its own re-measurement rather than reusing
+  x86's number, and the result reads as a warning about trusting "peak" under a tight
+  cap (§18–§21's own standing lesson, reconfirmed here): the first ARM run at a 1500m cap
+  measured 1231.8 MB peak; raising the cap to 2048m dropped the *measured* peak to
+  1002.2 MB — the process wasn't using more under pressure, it was thrashing against the
+  ceiling. Real aarch64 working set is within 1.1% of x86's (§21: 1013.6 MB). FinBERT
+  residency is architecture-sensitive on its own (+218.7 MB vs x86, isolated
+  independently across a 256× headline-batch range and flat at every size) but that delta
+  doesn't propagate to whole-scan peak, because peak is a high-water mark, not a sum.
+  Cap landed at 2048m — ~104% headroom over measured peak, still 17% of the box's 11 GiB
+  so the cgroup killer still wins the race against the host killer.
+
+### Access differs from the EC2 playbook — do not carry that guidance over
+§9's EC2 access notes (Tailscale-only, zero-inbound security group, `stocksbreakout-key.pem`)
+**do not apply here**. This session connected all day via plain
+`ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194` on the public IP — Oracle Cloud's
+security list is not configured zero-inbound the way EC2's was. `sb-tailscale` is present
+and running on the box regardless; unclear whether it's load-bearing for anything now that
+direct SSH works, or a carried-over lifeline from the compose file. Two independent SSH
+keys now exist for what is, from the shell's perspective, one machine:
+`~/.ssh/daytrade_oracle` (used throughout this session) and possibly others provisioned
+for the original daytrade deployment — didn't enumerate further, not this task's scope.
+
+### Operational state, verified 2026-08-05
+- **Tunnel**: `deploy/cloudflared/config.yml` on the box routes `gilhadas-stocks.com`,
+  `api.gilhadas-stocks.com`, `journal.gilhadas-stocks.com`, and
+  `dashboard.gilhadas-stocks.com` to their respective compose services over the internal
+  Docker network. A cloudflared footgun is documented inline in `6f631cd`'s commit body:
+  `route dns <name> <hostname>` can silently match the wrong tunnel via a loose prefix
+  match against other tunnels in the account (`stocksbreakout-oracle` matched
+  `stocksbreakout`) — always pass the full UUID, never the name.
+- **Disk alerting exists and was missed by earlier "still open" notes** — §9 and §17 both
+  listed "Docker log-size caps + disk alert" as outstanding. `deploy/disk-alert.sh` (host
+  cron, hourly, `HC_UUID_DISK`) already covers the disk half — confirmed both by the
+  script's existence and a live `up` status on Healthchecks (`disk-space`, last ping
+  2026-08-05T10:00). Docker log-size caps specifically are still unconfirmed.
+- **Swap**: 2 GiB `/swapfile`, created 2026-08-02 — smaller than EC2's `setup-swap.sh` 4 GiB,
+  proportionate to Oracle's much larger base RAM.
+- **Headroom**: 11 GiB RAM (1.6 GiB used), 45 GB disk (17 GB used, 37%) — both far looser
+  than any constraint that drove §15–§21's tuning on EC2. Don't assume that tuning
+  transfers; it was sized for a box with 4–5× less to work with.
+- All Healthchecks monitors for the scanner schedule are green as of this write-up
+  (confirmed while fixing §24) except transient "new" status on the just-created
+  MONITOR_OPEN/MONITOR_CLOSE checks, expected until their first daily ping.
+
+### Still open
+- `deploy/README.md` and `deploy/OPERATIONS.md` describe the retired EC2 layout — need a
+  rewrite for the Oracle box, the two-project coexistence with daytrade, and the six (not
+  three) stocksBreakout containers.
+- EC2's disposition (terminate / downsize / keep as cold fallback) — not decided in
+  writing anywhere this session found.
+- Whether `sb-tailscale` still does anything on Oracle, given direct SSH already works.
+- Docker log-size caps, specifically — disk *space* is covered, log growth is not
+  confirmed either way.
+
+## 26. Live swap A/B: two books per user, control vs auto-swap (2026-08-10)
+
+### Why
+Reviewing the skipped-signals list, names like USAR/RDW/SATL/KTOS looked like
+better trades than what the book was holding. Investigation found the machinery
+to detect that already existed — `suggest_swaps()` (auto_portfolio.py) compares
+open positions against skipped signals and has a Telegram branch — but **nothing
+had ever called it on a schedule.** The only cron line was in the *retired*
+`cron_jobs.txt:255`; a fifth instance of the §13 drift class, invisible to
+`tests/test_crontab_parity.py` because `suggest_swaps` was not in `SEMANTIC_FLAGS`.
+
+Whether swapping actually pays is unsettled: §11 measured auto swap-on-skip in
+backtest at **−4.68 Sharpe** (all.txt 2026) with **0 swaps fired** in every
+`spy_plus`/`plus.txt` year — one strongly negative sample and no data elsewhere.
+So rather than ship on a hunch, this runs the experiment live.
+
+### Measured on the live book before building anything (`cf699841`, 14 pos / 62 skipped)
+- `suggest_swaps` returns 3 valid pairs at `fresh_days=30` (JHG→TAN, HOLX→TSEM,
+  STEL→AMRC, improvement ≈23) but **`[]` at the default `fresh_days=5`** — the
+  Aug-4 signals were 6 calendar days old.
+- **The ranking is degenerate.** All 62 skipped entries are `PREMIUM` with `R:R`
+  exactly `2.0`, so `_compute_priority_score` collapses to *pure volume ratio*.
+  USAR/RDW/SATL/KTOS rank **27th/30th/31st/48th of 62** (vol 1.23/1.21/1.18/0.89)
+  behind TAN/TSEM/AMRC/NNE/BETR tied at 65.0 (vol 2.0–2.9). The advisor would
+  never have surfaced the four names that prompted this.
+- `sector` is the literal string `'nan'` on all 62 (it is `str(float('nan'))`);
+  `missed_pnl_pct` is `0.0` on all 62 — written once at scan time, never refreshed.
+
+### Architecture: a `book` dimension beside `user_id`
+Books are FILES keyed by user_id in the path (§23.1 — no portfolio table), so a
+variant is a second filename in the same per-user directory, resolved by the one
+seam `_portfolio_path_for(user_id, book)`:
+
+```
+scanner_output/portfolio/<user_id>/auto_portfolio.json            # control  (UNCHANGED)
+scanner_output/portfolio/<user_id>/auto_portfolio_autoswap.json   # variant
+```
+
+`BOOKS` registry carries `suffix` / `label` / `auto_swap` / `max_swaps_per_day`.
+**The control book's suffix is `''`** — every caller that omits `book=` resolves
+to exactly the file it always did. `utils._to_s3_key` derives the S3 key from the
+path, so the variant mirrors to S3 with no extra wiring. `book` is threaded
+through ~19 functions; `get_summary(data)` stays pure and is the A/B primitive.
+
+### ⚠ Two landmines the book dimension exposed, both fixed
+1. **`recalculate` backed the book up onto itself.** The backup path was built by
+   `_portfolio_path_for(user_id).replace('auto_portfolio.json', 'pre_recalculate_…')`.
+   For any book NOT named `auto_portfolio.json` the substring is absent, `.replace`
+   is a no-op, `backup_path == live_path`, and the "backup" overwrites the book it
+   protects — immediately before an unrecoverable reset. Now derived from the
+   resolver, with an equality guard. Pinned by `test_recalculate_backup_path.py`.
+2. **`add_position_direct` bypasses `_save`** (it needs load/dedup/save inside one
+   lock) and re-derived the path itself. Unfixed, a swap would close in one book
+   and open its replacement in the other.
+
+### ⚠ Automated swaps are priced CLOSE-basis, human swaps stay LIVE
+`execute_swap` priced both legs with `_fetch_live_price` — the last row of a 2-day
+history, i.e. **today's partial bar** before 16:00 ET. Correct for a human
+clicking Swap (they intend a live fill); a confound for the automated arm, which
+would then differ from control in *how exits are priced* as well as *whether
+swaps happen* — reintroducing the intraday exit the champion validation rejected
+(§12 Task 1; restore isolation measured low-based at 2022 −24.8% vs −10.75%).
+New `price_basis` arg: `'live'` default, `'close'` for the automated path.
+
+### What was built
+- **`fork_books.py`** — clones control → variant so both arms start byte-identical,
+  stamps `fork` in both, refuses to overwrite without `--force` (a silent re-fork
+  would reset a running experiment undetectably). ⚠ **Run it on the production
+  box**: the local `users.db` is the stale Mac artifact and still lists a user
+  deleted 2026-08-04, so a local run would resurrect their book in live S3.
+- **Auto-swap stage** — tail of `scan_and_add`, branching on the registry:
+  control advises (Telegram), autoswap executes ≤3/day. Isolated in try/except —
+  the scan has already saved the day's signals and must not die for a swap bug.
+  Per-book daily stamp for dedup (Notifier's cache is a single global file keyed
+  on subject, so it would let one book suppress another).
+- **`_record_equity_point`** — the auto book had no time series at all. One point
+  per day per book, idempotent (refresh runs 10:00 and 15:45; duplicated days
+  deflate volatility and *inflate* Sharpe).
+- **`book_compare.py`** + `swap_ledger.jsonl` — per-swap counterfactual is the
+  **primary readout**: both books trade the same signals on the same days, so
+  their curves are highly correlated and the equity delta needs months. "Was THIS
+  swap right?" is readable in weeks.
+- **UI** — Streamlit book selector + `pages/compare_page.py` (new "Compare" page);
+  mobile `BookProvider` (the app's first React context) + segmented switcher +
+  Compare tab. Mobile comparison is deliberately a **numeric table**: no chart
+  library is installed and adding one to answer a question the numbers answer is
+  not worth the dependency.
+- **API** — `book` on every portfolio endpoint (query param on GETs, optional
+  Pydantic field on POSTs), plus `/portfolio/books` and `/portfolio/compare`.
+  An unknown book is a **400, never a silent fallback** — a typo'd
+  `?book=autoswapp` returning control data would be read as the variant.
+
+### Two unrelated bugs found and fixed on the way
+- **`api/server.py` never imported `os`** yet called `os.getenv` at two places →
+  `NameError` at runtime in `/analyze/chat` and `/analyze/llm-status`.
+- **`debug_memory_scan._sandbox` leaked across the pytest session.** It patches
+  by plain assignment (correct for a CLI run, wrong under pytest) and was never
+  restored, so its `_portfolio_path_for` stub survived into later suites and
+  failed them with a TypeError the moment the real function grew a parameter. It
+  also mapped every book to one probe file. Now signature-faithful and per-book,
+  with a restoring fixture in `tests/test_memory_trace.py`.
+
+### Tests: 728 pass (was 653 pass / 8 fail)
+7 new files, 63 new tests, each mutation-verified. Mutations confirmed to fail:
+drop `book=` from any `execute_swap` internal call · `add_position_direct`
+resolving without `book` · control suffix made non-empty · unknown book silently
+defaulting · equity point appending instead of overwriting · control set to
+auto-swap · automated path priced live · fork overwriting without `--force` ·
+swap cap ignored · swap-stage exception not isolated · the scan-skipped-nothing
+guard removed · `notify` ignored · the `.replace` backup landmine restored · a
+`suggest_swaps` line added to `docker/crontab`.
+
+⚠ **Two of these tests were vacuous on the first pass** and only caught by the
+mutations failing to fail: the error-isolation test never reached the swap stage
+(the guard needs `skipped_cap or skipped_cash` non-empty), and the
+scan-skipped-nothing test hit `scan_and_add`'s early return at the no-files
+branch instead. Both now assert the path was actually exercised —
+`files_scanned == 1`, `skipped_cash >= 1` — before asserting the behaviour.
+
+`tests/test_refresh_prices_all_users.py` was updated deliberately: the
+`*_all_users` contract genuinely changed to user × book, so its assertions had to
+encode the new contract rather than be worked around.
+
+### Deploy order (nothing is live until this runs)
+```bash
+ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194
+cd ~/stocksBreakout && git pull --ff-only && docker compose up -d --build api scanner-cron dashboard
+python3 fork_books.py --dry-run     # then without --dry-run
+```
+`--build` is mandatory — code is baked into the image (§5a).
+
+### 26.1 The fork was a manual step, so the A/B silently started mismatched (2026-08-11)
+
+Reported from the dev dashboard: *"the auto swap is starting a fresh portfolio, by
+design it should match the control portfolio."* Correct, and the mechanism is worth
+recording because the feature above shipped with it.
+
+`ap.load()` returns `_empty()` — a plausible fresh $100k book — when the file does not
+exist. For control that is right (a new user starts empty); for a **variant** it is a
+trap. `fork_books.py` did the correct clone but was a manual deploy step nobody had
+run, so selecting **Auto-swap** rendered a convincing empty portfolio and clicking
+Scan Signals wrote real positions into it. Sandbox state when caught: control 14
+positions / 62 processed files, autoswap **2 / 2**, neither stamped. The comparison
+was measuring starting state, not the treatment. Nothing errored — §22/§23's shape
+exactly: state that looks live but isn't.
+
+Caught before deploy, so no production book was affected; the first cron
+`scan_and_add_all_users()` after deploy would have created one fresh book per user.
+
+**Fix — the invariant moved to the write boundary.** `ensure_forked()` +
+`_load_for_write()` in `auto_portfolio.py`: the first thing that would modify an
+unforked variant clones control into it and stamps both books. `load()` stays pure —
+it is called from API GETs, page renders and `book_compare`, and a page render must
+never create a book in S3. `fork_books.fork_user()` now delegates its clone to
+`ensure_forked` so the manual and automatic paths cannot drift (§20's one-filter rule).
+Explicit `fork_books.py` at deploy is still the intended path; auto-fork is the net.
+
+Four things this turned up that were not obvious from the plan:
+
+1. **`scan_and_add_all_users`' first-run guard reads the book before the fork.** An
+   unforked variant reads as empty → `min_date=today`, while control processed the
+   full window. The two arms would have consumed *different files on day one* even
+   with forking working. That call site had to take the seam too.
+2. **`reset()` must keep the fork stamp.** `_book_has_state()` treats the stamp as
+   "used", so a reset that dropped it left the book looking never-forked and the next
+   write re-cloned control. Reset on a variant would have meant *restore control's
+   positions*, and `recalculate()` (reset + rescan) would have silently resurrected
+   control's book into the variant.
+3. ⚠ **Forking inside `add_position_direct` deadlocks the process against itself.**
+   That function bypasses `_save` to keep load/dedup/save in ONE `fcntl` acquisition;
+   `ensure_forked` writes through `_save`, which grabs the *same* `.lock` file on a
+   second descriptor, and `flock` does not recurse. The fork must happen **before**
+   the lock. Symptom was the suite going 22 s → hang with no traceback, so the
+   regression test runs it on a thread with `done.wait(timeout=20)` — a deadlock has
+   nothing to assert on unless you bound it.
+4. **A mutation test can pass for the wrong reason.** Removing the
+   `name == DEFAULT_BOOK` guard did *not* fail `test_control_is_never_a_fork_target`,
+   because that test seeds control **with** state and `_book_has_state` short-circuits
+   first. Only an *empty* control exercises the suffix guard. Same lesson as §23.1's
+   substring assertion: verify the mutation fails the test you think covers it.
+
+`tests/test_autofork_on_write.py` — 20 tests, 7 mutations verified. The structural one
+asserts every `_save`-reaching function forks first, so the next writer added here
+cannot quietly bypass it.
+
+### Open
+- The degenerate ranking is **not fixed** — the advisor still ranks skipped
+  signals by volume alone when quality and R:R tie, which is the normal case.
+  Enriching `_compute_priority_score` (Dist/RSI/Minervini) was scoped and
+  deliberately deferred; it changes what is advised, not how the A/B works.
+- `skipped_cash` has no symbol dedup on append, so a symbol signalled on two days
+  appears twice. `used_skipped` dedups within a run, so suggestions are unaffected.
+- `missed_pnl_pct` is still frozen at write time — the momentum gate is inert for
+  same-day candidates (legitimately 0) and stale for older ones.
+- Notifier still has no per-user routing: every book lands in the same Telegram
+  chat. The daily stamp bounds it at 2 sends/book/day; more books need chat IDs.
+
+## 27. Post-reset performance check + the stale-price escape hatch (2026-08-12)
+
+Started from "the auto portfolio seems to perform worse than SPX since it was
+reset." True, and the cause is not stock picking — but the investigation also
+produced a **wrong intermediate conclusion that nearly liquidated three healthy
+positions**, which is the more valuable half of this section.
+
+### The performance answer: it's the reset's cash window, not the picks
+Main book (`cf699841…/auto_portfolio.json`), reset 2026-08-02 16:05 to $100k cash:
+
+| Window | Book | SPX | Excess |
+|---|---|---|---|
+| Jul 31 → Aug 4 (redeploying, 83% cash) | +1.08% | **+3.30%** | **−2.22 pp** |
+| Aug 4 → Aug 11 (fully deployed) | +0.00% | −0.11% | **+0.11 pp** |
+| Whole period | +1.14% | +3.18% | −2.05 pp |
+
+**The entire gap opened in the two trading days the book spent in cash while SPX
+rallied +3.3%.** Once deployed it tracked the index. 0 closed trades, 14
+positions, 9 sessions — no basis for any config change. If a reset is ever
+repeated, deploy in one pass rather than leaving a multi-day cash window.
+
+Two real observations, neither actioned (both need a `--realistic-sizing` arm
+per §11, and §13.5's meta-finding says ranking/admission levers come back null):
+- **Sizing is inversely correlated with outcome.** Spearman(weight, return) =
+  **−0.27**. ITT (+13.7%) got 2.1% of the book, ZBRA (+10.9%) got 4.5%, while
+  BP/CNO/GSAT/STEL got the full 10% and went nowhere. Same 14 picks equal-weighted
+  would have returned **+1.98% vs the actual +1.14%**. ATR-risk sizing
+  systematically starves the volatile momentum names the strategy exists to catch.
+- **ITT was backdated.** Entry $190.80 is exactly the Jul 29 close, but the book
+  was empty until Aug 2 — the §18/§23.2 hazard, re-triggered because the reset
+  cleared `processed_files` and re-ingested the Jul 29 signal file. ~$85 of its
+  $287 gain never happened. The Aug 4 entries are legitimate intraday fills.
+
+### 🔴 The wrong turn: yfinance rate-limiting read as delisting
+Four positions (PRA/JHG/HOLX/STEL, **$24,905 = 24.9% of the book**) returned zero
+history rows **from the Mac**, with returns of +0.04/−0.08/0.00/+0.13% — pinned
+flat, the signature of cash-merger targets. A control group (KO/F/AAPL) fetched
+fine, which made "four completed mergers" look conclusive. It was not.
+
+Re-probed **from the box, 5 trials each**: PRA/JHG/STEL **5/5 available** at
+exactly the book's marks; HOLX **0/5**. The Mac was being rate-limited for those
+three; mega-caps kept working because they're served from a different cache tier.
+Real sterilised capital: **$4,941 (HOLX alone)**, not $24,905.
+
+**Lessons.** (1) A control group of mega-caps does not prove a data source is
+healthy for thin/odd tickers — it proves the cache is warm. (2) Probe from the
+host that actually runs production; the Mac and the box do not see the same
+Yahoo. (3) One trial per symbol is not a measurement — the same box returned
+`NO DATA` for all four on the very next call, then 5/5 on a repeat.
+
+The four are still **dead money** in the strategy sense (merger-arb pinned flat,
+~0% return, ~25% of the book) — but that is a selection issue, not a mechanism
+defect, and three of them price and exit normally.
+
+### The real defect, shipped (PR #12, `36a9c10`, deployed)
+When yfinance returns no history, `refresh_prices` fell back to the STORED
+`current_price` for **both** the display mark and the exit basis. That makes the
+position permanently unexitable: `basis_close` == the frozen mark, the trail
+cannot move (an empty frame is below `ATR_TRAIL_FLOOR_BARS`), and the frozen mark
+sits above the stop, so `basis_close <= p['stop']` can never become true. Same
+shape as §22.3 — a rule that silently never fires for part of its input.
+
+`_apply_stale_price()` stamps `stale_since` on the first failed fetch, clears it
+on any success, and `refresh_prices` settles at the last known mark once the gap
+reaches `STALE_PRICE_MAX_DAYS = 5` calendar days. Counting from a stamped **date**
+rather than a run counter is deliberate: refresh runs at least twice a weekday, so
+a counter would halve the window.
+
+⚠ **Safety property, and the wrong turn above is exactly why it exists:**
+staleness is assessed **only when at least one symbol fetched successfully**. A
+wholesale failure is an outage, not N simultaneous delistings. Had the naive
+version shipped, the Mac's view would have liquidated PRA/JHG/STEL. Pinned by
+`test_wholesale_fetch_failure_closes_nothing`.
+
+19 tests, 4 mutations verified. Full suite **771 pass**.
+
+### The settle, and why not `stale_max_days=0`
+`stale_max_days=0` closes anything that fails its fetch **during that one run** —
+a live symbol blipping at the wrong moment gets settled. The operator path used
+instead (`settle_dead.py`, scratchpad): verify the named symbol is dead over 3
+trials, backdate `stale_since` on **only** those, then run a **normal** refresh —
+so any other position that blips gets a fresh stamp (gap 0) and survives.
+It refused to settle PRA/JHG/STEL even when explicitly passed them.
+
+Result: HOLX closed at $76.02, P&L $0, `close_reason: 'no_market_data'`, in both
+the control and autoswap books (keeping the §26 A/B aligned). 13 open each,
+available cash $1,331 → **$6,272**.
+
+### Open
+- The four merger-arb names should never have scored **GOLD / TREND_CONFIRM** —
+  a deal-pinned stock has collapsed volatility and no trend, the opposite of a
+  Stage 2 breakout, yet they cleared the top quality tier. A "reject compressed /
+  pinned range" filter is a **signal-generation** fix, which is where §13.5
+  concluded the remaining edge lives. Best lead out of this session.
+- The sizing anti-correlation (−0.27) — needs a `--realistic-sizing` arm.
+- §26's degenerate skipped-signal ranking is still unfixed.
+
+## 28. Pinned/Compressed-Range Veto — validated (inconclusive), shipped live (2026-08-21)
+
+Picks up §27's "best lead out of that session": PRA/JHG/HOLX/STEL scored GOLD/
+TREND_CONFIRM while pinned near their merger-arb deal price — collapsed
+volatility, no real trend, the opposite of a genuine Stage 2 breakout — because
+SMA/MACD/RSI can spuriously align near a flat price.
+
+### What shipped (code + tests only — NOT yet enabled live)
+- `quantkit.indicators.check_pinned_range(df, lookback_days=60, max_range_pct=10.0,
+  max_atr_pct=1.5)` — new primitive. Flags a stock only when BOTH the absolute
+  high-low range over the lookback AND current ATR are below threshold —
+  range alone would also catch a legitimate pre-breakout consolidation, ATR
+  alone would catch any quiet low-beta name. Deliberately an ABSOLUTE floor,
+  not relative to the stock's own rolling BB-width average (`Is_Consolidating`)
+  — a stock pinned for months already has a tiny rolling average, so a
+  relative measure never flags it. Re-exported via the `indicators.py` shim.
+- `config.PINNED_RANGE_CONFIG` — new dormant block (`enabled: False`, matching
+  the TENSION_CONFIG/SUPERTREND_CONFIG pattern).
+- `scanner.py` wiring, both gated behind `PINNED_RANGE_CONFIG['enabled']`
+  (currently off, so zero live behavior change):
+  - `detect()`: downgrades GOLD/PREMIUM → HIGH when pinned (mirrors the
+    existing tension-fractal-contradiction downgrade block).
+  - `detect_trend_confirm()`: added as an additional hard-gate requirement,
+    reusing the same `check_pinned_range` helper (one filter, not two
+    hand-written copies — §20's lesson). TREND_CONFIRM only ever emits
+    PREMIUM/GOLD, so this fully blocks the detector for a pinned stock.
+- `backtest_regime_compare.py`: `_apply_pinned_range_gate()` + a
+  `--reject-pinned-range` CLI flag, mirroring `--bounce-sma200-gate`'s shape
+  — gates ANY signal type (not just BOUNCE; the merger-arb failure spanned
+  types), applied pre-pooling, adds gated pooled-cap + REALISTIC rows next to
+  the ungated champion rows for a single-lever A/B.
+- Tests: `tests/test_pinned_range.py` (22 — primitive, config contract,
+  TREND_CONFIRM wiring, and an end-to-end `detect()` test built by mocking
+  every sub-check so the REAL downgrade conditional executes, not a mirror of
+  its logic — the first version of this test suite only checked a hand-copied
+  decision table and would have missed a real regression in the shipped
+  code) + `tests/test_pinned_range_backtest_gate.py` (7). All mutation-verified
+  (core AND predicate, `hard_ok` wiring, the downgrade conditional, the
+  backtest gate's `if is_pinned` branch) — each confirmed to fail before being
+  restored. Full suite green: 795 passed, 10 skipped, 1 xfailed (excluding
+  `test_scan_feedback_agent.py` — three separate runs each hung on a different
+  test in that file on a live, unmocked yfinance/Yahoo call, CLOSE_WAIT
+  confirmed via `lsof`; unrelated to this change, matches the yfinance
+  flakiness already documented elsewhere in this file, e.g. §27). An earlier
+  full run (819 passed, including that file) was clean before this change.
+
+### Validation run (2026-08-21) — zero regression, but the gate never fired
+Per the standing §11 rule, ran the required `--realistic-sizing` ablation before
+touching `enabled`. Two 5yr runs, logs in
+`scanner_output/backtests/pinned_range_validation_20260821/`:
+```bash
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --atr-trail-always \
+  --skip-old --realistic-sizing --reject-pinned-range --watchlist input/plus.txt
+python backtest_regime_compare.py --no-tc --bounce-bear-gate 15 --atr-trail-always \
+  --skip-old --realistic-sizing --reject-pinned-range --watchlist input/spx_plus.txt
+```
+
+| Universe | Symbols | Signals gated (5yr total) | Avg Sharpe, champion | Avg Sharpe, +veto |
+|---|---|---|---|---|
+| `plus.txt` | 129 | **0** / 1,297 | 1.97 | 1.97 (byte-identical) |
+| `spx_plus.txt` | 548 | **0** / 1,958 | 2.10 | 2.10 (byte-identical) |
+
+Every "+PinnedRangeVeto" row in both logs is a byte-identical copy of the
+ungated champion row — same trade count, same Sharpe, same MaxDD, every year.
+**Not a wash in the usual §13.5 sense** (where competing levers produce close
+but distinct numbers) — the gate produced literally zero effect because it
+never fired once across ~3,255 signals.
+
+**Why it never fired, checked rather than assumed:**
+1. Confirmed the primitive isn't broken: a synthetic 90-day flat series (±$0.15
+   noise) with a computed `ATR` column correctly returns `is_pinned=True`
+   (`range_pct≈1.6%`, `atr_pct≈0.6%`, both under threshold). My first attempt
+   at this test omitted the `ATR` column and wrongly returned `False` — a test
+   bug, not a code bug, per the standing §22/§23 lesson to verify a guard
+   actually exercises the code path before trusting its result.
+2. `plus.txt` doesn't contain any of PRA/JHG/HOLX/STEL (the merger-arb names
+   that motivated this feature) — that run was structurally incapable of
+   testing the mechanism, confirmed by grep before trusting the "0 gated"
+   read.
+3. `spx_plus.txt` contains STEL, and STILL shows 0 gated — STEL never even
+   appears in the log as a signal, gated or not. Direct yfinance probes (from
+   the Mac) show PRA/JHG/STEL each return only 1–3 rows of history for all of
+   2024–2026, nowhere near enough for SMA150/200 warmup. This is very likely
+   the **same Mac yfinance rate-limiting artifact §27 already diagnosed**
+   (looks like delisting, isn't) rather than genuine data loss — but the
+   structural point holds regardless of which it is: **a stock that gets
+   absorbed/delisted tends to stop being served by yfinance's default history
+   API**, which is exactly the population this gate targets. A backtest
+   replay is structurally unlikely to ever reproduce this failure mode,
+   independent of whether the gate logic is correct.
+
+### Decision: shipped live anyway (2026-08-21)
+Given zero measured regression across two universes and ~3,255 signals, a
+unit-tested/mutation-verified primitive, and a mechanism that's a pure
+quality-downgrade (worst case: demotes a name that wasn't actually pinned,
+made unlikely by requiring BOTH range and ATR collapse together) — flipped
+`PINNED_RANGE_CONFIG['enabled'] = True` in `config.py` without a positive
+backtest result, on the reasoning that **backtest cannot validate this
+specific lever** (its target population doesn't survive in the data source).
+Per the "measurement over simulation" pattern already established for the
+live signal panel (see `project_live_panel_research_agents_jul2026`), efficacy
+here has to be confirmed live, not in `backtest_regime_compare.py`. Live is a
+better test bed for this one: production position data + the exit
+notification pipeline will surface a false-positive downgrade immediately if
+one occurs, the same way the original PRA/JHG/HOLX/STEL cluster surfaced
+organically in §27.
+
+**Open:** watch the next few weeks of GOLD/PREMIUM/TREND_CONFIRM signals for
+any that get downgraded/blocked by this gate, and sanity-check each one isn't
+a legitimate tight pre-breakout consolidation getting caught by the absolute
+threshold rather than a genuine deal-pin.
+
+## 29. Lookahead-bias audit: no future-data leak, but the main breakout detector was silently dead in every historical backtest (2026-08-28)
+
+Triggered by a direct request to validate that `backtest_regime_compare.py` isn't
+lying — specifically, that no trading decision ever uses data unavailable as of the
+decision date. Full trace of the decision path (signal generation, all indicators,
+regime classification, entry/exit simulation, pooled-cap ranking) came back clean:
+`df_slice = df[df.index <= sim_date]` bounds every detector call, every indicator in
+`quantkit/indicators.py` uses `.rolling()`/`.ewm()` (backward-only — grepped for
+`center=True` and `.shift(-N)`, zero hits anywhere), `classify_day_regime` and every
+post-hoc gate (SMA200, pinned-range, residual-momentum) re-mask their own lookback to
+the signal's date, and `simulate()`'s exit loop explicitly skips same-day exit checks
+(`if today_norm == pos['entry_date']`) so a position can never stop out on data that
+preceded its own entry. `end_prices` (final mark) is only applied after the day loop
+ends, never mid-simulation. **None of this is where the actual problem was.**
+
+### The real defect: `detect()`'s stale-data guard read the wrong "today"
+`scanner.py`'s main breakout detector (`BreakoutDetector.detect()` — the original
+V3-scoring consolidation-breakout path, not BOUNCE/SMA20_CROSS/TREND_CONFIRM) rejects
+any symbol whose last bar is >7 calendar days older than a `reference_date` kwarg. That
+kwarg defaults to `date.today()` — real wall-clock today — unless the caller passes
+`reference_date=sim_date`. Five other backtest scripts in this repo already do
+(`mode_optimizer.py`, `enhanced_backtest.py`, `backtest_new_signals.py`,
+`scalp_supertrend_backtest.py`, `daytrade_tension_backtest.py` — the last of these even
+has a comment naming the exact trap: *"defeats the >7d stale-data guard"*).
+**`backtest_regime_compare.py` — the script behind every champion table in §7–§13 and
+§26–§28 — never did.**
+
+Verified empirically, not just by reading: called `detector.detect()` directly on real
+2022 AAPL data 50 times → 50/50 rejected (`"stale data (last bar 2022-03-16)"` etc.); ran
+the actual `run_scan()` over 2023 H1 on 3 real symbols → **zero** `BREAKOUT`-type signals,
+only `TREND_CONFIRM`/`BOUNCE`. The guard was added 2026-03-11 (`4b3e1c40`) — so every
+backtest result recorded in this file since then was silently missing the system's
+namesake detector for any date more than a week before whenever the script happened to
+be run. Confirmed this is backtest-only: `orchestrator.py`'s live call site also omits
+`reference_date`, which is *correct* live — real "today" is the right reference there.
+
+### Fix and direct A/B (commit pending push, `backtest_regime_compare.py`)
+Threaded `reference_date=sim_date` into the three `collect_signals_{old,new,hybrid}` →
+`detector.detect()` calls (one-line addition each, matching the existing pattern in the
+other five scripts). 769 tests still pass. Ran the exact champion CLI
+(`--no-tc --bounce-bear-gate 15 --atr-trail-always --skip-old`, `optimizer_watch.txt`)
+before and after as a controlled pair — pre-fix run reproduced the documented champion
+table to the decimal (confirms it as a faithful control), post-fix:
+
+| Year | Pre-fix (documented) | Post-fix | Δ Sharpe |
+|---|---|---|---|
+| 2022 | −10.75% (Sharpe −0.24) | −9.92% (−0.21) | +0.03 |
+| 2023 | +142.17% (+3.42) | **+150.69% (+3.52)** | +0.10 |
+| 2024 | +29.92% (+1.51) | **+42.23% (+2.15)** | **+0.64** |
+| 2025 | +19.63% (+1.09) | +21.83% (+1.21) | +0.12 |
+| 2026 YTD | +5.94% (+0.63) | +5.91% (+0.63) | ~0 |
+| **5yr avg Sharpe** | **+1.28** | **+1.46** | **+0.18** |
+
+Trade counts rose in 2023–2025 (2024: 100→113) as the previously-dead detector started
+contributing; 2026 is unchanged because pooled-cap=10 was already saturated by BOUNCE
+signals most days that year — consistent with §13.5's own finding that the cap, not the
+signal supply, is usually the binding constraint. **Direction matters: this bug made the
+champion look worse than it actually is, not better** — the safer failure mode, but still
+a real one. Logs: `scanner_output/backtests/lookahead_audit_20260828/`.
+
+### Standing implication
+Every table in §7–§13 and §26–§28 computed after 2026-03-11 was validated against a
+signal mix missing the entire original consolidation-breakout detector. The qualitative
+meta-finding (champion well-tuned, most ranking/admission levers null) is unlikely to
+flip wholesale just from more signal supply, but no specific ablation verdict in that
+range has been re-checked against the fix — treat any of them as provisional until
+re-run. Deliberately not done in this session (scope decision): re-running the full
+ablation suite (panic-throttle, pinned-range, tiebreak, sleeve, NBC, SMA200 gates) is a
+substantial job left for a dedicated pass.
+
+## 30. SLOW_GRIND detector — built for the NOW miss, validated NULL, shipped dormant (2026-08-29)
+
+Motivated by a live miss: NOW gained +31.5% in August 2026 without firing a single
+signal, any type, all month. Ran every existing detector directly against NOW's real
+daily bars — `detect()` logged "no price break" on every checked date. Root cause:
+NOW's climb was a grind (new highs most days, by a small margin, with occasional red
+days), not a decisive break above a clear resistance level. `detect_continuation()`
+needs 3+ **consecutive** green candles — a single red day resets its streak counter to
+zero, and NOW's real pattern never sustained that; `detect_bounce`/`detect_sma20_cross`/
+`detect_trend_confirm` all need their own sharp triggers a slow grind doesn't produce.
+
+### What was built
+`scanner.py::detect_slow_grind()` — majority (not unbroken) up days over a 15-day
+lookback, ≥10% net cumulative gain, still within 2% of the lookback high, rising SMA20,
+RSI in a healthy 50-75 band (below `detect_continuation`'s 80 blow-off guard), checks-
+based PREMIUM/HIGH/STANDARD quality tiers. Wired as the **final fallback** in
+`orchestrator.py`'s detection cascade (only reached when every other detector returns
+None) and in `backtest_regime_compare.py::collect_signals_new()`, both gated behind
+`config.SLOW_GRIND_CONFIG['enabled']` (shipped `False`). New `--slow-grind` CLI flag
+force-enables it for one backtest run, matching the established dormant-feature pattern
+(Tension Index, Supertrend, panic-throttle). `tests/test_slow_grind.py` — 13 tests, one
+using NOW's own real OHLCV as a fixture (`tests/fixtures/slow_grind_now_2026.csv`,
+force-added past the repo's blanket `*.csv` gitignore rule) as the positive-fire case
+rather than hand-tuned synthetic data — real RSI/SMA/volume interactions were hard to
+fake convincingly during iteration. Mutation-verified; caught one vacuous test in the
+process (a fixture that "tested" the up-day-ratio gate was actually failing on the
+cumulative-return gate first — same class of bug as §22.1/§23's "verify the mutation
+fails the test you think covers it").
+
+⚠ **Also fixed a display bug while validating**: `backtest_regime_compare.py`'s signal-
+type breakdown printout hardcoded a type list that predated `TREND_CONFIRM` and
+`SLOW_GRIND` — both detectors' signals were silently invisible in every run's console
+output even when firing normally. Confirmed via a fast 5-symbol probe (NOW/PLTR/IGV/
+AAPL/MSFT, 2026-06-01→08-28) that SLOW_GRIND does fire through the real pipeline (3 of
+13 signals) once the breakdown list included it.
+
+### Validation (2026-08-29) — full 5yr, realistic-sizing, `plus.txt`, same-code A/B
+Per §11's standing rule, ran champion baseline vs champion+`--slow-grind` back to back
+on identical code (both already carry the §29 `reference_date` fix, so this is a clean
+same-version comparison, not a re-check against the older documented baseline table).
+Logs: `scanner_output/backtests/slow_grind_validation_20260829/`.
+
+| Year | Baseline Sharpe | +SlowGrind Sharpe | Δ | MaxDD base→sg | >15d WR base→sg |
+|---|---|---|---|---|---|
+| 2022 | −0.37 | −0.40 | −0.03 | −31.90%→−31.90% | 70.6%→71.4% |
+| 2023 | +3.83 | +3.81 | −0.02 | −15.27%→−15.92% deeper | 94.5%→93.1% ↓ |
+| 2024 | +3.71 | +3.51 | **−0.20** | −13.02%→−13.78% deeper | 87.5%→87.7% |
+| 2025 | +1.88 | +2.05 | +0.17 | −26.04%→−26.65% deeper | 79.3%→79.4% |
+| 2026 YTD | +1.09 | +1.03 | −0.06 | −20.56%→−22.88% deeper | 84.4%→93.8% |
+| **4-full-yr avg** | **+2.26** | **+2.24** | **−0.02** | | |
+
+SLOW_GRIND fired for real (88–172 signals/year, not a rounding artifact) but the
+aggregate effect is a wash-to-mild-negative — well below the +0.10 ship bar, wrong sign,
+and MaxDD deepens in 4 of 5 years with no offsetting return. **Same crowding-out
+mechanism already diagnosed in §11/§23.4**: new SLOW_GRIND candidates compete for the
+same 10 daily pooled-cap slots and the same cash, displacing some existing BOUNCE/
+Momentum trades rather than purely adding on top — a net-new signal source is not
+automatically additive under a capital- and slot-constrained admission pipeline.
+
+**Verdict: `SLOW_GRIND_CONFIG['enabled']` stays `False`.** Shipped exactly as scoped
+("dormant + backtested") — code, tests, and this result are committed; live behavior is
+unchanged. Joins the null-lever list (§13.5): Tension Index, Supertrend, Breakeven,
+WinProb-cal, Daytrade A/B, SMA200 gates, residual-dist, live-tiebreak, sleeve-slots,
+panic-throttle(+4b), normal-bounce-cap, and now SLOW_GRIND. **Reconfirms §13.5's
+meta-finding once more**: the admission/ranking layer is saturated — a genuinely new,
+correctly-firing signal source still can't clear the bar once it has to compete inside
+the existing pooled-cap. Any future signal-generation idea should be judged the same
+way, not assumed to help just because it fires on the motivating real-world case.
+
+### Still open
+- The NOW-type miss is diagnosed and a fix was built and honestly tested — but the test
+  says this specific fix doesn't pay for itself under the current admission pipeline.
+  Whether a slow-grind-shaped signal could ever help (e.g. with its own reserved pooled-
+  cap slots, mirroring the rejected §13.2 sleeve-slots idea — also null) is unexplored.
+- The Aug-10 signal-flood (19 files in one day inflating the pooled-cap pool to 76
+  candidates, burying PLTR at 73/76 and IGV at 52/76 despite both being legitimate
+  PREMIUM/GOLD) and the ITT exit-notification-without-a-close-record mystery from this
+  same investigation are both still unresolved — deprioritized by explicit user scope
+  choice in favor of the slow-grind detector, not because they're settled.

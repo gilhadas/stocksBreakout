@@ -35,6 +35,27 @@ def _require_admin(x_admin_secret: str = Header(default="")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+# ── User-deletion hooks ───────────────────────────────────────────────────────
+# The kit owns identity and nothing else: the schema is a single `users` table,
+# so deleting a row cascades to nothing. Whatever per-user state the host app
+# keeps outside the DB — files, object storage, a separate service — only the
+# host knows about, and without a hook here it is silently orphaned on every
+# deletion. Hooks run BEFORE the row is deleted and a failure aborts the
+# delete, so the association needed to clean up later is never lost.
+
+_delete_hooks: list = []
+
+
+def register_user_delete_hook(fn) -> None:
+    """Register ``fn(user_id, email)`` to run before a user row is deleted.
+
+    Hooks must be idempotent — a failing hook aborts the deletion, so the admin
+    retries and every earlier hook runs a second time.
+    """
+    if fn not in _delete_hooks:
+        _delete_hooks.append(fn)
+
+
 # ── Request models ────────────────────────────────────────────────────────────
 
 class CreateUserRequest(BaseModel):
@@ -99,6 +120,20 @@ def delete_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # Before the row goes, not after: once the id is gone there is nothing left
+    # to tie the host app's per-user state back to a user, and cleanup becomes
+    # a manual archaeology job. A failing hook leaves the user intact so the
+    # whole operation can simply be retried.
+    for hook in _delete_hooks:
+        try:
+            hook(user.id, user.email)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Pre-delete cleanup failed, user not deleted: {exc}",
+            ) from exc
+
     db.delete(user)
     db.commit()
     return {"ok": True}

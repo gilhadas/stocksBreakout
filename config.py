@@ -248,6 +248,53 @@ TREND_CONFIRM = {
     'persistent_min_days':  4,     # need this many of N to qualify
 }
 
+# --- Pinned/Compressed Range Veto ---
+# A stock trading in an abnormally tight range for an extended window (e.g. a
+# cash-merger target pinned near the deal price) has collapsed volatility and
+# no real trend — the opposite of a Stage 2 breakout — yet SMA/MACD/RSI can
+# still spuriously align near a flat price and clear the top quality tier.
+# CLAUDE.md §27 (2026-08-12): PRA/JHG/HOLX/STEL scored GOLD/TREND_CONFIRM while
+# merger-arb pinned; this is the "best lead out of that session" — a
+# signal-generation fix rather than another admission/ranking tweak (§13.5's
+# meta-finding: ranking levers keep coming back null).
+# Dormant until validated via the --reject-pinned-range backtest ablation
+# (judge on the --realistic-sizing arm per the §11 standing rule).
+PINNED_RANGE_CONFIG = {
+    'enabled':         True,    # live 2026-08-21 — zero regression on 2 backtest universes;
+                                 # see CLAUDE.md §28 for why the veto couldn't be positively
+                                 # validated (trigger names drop out of yfinance history once delisted)
+    'lookback_days':   60,      # trading days of high/low range checked
+    'max_range_pct':   10.0,    # (lookback high − lookback low) / close, in percent
+    'max_atr_pct':     1.5,     # current ATR / close, in percent — both must fire together
+}
+
+# --- Slow-Grind Detector ---
+# Every existing detector needs either a sharp breakout candle (detect()),
+# an oversold snap-back (detect_bounce), a fresh SMA20 cross, a near-unbroken
+# consecutive-green streak (detect_continuation, 3+ days with NO red candle),
+# or a full multi-gate confirmation in one bar (detect_trend_confirm). A stock
+# that grinds steadily upward with the occasional red day mixed in — new highs
+# most days, never a single dramatic move — satisfies none of them.
+# 2026-08 case: NOW +31.5% and PLTR/IGV's earliest days ran without a signal
+# because the move was a grind, not a breakout (confirmed live: detect()
+# logged "no price break" on every checked date — the close kept setting only
+# marginal new highs rather than a decisive break above resistance).
+# Dormant until validated via backtest (--slow-grind CLI flag forces it on for
+# an ablation run regardless of this default, mirroring --no-tc's pattern).
+SLOW_GRIND_CONFIG = {
+    'enabled':            False,   # OFF by default — new detector, unvalidated
+    'lookback_days':      15,      # ~3 trading weeks
+    'min_cum_return_pct': 10.0,    # net gain over the lookback
+    'min_up_day_ratio':   0.55,    # majority up days, NOT a near-unbroken streak
+    'near_high_pct':      2.0,     # today's close must be within this % of the lookback high
+    'rsi_min':            50.0,    # healthy uptrend floor
+    'rsi_max':            75.0,    # below detect_continuation's 80 blow-off guard — a grind
+                                    # this overbought is more likely stalling than continuing
+    'min_vol_ratio':      1.0,     # modest — no spike required, but not on dying volume
+    'atr_stop_mult':      2.0,     # stop = max(lookback low, close - mult*ATR)
+    'target_rr':          2.5,     # fixed R:R, matching TREND_CONFIRM's convention
+}
+
 # --- Selective Mode (high-conviction, ~100 trades/yr) ---
 # Toggleable filter for the auto-portfolio admission stage. When enabled,
 # stacks on top of the existing V9-H Quality+Minervini mask and the cross-day

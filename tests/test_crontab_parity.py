@@ -295,3 +295,23 @@ def test_momentum_watch_monitor_has_a_writer_for_the_list_it_reads():
         "monitor_watch.py runs in its default daytrade mode but nothing exports "
         "momentum_watch_daytrade.txt — it would re-alert on a stale list:\n  "
         + "\n  ".join(default_mode))
+
+
+def test_swap_advisor_is_not_wired_as_its_own_cron_line():
+    """
+    The swap advisor runs as a TAIL of scan_and_add, not as a scheduled job.
+
+    A separate cron line would double-fire: scan_and_add already invokes the
+    stage on every run that skipped signals (up to 4x/weekday — 9:35, 15:45,
+    16:30, 19:30), so an extra line would advise on a book whose stage had just
+    run, and — for the autoswap book — could execute a second batch of swaps
+    outside the per-scan budget.
+
+    Note the retired cron_jobs.txt DOES carry such a line (16:15 ET). It has
+    never run in production and must not be ported across, which makes this an
+    explicit exception to the parity rule the rest of this file enforces.
+    """
+    docker = _docker()
+    assert 'suggest_swaps' not in docker, (
+        "docker/crontab invokes suggest_swaps directly — the advisor is already a "
+        "tail of scan_and_add, so this would double-advise and double-swap")

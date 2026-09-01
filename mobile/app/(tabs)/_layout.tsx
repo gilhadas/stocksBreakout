@@ -39,6 +39,19 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="compare"
+        options={{
+          title: 'Compare',
+          tabBarIcon: ({ color }) => (
+            <SymbolView
+              name={{ ios: 'arrow.left.arrow.right', android: 'compare_arrows', web: 'compare_arrows' }}
+              tintColor={color}
+              size={24}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="analyze"
         options={{
           title: 'Analyze',

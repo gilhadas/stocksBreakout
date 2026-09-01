@@ -5,7 +5,8 @@ import yfinance as yf
 import asyncio
 from streamlit_lightweight_charts import renderLightweightCharts
 
-from utils import load_data, save_data, list_files, _to_local_abs, load_text, _is_cloud
+from utils import (load_data, save_data, list_files, _to_local_abs, load_text,
+                   _is_cloud, drop_incomplete_bars)
 
 
 # ──────────────────────────────────────
@@ -115,6 +116,9 @@ def _fetch_mini_chart(symbol, period='6mo'):
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period)
+        if df.empty:
+            return None
+        df = drop_incomplete_bars(df)
         if df.empty:
             return None
         df = df.reset_index()
@@ -238,6 +242,11 @@ def _build_mini_chart(df, symbol, signal=None):
 
     volume_data = []
     for _, row in df.iterrows():
+        # A bar can carry NaN Volume even with valid OHLC; int(nan) raises.
+        # Skip the point rather than fabricating a zero, matching how the SMA
+        # series below skips rows it cannot plot.
+        if pd.isna(row['Volume']):
+            continue
         color = 'rgba(38,166,154,0.5)' if row['Close'] >= row['Open'] else 'rgba(239,83,80,0.5)'
         volume_data.append({
             'time': row['time'],
