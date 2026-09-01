@@ -3,6 +3,7 @@ Notification module - supports Email, Telegram, Discord, Mac Native, and Webhook
 """
 
 import logging
+import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -20,6 +21,30 @@ from datetime import datetime
 from config import NOTIFICATIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _notifications_blocked_for_tests() -> bool:
+    """True when running under pytest, unless explicitly overridden.
+
+    pytest sets PYTEST_CURRENT_TEST for the duration of every test. A test
+    that forgets to mock Notifier — as tests/test_exit_from_portfolio.py's
+    TestV9HFilter did, which sent a real "RGC" email via scan_and_add's
+    default notify=True (2026-08-29) — must not be able to reach a real
+    inbox/Telegram/Discord/push endpoint. This is the single choke point for
+    every outbound channel, checked in each send_* method rather than only in
+    send_all, because several call sites (send_exit_notification, and direct
+    callers like scan_feedback_agent.py/fib_retracement.py/
+    signal_surge_monitor.py) invoke a channel method without going through
+    send_all first.
+
+    tests/test_buy_sell_notifications.py is the one intentional exception —
+    it exercises send_all/send_exit_notification down to a mocked
+    `requests.post` — so it opts back in via SB_ALLOW_TEST_NOTIFICATIONS.
+    """
+    return (
+        bool(os.environ.get('PYTEST_CURRENT_TEST'))
+        and not os.environ.get('SB_ALLOW_TEST_NOTIFICATIONS')
+    )
 
 
 class Notifier:
@@ -163,6 +188,9 @@ class Notifier:
     def send_email(self, subject: str, message: str, signals: Optional[List[Dict]] = None,
                    csv_path: Optional[str] = None, recipient: Optional[str] = None) -> bool:
         """Send email notification with optional CSV attachment"""
+        if _notifications_blocked_for_tests():
+            logger.debug(f"Email suppressed under pytest: {subject}")
+            return False
         try:
             config = NOTIFICATIONS['email']
 
@@ -217,6 +245,9 @@ class Notifier:
     
     def send_telegram(self, message: str, signals: Optional[List[Dict]] = None) -> bool:
         """Send Telegram notification"""
+        if _notifications_blocked_for_tests():
+            logger.debug("Telegram suppressed under pytest")
+            return False
         try:
             config = NOTIFICATIONS['telegram']
 
@@ -260,6 +291,9 @@ class Notifier:
             signals: List of signal dictionaries
             notification_type: Type of notification ('signals', 'exits', 'errors', 'alerts')
         """
+        if _notifications_blocked_for_tests():
+            logger.debug(f"Discord suppressed under pytest: {subject}")
+            return False
         try:
             config = NOTIFICATIONS['discord']
             
@@ -356,6 +390,9 @@ class Notifier:
         Send Mac native notification
         Uses osascript to trigger Notification Center
         """
+        if _notifications_blocked_for_tests():
+            logger.debug(f"Mac notification suppressed under pytest: {subject}")
+            return False
         try:
             # Build notification text
             if signals:
@@ -393,6 +430,9 @@ class Notifier:
         Send webhook for automated trading integration
         Sends JSON payload to configured endpoint
         """
+        if _notifications_blocked_for_tests():
+            logger.debug("Webhook suppressed under pytest")
+            return False
         try:
             config = NOTIFICATIONS.get('webhook', {})
             
@@ -460,6 +500,9 @@ class Notifier:
     def send_expo_push(self, subject: str, message: str,
                        signals: Optional[List[Dict]] = None) -> bool:
         """Send push notification via Expo Push API to all registered devices."""
+        if _notifications_blocked_for_tests():
+            logger.debug(f"Expo push suppressed under pytest: {subject}")
+            return False
         try:
             from api.push_registry import get_all_tokens
             tokens = get_all_tokens()

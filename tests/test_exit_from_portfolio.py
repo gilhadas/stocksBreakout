@@ -99,7 +99,7 @@ class TestV9HFilter(unittest.TestCase):
              patch.object(ap, '_PORTFOLIO_PATH', self.portfolio_path), \
              patch.object(ap, 'load', return_value=self._empty_portfolio()), \
              patch.object(ap, '_save'):
-            result = ap.scan_and_add()
+            result = ap.scan_and_add(notify=False)
 
         self.assertEqual(result['added'], 0,
                          "Breakout with no MinerviniScore should be rejected")
@@ -121,7 +121,7 @@ class TestV9HFilter(unittest.TestCase):
              patch.object(ap, '_PORTFOLIO_PATH', self.portfolio_path), \
              patch.object(ap, 'load', return_value=self._empty_portfolio()), \
              patch.object(ap, '_save'):
-            result = ap.scan_and_add()
+            result = ap.scan_and_add(notify=False)
 
         self.assertEqual(result['added'], 1,
                          "CONTINUATION PREMIUM should pass V9-H without MinerviniScore")
@@ -144,7 +144,7 @@ class TestV9HFilter(unittest.TestCase):
              patch.object(ap, '_PORTFOLIO_PATH', self.portfolio_path), \
              patch.object(ap, 'load', return_value=self._empty_portfolio()), \
              patch.object(ap, '_save'):
-            result = ap.scan_and_add()
+            result = ap.scan_and_add(notify=False)
 
         self.assertEqual(result['added'], 1,
                          "BOUNCE PREMIUM should pass V9-H without MinerviniScore")
@@ -166,7 +166,7 @@ class TestV9HFilter(unittest.TestCase):
              patch.object(ap, '_PORTFOLIO_PATH', self.portfolio_path), \
              patch.object(ap, 'load', return_value=self._empty_portfolio()), \
              patch.object(ap, '_save'):
-            result = ap.scan_and_add()
+            result = ap.scan_and_add(notify=False)
 
         self.assertEqual(result['added'], 1,
                          "GOLD breakout with MinerviniScore=8 should pass V9-H")
@@ -187,7 +187,7 @@ class TestV9HFilter(unittest.TestCase):
              patch.object(ap, '_PORTFOLIO_PATH', self.portfolio_path), \
              patch.object(ap, 'load', return_value=self._empty_portfolio()), \
              patch.object(ap, '_save'):
-            result = ap.scan_and_add()
+            result = ap.scan_and_add(notify=False)
 
         self.assertEqual(result['added'], 0,
                          "Without Type column, MinerviniScore=3 should be rejected")
@@ -209,7 +209,7 @@ class TestV9HFilter(unittest.TestCase):
              patch.object(ap, '_PORTFOLIO_PATH', self.portfolio_path), \
              patch.object(ap, 'load', return_value=self._empty_portfolio()), \
              patch.object(ap, '_save'):
-            result = ap.scan_and_add()
+            result = ap.scan_and_add(notify=False)
 
         self.assertEqual(result['added'], 0,
                          "HIGH quality should be rejected regardless of MinerviniScore")

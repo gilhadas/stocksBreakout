@@ -9,10 +9,21 @@ import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from notifier import Notifier
+
+
+# This file intentionally exercises Notifier's real dispatch logic down to
+# `requests.post` (mocked per-test below) — every other test file must NOT
+# reach a real channel, so notifier.py suppresses all sends under pytest by
+# default (see _notifications_blocked_for_tests). This is the one opt-out.
+@pytest.fixture(autouse=True)
+def _allow_real_dispatch(monkeypatch):
+    monkeypatch.setenv('SB_ALLOW_TEST_NOTIFICATIONS', '1')
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
