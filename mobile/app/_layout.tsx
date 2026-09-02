@@ -39,11 +39,12 @@ export default function RootLayout() {
     if (loaded) SplashScreen.hideAsync();
   }, [loaded]);
 
-  // Web OAuth redirect: Google sends back to /?token=... — catch it here before any route mounts
+  // Web OAuth redirect: Google sends back to /#token=... — catch it here before any route mounts
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const params = new URLSearchParams(window.location.search);
-    const urlToken = params.get('token');
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const queryParams = new URLSearchParams(window.location.search);
+    const urlToken = hashParams.get('token') || queryParams.get('token');
     if (urlToken) {
       window.history.replaceState({}, '', '/');
       saveToken(urlToken).then(() => router.replace('/(tabs)'));

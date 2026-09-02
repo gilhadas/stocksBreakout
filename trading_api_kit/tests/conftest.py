@@ -5,6 +5,20 @@ Uses StaticPool so all SQLAlchemy sessions share the same in-memory SQLite
 connection — tables created in the fixture are visible to route handlers.
 Uses app.dependency_overrides to inject the test DB session cleanly.
 """
+import os
+
+# Must run before trading_api_kit.config is imported (create_app fail-closes
+# on a missing/default API_SECRET_KEY).
+os.environ.setdefault("API_SECRET_KEY", "kit-test-secret-not-for-production")
+if os.environ.get("API_SECRET_KEY") == "change-me-in-production":
+    os.environ["API_SECRET_KEY"] = "kit-test-secret-not-for-production"
+os.environ.setdefault("APP_PASSWORD", "")
+if os.environ.get("APP_PASSWORD") == "breakout2026":
+    os.environ["APP_PASSWORD"] = ""
+os.environ.setdefault("CORS_ORIGINS", "")
+if os.environ.get("CORS_ORIGINS", "").strip() == "*":
+    os.environ["CORS_ORIGINS"] = ""
+
 import datetime
 import pytest
 from sqlalchemy import create_engine

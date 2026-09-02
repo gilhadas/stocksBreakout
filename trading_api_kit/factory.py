@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from trading_api_kit.config import CORS_ORIGINS, DEFAULT_USER_EMAIL, DEFAULT_USER_ID
+import trading_api_kit.config as _cfg
+from trading_api_kit.config import DEFAULT_USER_EMAIL, DEFAULT_USER_ID
 from trading_api_kit.database import create_tables
 import trading_api_kit.database as _db  # lazy reference — never early-bind SessionLocal
 from trading_api_kit.models import User
@@ -83,11 +84,18 @@ def create_app(
         _ensure_default_user()
         yield
 
+    _cfg.assert_boot_config()
+
     app = FastAPI(title=title, version=version, lifespan=lifespan)
 
+    origins = list(_cfg.CORS_ORIGINS)
+    if not origins or "*" in origins:
+        raise RuntimeError(
+            "CORS_ORIGINS must be an explicit origin list; '*' + credentials is not allowed."
+        )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=CORS_ORIGINS,
+        allow_origins=origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

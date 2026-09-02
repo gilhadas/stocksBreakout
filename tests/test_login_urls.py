@@ -87,7 +87,7 @@ def test_dashboard_oauth_link_tags_its_client_type(source):
 
     The callback only knows which app to return to via the 'client' query
     param captured into _oauth_states — an untagged link falls into the
-    'web' default and gets the mobile app's relative "/?token=" redirect,
+    'web' default and gets the mobile app's relative "/#token=" redirect,
     which resolves against the CALLBACK's host (gilhadas-stocks.com), not
     dashboard.gilhadas-stocks.com. Without this tag the bug is silent: the
     login still "succeeds", just on the wrong origin.
@@ -120,18 +120,14 @@ def test_no_dead_shadow_auth_routes_file():
 def test_dashboard_callback_redirect_is_absolute(auth_routes_source):
     """Companion to the app.py tag above: the backend must special-case
     client_type == 'dashboard' with an ABSOLUTE redirect. A relative
-    "/?token=" (the 'web' branch, correct for the mobile app which IS
+    "/#token=" (the 'web' branch, correct for the mobile app which IS
     gilhadas-stocks.com) would resolve against this callback's own host
     and land back on the mobile app instead of the dashboard.
     """
-    m = re.search(
-        r'client_type == "dashboard":\s*\n(?:.*\n){0,8}?\s*return RedirectResponse\(f?"([^"]*)"',
-        auth_routes_source)
-    assert m, 'no client_type == "dashboard" branch found in the callback'
-    redirect = m.group(1)
-    assert redirect.startswith('http://') or redirect.startswith('https://') or '{' in redirect, (
-        f"dashboard redirect {redirect!r} is not absolute — it will resolve "
-        "against gilhadas-stocks.com (this callback's host), not the dashboard")
+    assert 'client_type == "dashboard"' in auth_routes_source
+    assert "DASHBOARD_PUBLIC_URL" in auth_routes_source
+    assert "RedirectResponse(dashboard_url)" in auth_routes_source
+    assert "/?token=" not in auth_routes_source
 
 
 def test_mobile_app_scheme_matches_app_json():
@@ -154,7 +150,7 @@ def test_dashboard_public_url_documented():
     assert 'DASHBOARD_PUBLIC_URL=' in example, (
         'DASHBOARD_PUBLIC_URL must be documented in deploy/.env.example — '
         "without it in .env, the dashboard OAuth branch falls back to the "
-        "same relative redirect as 'web' and the bug reappears silently")
+        "same relative fragment redirect as 'web' and the bug reappears silently")
 
 
 def test_compose_gives_the_dashboard_a_public_url():

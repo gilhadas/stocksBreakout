@@ -55,12 +55,10 @@ When adding features to `indicators.py` or `scanner.py`, adhere to these default
 
 ## 5a. Mobile API Server (uvicorn) — now on EC2, not the Mac (updated 2026-07-23)
 Since the section 9 cutover (2026-07-07), the mobile app hits `api/server.py` running as
-the `sb-api` Docker container on the EC2 box, reached via the Cloudflare tunnel
+the `sb-api` Docker container on the production box, reached via the Cloudflare tunnel
 (`gilhadas-stocks.com` / `api.gilhadas-stocks.com`) that runs as the `sb-cloudflared`
-container on the **same** box — not the Mac's tunnel. SSH: `ssh -i
-~/.ssh/stocksbreakout-key.pem ubuntu@100.68.142.94` (Tailscale; the security group has
-zero inbound rules, so this is the only direct path — SSM Run Command and the EC2 Serial
-Console are the two independent fallbacks, see section 9).
+container on the **same** box — not the Mac's tunnel. SSH: `ssh -i "$SSH_KEY"
+ubuntu@"$ORACLE_HOST"` (host and key are in the private ops note, not this public repo).
 
 **Code is baked into the image at build time, not volume-mounted** — a plain restart
 reloads the *old* code. Any edit to `api/server.py`, `auto_portfolio.py`, or anything
@@ -354,10 +352,10 @@ Per-year >15d WR (the litmus test):
 ## 9. Server Deployment Cutover (2026-07-07)
 
 **Production is now live on AWS EC2 (instance `i-015657f7d29bb673e`, hostname
-`ip-172-31-35-253`), not the Mac.** Public IP is an Elastic IP, **`3.122.167.124`**
+`$EC2_INTERNAL_HOST`), not the Mac.** Public IP is an Elastic IP, **`$EC2_ELASTIC_IP`**
 (allocated 2026-07-23 — stable across stop/start; earlier IPs in this doc's history
 churned on every restart because none was allocated until then). SSH is via Tailscale
-only: `ssh -i ~/.ssh/stocksbreakout-key.pem ubuntu@100.68.142.94` — the security group
+only: `ssh -i "$SSH_KEY" ubuntu@"$EC2_TAILSCALE_HOST"` — the security group
 has **zero inbound rules**, so the public IP cannot be SSH'd to directly regardless of
 which address it currently is. Full `deploy/README.md` steps 1–7 completed.
 `gilhadas-stocks.com` / `api.gilhadas-stocks.com` now serve from this box;
@@ -384,7 +382,7 @@ window loose enough to miss a real outage. `HC_UUID_DAYTRADE` deliberately left 
 yet done as of this writing). Still open: external off-box uptime check, Docker
 log-size caps + disk alert, EC2 Serial Console + SSM verification.
 
-**There is a second, unrelated Oracle Cloud VM (`82.70.210.194`, key `daytrade_oracle`,
+**There is a second, unrelated Oracle Cloud VM (`$ORACLE_HOST`, key in the private ops note,
 `il-jerusalem-1`)** — this is NOT part of this deployment. It's a separate, already-live
 production box running the `daytrade` engine/web/IB-Gateway/Caddy stack (created 2026-06-15).
 A stocksBreakout repo clone + `.env` copy were placed there mid-session by mistake before this
@@ -1883,7 +1881,7 @@ the box actually running production today, verified directly rather than recalle
 ### What changed
 Production moved from the AWS EC2 instance (§9, `i-015657f7d29bb673e`) to the **Oracle
 Cloud VM already referenced — and explicitly called "unrelated" — throughout §9's own
-text**: `82.70.210.194` (`il-jerusalem-1`, hostname `instance-20260615-1424`), which since
+text**: `$ORACLE_HOST` (`il-jerusalem-1`; hostname in the private ops note), which since
 2026-06-15 has independently run the separate `daytrade` engine/web/IB-Gateway/Caddy
 stack. That box now runs **both** systems side by side as two independent
 `docker compose` projects:
@@ -1953,12 +1951,12 @@ not a redeploy. Chain of build fixes, all in git:
 ### Access differs from the EC2 playbook — do not carry that guidance over
 §9's EC2 access notes (Tailscale-only, zero-inbound security group, `stocksbreakout-key.pem`)
 **do not apply here**. This session connected all day via plain
-`ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194` on the public IP — Oracle Cloud's
+`ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"` — Oracle Cloud's
 security list is not configured zero-inbound the way EC2's was. `sb-tailscale` is present
 and running on the box regardless; unclear whether it's load-bearing for anything now that
 direct SSH works, or a carried-over lifeline from the compose file. Two independent SSH
 keys now exist for what is, from the shell's perspective, one machine:
-`~/.ssh/daytrade_oracle` (used throughout this session) and possibly others provisioned
+`$SSH_KEY` (used throughout this session) and possibly others provisioned
 for the original daytrade deployment — didn't enumerate further, not this task's scope.
 
 ### Operational state, verified 2026-08-05
@@ -2118,7 +2116,7 @@ encode the new contract rather than be worked around.
 
 ### Deploy order (nothing is live until this runs)
 ```bash
-ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194
+ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"
 cd ~/stocksBreakout && git pull --ff-only && docker compose up -d --build api scanner-cron dashboard
 python3 fork_books.py --dry-run     # then without --dry-run
 ```
@@ -2548,3 +2546,28 @@ way, not assumed to help just because it fires on the motivating real-world case
   PREMIUM/GOLD) and the ITT exit-notification-without-a-close-record mystery from this
   same investigation are both still unresolved — deprioritized by explicit user scope
   choice in favor of the slow-grind detector, not because they're settled.
+
+## 31. Public-repo security lockdown (2026-09-02)
+
+The GitHub repo is public. This is **docs/API lockdown only** — no trading/scanner
+logic, fills, bounce filters, or monitor trails.
+
+- Deleted tracked `config.py.bak` (it held live Discord webhook URLs) and gitignored
+  `*.bak`. **Rotate those webhooks in Discord.** Git history still contains the bak
+  file until a later history purge (out of scope; no filter-repo/force-push).
+- FastAPI (`trading_api_kit`, mounted by `api/server.py`) now **refuses to boot** if
+  `API_SECRET_KEY` is missing or still the documented default, and if `APP_PASSWORD`
+  is the old documented example. Leftover `api/auth.py` is a shim over the kit so it
+  cannot fail-open on its own default secret.
+- Google OAuth is allowlisted (`gil.hadas@gmail.com`, `gil.hadas+1@gmail.com`, plus
+  `GOOGLE_ALLOWLIST`). Unallowlisted accounts get **403 and no JWT** (no user row).
+- CORS defaults to explicit first-party + localhost origins; `*` + credentials is
+  refused. Override with `CORS_ORIGINS`.
+- HTTP OAuth no longer puts JWTs in query strings. Web SPA gets a URL **fragment**
+  (`/#token=`); the Streamlit dashboard gets a 120s **httpOnly cookie** on
+  `.gilhadas-stocks.com`. Native mobile keeps the custom-scheme query (not HTTP,
+  not Referer-able). Rebuild `mobile/dist/` when deploying so the web bundle reads
+  the fragment. Host/SSH identity stripped from `deploy/README.md`,
+  `deploy/OPERATIONS.md`, and CLAUDE.md in favor of `$ORACLE_HOST` / `$SSH_KEY`
+  (private ops note).
+

@@ -9,12 +9,15 @@ without needing prior server/Docker knowledge. The deployment/architecture story
 > CloudWatch alarms sit permanently in `ALARM` — expected and harmless (their reboot/
 > recover actions are no-ops on a stopped instance, they will not start it), but the AWS
 > console will show red for it indefinitely. Ignore it; nothing there serves traffic.
+>
+> SSH host and key are **not in this public repo**. See the private ops note, then:
+> `ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"`
 
 ---
 
 ## 1. The big picture — what you actually have
 
-- **A cloud computer** (an Oracle Cloud VM) at `82.70.210.194` runs everything, 24/7.
+- **A cloud computer** (an Oracle Cloud VM; `$ORACLE_HOST` in the private ops note) runs everything, 24/7.
   Your Mac no longer runs any part of the stock system.
 - On that computer, **Docker** runs six *containers*. A container is like a sealed
   lunchbox: the app plus everything it needs (Python, libraries, settings) packed
@@ -66,7 +69,7 @@ Consequences you must respect:
 From the Mac's terminal:
 
 ```bash
-ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194
+ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"
 cd ~/stocksBreakout
 ```
 
@@ -74,10 +77,9 @@ You are now typing commands *on the server*. Type `exit` to come back to the Mac
 Every command below assumes you're on the server inside `~/stocksBreakout`,
 unless marked **(on the Mac)**.
 
-> The key name says `daytrade` because this VM was originally provisioned for that
-> system; it is the correct key for this box. Unlike the retired EC2 box (which was
+> The SSH key and host are in the private ops note (`$SSH_KEY`, `$ORACLE_HOST`). Unlike the retired EC2 box (which was
 > reachable **only** over Tailscale, because its security group had zero inbound
-> rules), this one accepts SSH directly on its public IP.
+> rules), this one accepts SSH on the address recorded there.
 
 ---
 
@@ -190,8 +192,8 @@ requires rebuilding it on the Mac and shipping it over:
 # (on the Mac)
 cd ~/Documents/GitHub/stocksBreakout/mobile
 npx expo export -p web                       # rebuilds mobile/dist/
-scp -i ~/.ssh/daytrade_oracle -r dist/. \
-    ubuntu@82.70.210.194:~/stocksBreakout/mobile/dist/
+scp -i "$SSH_KEY" -r dist/. \
+    ubuntu@"$ORACLE_HOST":~/stocksBreakout/mobile/dist/
 
 # (on the server)
 docker compose up -d --build api
@@ -209,7 +211,7 @@ docker compose up -d --build api
 ```bash
 # 1. (on the Mac) edit .env in your editor — never paste secrets into chats/commits
 # 2. (on the Mac) copy it over:
-scp -i ~/.ssh/daytrade_oracle .env ubuntu@82.70.210.194:~/stocksBreakout/.env
+scp -i "$SSH_KEY" .env ubuntu@"$ORACLE_HOST":~/stocksBreakout/.env
 # 3. (on the server) recreate containers so they pick it up:
 docker compose up -d
 ```
@@ -297,8 +299,8 @@ source of truth):
 docker compose exec api cat /app/scanner_output/users.db > ~/users.db.$(date +%Y%m%d)
 
 # (on the Mac)
-scp -i ~/.ssh/daytrade_oracle \
-    ubuntu@82.70.210.194:~/users.db.$(date +%Y%m%d) ~/Backups/
+scp -i "$SSH_KEY" \
+    ubuntu@"$ORACLE_HOST":~/users.db.$(date +%Y%m%d) ~/Backups/
 ```
 
 ---
@@ -307,7 +309,7 @@ scp -i ~/.ssh/daytrade_oracle \
 
 ```bash
 # connect
-ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194
+ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"
 cd ~/stocksBreakout
 
 # health
