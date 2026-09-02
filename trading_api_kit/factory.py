@@ -84,18 +84,13 @@ def create_app(
         _ensure_default_user()
         yield
 
-    _cfg.assert_boot_config()
+    _cfg.assert_boot_config()  # already guarantees CORS_ORIGINS is non-wildcard below
 
     app = FastAPI(title=title, version=version, lifespan=lifespan)
 
-    origins = list(_cfg.CORS_ORIGINS)
-    if not origins or "*" in origins:
-        raise RuntimeError(
-            "CORS_ORIGINS must be an explicit origin list; '*' + credentials is not allowed."
-        )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins,
+        allow_origins=list(_cfg.CORS_ORIGINS),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

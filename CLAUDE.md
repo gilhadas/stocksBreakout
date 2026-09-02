@@ -1949,7 +1949,7 @@ not a redeploy. Chain of build fixes, all in git:
   so the cgroup killer still wins the race against the host killer.
 
 ### Access differs from the EC2 playbook — do not carry that guidance over
-§9's EC2 access notes (Tailscale-only, zero-inbound security group, `stocksbreakout-key.pem`)
+§9's EC2 access notes (Tailscale-only, zero-inbound security group, `$SSH_KEY`)
 **do not apply here**. This session connected all day via plain
 `ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"` — Oracle Cloud's
 security list is not configured zero-inbound the way EC2's was. `sb-tailscale` is present

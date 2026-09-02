@@ -97,11 +97,6 @@ def test_dashboard_oauth_link_tags_its_client_type(source):
         "callback knows to redirect back to this app's own host")
 
 
-@pytest.fixture(scope='module')
-def auth_routes_source() -> str:
-    return (Path(__file__).parent.parent / 'trading_api_kit' / 'auth_routes.py').read_text()
-
-
 def test_no_dead_shadow_auth_routes_file():
     """Reported 2026-08-02: the dashboard OAuth fix was applied to
     api/auth_routes.py, deployed, and verified in isolation — but that file
@@ -117,17 +112,34 @@ def test_no_dead_shadow_auth_routes_file():
         'a second copy here is dead code that invites fixing the wrong file')
 
 
-def test_dashboard_callback_redirect_is_absolute(auth_routes_source):
+def test_dashboard_callback_redirect_is_absolute(monkeypatch):
     """Companion to the app.py tag above: the backend must special-case
     client_type == 'dashboard' with an ABSOLUTE redirect. A relative
     "/#token=" (the 'web' branch, correct for the mobile app which IS
     gilhadas-stocks.com) would resolve against this callback's own host
     and land back on the mobile app instead of the dashboard.
+
+    Calls the real _deliver_token() instead of grepping source text for these
+    strings — a substring check can't tell a name being USED from a name that
+    only appears in a comment or a dead branch (see CLAUDE.md's own repeated
+    lesson on this trap). This exercises the actual redirect + cookie built.
     """
-    assert 'client_type == "dashboard"' in auth_routes_source
-    assert "DASHBOARD_PUBLIC_URL" in auth_routes_source
-    assert "RedirectResponse(dashboard_url)" in auth_routes_source
-    assert "/?token=" not in auth_routes_source
+    monkeypatch.setenv('DASHBOARD_PUBLIC_URL', 'https://dashboard.gilhadas-stocks.com')
+    from trading_api_kit.auth_routes import _deliver_token
+    from trading_api_kit.config import OAUTH_COOKIE_NAME
+
+    resp = _deliver_token('tok123', 'dashboard')
+
+    location = resp.headers['location']
+    assert location == 'https://dashboard.gilhadas-stocks.com', (
+        f'dashboard redirect must be absolute, got {location!r}')
+    assert '#token=' not in location and '?token=' not in location, (
+        'dashboard must not receive the JWT in the URL')
+
+    set_cookie = resp.headers.get('set-cookie', '')
+    assert f'{OAUTH_COOKIE_NAME}=tok123' in set_cookie, (
+        'dashboard must receive the JWT via an httpOnly cookie, not the URL')
+    assert 'HttpOnly' in set_cookie
 
 
 def test_mobile_app_scheme_matches_app_json():

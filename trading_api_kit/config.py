@@ -94,6 +94,21 @@ ADMIN_SECRET: str = _env("ADMIN_SECRET", "")
 # ── CORS ──────────────────────────────────────────────────────────────────────
 OAUTH_COOKIE_NAME = "sb_oauth_token"
 
+# Cross-subdomain cookie domain for the dashboard OAuth handoff (see
+# auth_routes._cookie_domain_for). Blank = derive the parent domain from
+# DASHBOARD_PUBLIC_URL's own host. Set e.g. ".example.com" for a deployment
+# where the derived (last-two-labels) parent isn't the right eTLD+1 (multi-part
+# TLDs like .co.uk) or where api/dashboard don't share a domain suffix at all.
+COOKIE_DOMAIN: str = _env("COOKIE_DOMAIN", "")
+
+
+def _reject_wildcard_cors(origins: list[str]) -> None:
+    """Single source of truth for the wildcard-CORS-with-credentials invariant."""
+    if not origins or any(o == "*" for o in origins):
+        raise RuntimeError(
+            "CORS_ORIGINS must be an explicit origin list; '*' + credentials is not allowed."
+        )
+
 
 def parse_cors_origins(raw: str | None = None) -> list[str]:
     """
@@ -105,11 +120,7 @@ def parse_cors_origins(raw: str | None = None) -> list[str]:
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     if not origins:
         return list(DEFAULT_CORS_ORIGINS)
-    if any(o == "*" for o in origins):
-        raise RuntimeError(
-            "CORS_ORIGINS cannot include '*' while allow_credentials=True. "
-            "Set an explicit comma-separated origin list."
-        )
+    _reject_wildcard_cors(origins)
     return origins
 
 
@@ -132,7 +143,4 @@ def assert_boot_config() -> None:
         )
     # Re-parse so a monkeypatched CORS_ORIGINS / env is honored, and "*" never slips through.
     origins = list(CORS_ORIGINS) if CORS_ORIGINS else parse_cors_origins()
-    if not origins or any(o == "*" for o in origins):
-        raise RuntimeError(
-            "CORS_ORIGINS must be an explicit origin list; '*' + credentials is not allowed."
-        )
+    _reject_wildcard_cors(origins)

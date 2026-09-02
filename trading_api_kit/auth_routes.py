@@ -205,11 +205,21 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
 
 
 def _cookie_domain_for(url: str) -> str | None:
-    """Parent-domain cookie so api.* can hand a token to dashboard.*."""
+    """Parent-domain cookie so api.* can hand a token to dashboard.*.
+
+    Configurable via COOKIE_DOMAIN for deployments other than the default
+    (e.g. a multi-part TLD like .co.uk, or where api/dashboard don't share a
+    domain suffix). Blank COOKIE_DOMAIN derives the parent domain from this
+    URL's own host (last two labels) — correct for gilhadas-stocks.com and
+    any other simple single-part-TLD domain without hardcoding one name.
+    """
     host = (urlparse(url).hostname or "").lower()
-    if host == "gilhadas-stocks.com" or host.endswith(".gilhadas-stocks.com"):
-        return ".gilhadas-stocks.com"
-    return None
+    override = _cfg.COOKIE_DOMAIN.strip()
+    if override:
+        dom = override if override.startswith(".") else f".{override}"
+        return dom if (host == dom.lstrip(".") or host.endswith(dom)) else None
+    labels = host.split(".")
+    return "." + ".".join(labels[-2:]) if len(labels) >= 2 else None
 
 
 def _deliver_token(token: str, client_type: str) -> RedirectResponse:

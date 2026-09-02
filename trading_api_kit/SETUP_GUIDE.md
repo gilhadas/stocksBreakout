@@ -349,6 +349,7 @@ my-new-scanner/
 | `DATABASE_URL` | No | SQLite auto-created | PostgreSQL connection string |
 | `PUSH_TOKEN_FILE` | No | `scanner_output/...` | Expo token storage path |
 | `CORS_ORIGINS` | No | first-party + localhost | Allowed origins (`*` refused) |
+| `COOKIE_DOMAIN` | No | derived from `DASHBOARD_PUBLIC_URL` | Parent domain for the dashboard OAuth cookie |
 
 ---
 

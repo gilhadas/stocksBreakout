@@ -17,6 +17,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 logging.basicConfig(level=logging.INFO)
 logging.getLogger().setLevel(logging.INFO)  # force override Streamlit's pre-config
 
+from trading_api_kit.config import OAUTH_COOKIE_NAME  # noqa: E402 — must follow sys.path fix-up
+
 
 # Load .env
 _env_file = PROJECT_ROOT / '.env'
@@ -69,7 +71,7 @@ def _oauth_token_from_cookie() -> str | None:
         jar = getattr(ctx, "cookies", None)
         if jar is None:
             return None
-        token = jar.get("sb_oauth_token") if hasattr(jar, "get") else None
+        token = jar.get(OAUTH_COOKIE_NAME) if hasattr(jar, "get") else None
         if token:
             return str(token)
     except Exception:
