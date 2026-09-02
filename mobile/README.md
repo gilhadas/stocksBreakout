@@ -48,8 +48,8 @@ Single-user password auth with JWT tokens.
 
 | Variable | Location | Purpose |
 |---|---|---|
-| `APP_PASSWORD` | `.env` | Password to log in (default: `breakout2026`) |
-| `API_SECRET_KEY` | `.env` | Signs JWT tokens (auto-generated) |
+| `APP_PASSWORD` | `.env` | Password to log in (set uniquely in `.env`; no documented default) |
+| `API_SECRET_KEY` | `.env` | Signs JWT tokens (required; unique — the API will not boot on a documented default) |
 
 - No signup required — enter the password on the login screen
 - JWT token is valid for 30 days, stored locally on device
@@ -72,7 +72,7 @@ Base URL: `http://localhost:8000` (or Cloudflare tunnel URL)
 # Login
 TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"password":"breakout2026"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+  -d '{"password":"<APP_PASSWORD>"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
 
 # Get portfolio
 curl -s http://localhost:8000/portfolio -H "Authorization: Bearer $TOKEN" | python3 -m json.tool

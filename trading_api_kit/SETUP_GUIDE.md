@@ -207,8 +207,7 @@ PUSH_TOKEN_FILE=scanner_output/.expo_push_tokens.json
 
 # ─── OPTIONAL — CORS ─────────────────────────────────────────────────────────
 
-# Default: * (allows all origins — fine for dev)
-# Production: restrict to your domains
+# Default: first-party origins only (never '*' — credentials are always on)
 # CORS_ORIGINS=https://your-domain.com,https://app.your-domain.com
 ```
 
@@ -337,18 +336,20 @@ my-new-scanner/
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `API_SECRET_KEY` | ✅ Yes | `change-me` | JWT signing secret |
-| `APP_PASSWORD` | If single-user | — | Legacy password login |
+| `API_SECRET_KEY` | ✅ Yes | *(none — refuses documented default)* | JWT signing secret |
+| `APP_PASSWORD` | If single-user | — | Legacy password login (documented example values refused) |
 | `DEFAULT_USER_EMAIL` | If single-user | — | Auto-created user email |
 | `DEFAULT_USER_ID` | If single-user | — | Auto-created user UUID |
 | `ADMIN_SECRET` | For /admin | — | Admin dashboard password |
 | `GOOGLE_CLIENT_ID` | For Google OAuth | — | From Google Cloud Console |
 | `GOOGLE_CLIENT_SECRET` | For Google OAuth | — | From Google Cloud Console |
 | `GOOGLE_REDIRECT_URI` | For Google OAuth | `localhost callback` | OAuth redirect URL |
-| `MOBILE_APP_SCHEME` | For native OAuth | `myapp` | Custom URL scheme |
+| `GOOGLE_ALLOWLIST` | For Google OAuth | operator emails | Extra Google accounts allowed to sign in |
+| `MOBILE_APP_SCHEME` | For native OAuth | `stocksbreakout` in this repo | Custom URL scheme |
 | `DATABASE_URL` | No | SQLite auto-created | PostgreSQL connection string |
 | `PUSH_TOKEN_FILE` | No | `scanner_output/...` | Expo token storage path |
-| `CORS_ORIGINS` | No | `*` | Allowed origins (production) |
+| `CORS_ORIGINS` | No | first-party + localhost | Allowed origins (`*` refused) |
+| `COOKIE_DOMAIN` | No | derived from `DASHBOARD_PUBLIC_URL` | Parent domain for the dashboard OAuth cookie |
 
 ---
 

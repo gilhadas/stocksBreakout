@@ -9,13 +9,20 @@ Day-to-day operation (health checks, logs, restarts, troubleshooting) is in
 
 ## Where production actually runs
 
+Host address, SSH key path, and VM hostname live in a **private ops note**, not
+this public repo. From a shell that has those values:
+
+```bash
+ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"
+```
+
 | | |
 |---|---|
-| Host | **Oracle Cloud VM**, `82.70.210.194` (`il-jerusalem-1`, hostname `instance-20260615-1424`) |
+| Host | **Oracle Cloud VM** (`il-jerusalem-1`). Address: `$ORACLE_HOST` (private ops note). |
 | Since | 2026-08-02 (previously AWS EC2 — see "History" below) |
 | Architecture | **`aarch64` (ARM)** — matters for builds, see below |
 | Resources | 11 GiB RAM, 45 GB disk, 2 GiB swapfile |
-| Access | `ssh -i ~/.ssh/daytrade_oracle ubuntu@82.70.210.194` — direct on the public IP |
+| Access | `ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"` — see the private ops note |
 | Repo path | `~/stocksBreakout` |
 
 ⚠ **This VM also hosts an unrelated system.** The `daytrade` stack

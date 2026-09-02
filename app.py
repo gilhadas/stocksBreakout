@@ -17,6 +17,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 logging.basicConfig(level=logging.INFO)
 logging.getLogger().setLevel(logging.INFO)  # force override Streamlit's pre-config
 
+from trading_api_kit.config import OAUTH_COOKIE_NAME  # noqa: E402 — must follow sys.path fix-up
+
 
 # Load .env
 _env_file = PROJECT_ROOT / '.env'
@@ -59,6 +61,24 @@ def _setting(name: str, default: str) -> str:
         pass
     return os.getenv(name, default)
 
+
+def _oauth_token_from_cookie() -> str | None:
+    """Read the short-lived OAuth handoff cookie (Streamlit 1.37+ st.context)."""
+    try:
+        ctx = getattr(st, "context", None)
+        if ctx is None:
+            return None
+        jar = getattr(ctx, "cookies", None)
+        if jar is None:
+            return None
+        token = jar.get(OAUTH_COOKIE_NAME) if hasattr(jar, "get") else None
+        if token:
+            return str(token)
+    except Exception:
+        pass
+    return None
+
+
 st.set_page_config(
     page_title="Breakout Scanner",
     page_icon="chart_with_upwards_trend",
@@ -74,13 +94,19 @@ def check_auth():
     if st.session_state.get('authenticated'):
         return True
 
-    # Check for token in URL query params (from Google OAuth redirect)
-    query_params = st.query_params
-    if 'token' in query_params:
-        try:
+    # Google OAuth (dashboard): short-lived httpOnly cookie set by the API
+    # callback. Fragments never reach Streamlit; query-string JWTs are no
+    # longer issued. A leftover ?token= from an in-flight redirect is still
+    # accepted once, then stripped from the URL.
+    token = _oauth_token_from_cookie()
+    if not token:
+        query_params = st.query_params
+        if 'token' in query_params:
             token = query_params['token']
             if isinstance(token, list):
                 token = token[0]
+    if token:
+        try:
             st.session_state.token = token
             st.session_state.authenticated = True
             st.query_params.clear()

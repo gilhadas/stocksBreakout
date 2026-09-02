@@ -87,7 +87,7 @@ def test_dashboard_oauth_link_tags_its_client_type(source):
 
     The callback only knows which app to return to via the 'client' query
     param captured into _oauth_states — an untagged link falls into the
-    'web' default and gets the mobile app's relative "/?token=" redirect,
+    'web' default and gets the mobile app's relative "/#token=" redirect,
     which resolves against the CALLBACK's host (gilhadas-stocks.com), not
     dashboard.gilhadas-stocks.com. Without this tag the bug is silent: the
     login still "succeeds", just on the wrong origin.
@@ -95,11 +95,6 @@ def test_dashboard_oauth_link_tags_its_client_type(source):
     assert re.search(r'/auth/google\?client=dashboard', source), (
         "the dashboard's oauth_url must pass client=dashboard so the "
         "callback knows to redirect back to this app's own host")
-
-
-@pytest.fixture(scope='module')
-def auth_routes_source() -> str:
-    return (Path(__file__).parent.parent / 'trading_api_kit' / 'auth_routes.py').read_text()
 
 
 def test_no_dead_shadow_auth_routes_file():
@@ -117,21 +112,34 @@ def test_no_dead_shadow_auth_routes_file():
         'a second copy here is dead code that invites fixing the wrong file')
 
 
-def test_dashboard_callback_redirect_is_absolute(auth_routes_source):
+def test_dashboard_callback_redirect_is_absolute(monkeypatch):
     """Companion to the app.py tag above: the backend must special-case
     client_type == 'dashboard' with an ABSOLUTE redirect. A relative
-    "/?token=" (the 'web' branch, correct for the mobile app which IS
+    "/#token=" (the 'web' branch, correct for the mobile app which IS
     gilhadas-stocks.com) would resolve against this callback's own host
     and land back on the mobile app instead of the dashboard.
+
+    Calls the real _deliver_token() instead of grepping source text for these
+    strings — a substring check can't tell a name being USED from a name that
+    only appears in a comment or a dead branch (see CLAUDE.md's own repeated
+    lesson on this trap). This exercises the actual redirect + cookie built.
     """
-    m = re.search(
-        r'client_type == "dashboard":\s*\n(?:.*\n){0,8}?\s*return RedirectResponse\(f?"([^"]*)"',
-        auth_routes_source)
-    assert m, 'no client_type == "dashboard" branch found in the callback'
-    redirect = m.group(1)
-    assert redirect.startswith('http://') or redirect.startswith('https://') or '{' in redirect, (
-        f"dashboard redirect {redirect!r} is not absolute — it will resolve "
-        "against gilhadas-stocks.com (this callback's host), not the dashboard")
+    monkeypatch.setenv('DASHBOARD_PUBLIC_URL', 'https://dashboard.gilhadas-stocks.com')
+    from trading_api_kit.auth_routes import _deliver_token
+    from trading_api_kit.config import OAUTH_COOKIE_NAME
+
+    resp = _deliver_token('tok123', 'dashboard')
+
+    location = resp.headers['location']
+    assert location == 'https://dashboard.gilhadas-stocks.com', (
+        f'dashboard redirect must be absolute, got {location!r}')
+    assert '#token=' not in location and '?token=' not in location, (
+        'dashboard must not receive the JWT in the URL')
+
+    set_cookie = resp.headers.get('set-cookie', '')
+    assert f'{OAUTH_COOKIE_NAME}=tok123' in set_cookie, (
+        'dashboard must receive the JWT via an httpOnly cookie, not the URL')
+    assert 'HttpOnly' in set_cookie
 
 
 def test_mobile_app_scheme_matches_app_json():
@@ -154,7 +162,7 @@ def test_dashboard_public_url_documented():
     assert 'DASHBOARD_PUBLIC_URL=' in example, (
         'DASHBOARD_PUBLIC_URL must be documented in deploy/.env.example — '
         "without it in .env, the dashboard OAuth branch falls back to the "
-        "same relative redirect as 'web' and the bug reappears silently")
+        "same relative fragment redirect as 'web' and the bug reappears silently")
 
 
 def test_compose_gives_the_dashboard_a_public_url():

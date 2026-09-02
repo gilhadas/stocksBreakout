@@ -31,8 +31,20 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 # ── JWT ───────────────────────────────────────────────────────────────────────
 
+def _require_api_secret() -> str:
+    """Refuse to sign or verify with a missing/documented-default secret."""
+    secret = (_cfg.API_SECRET_KEY or "").strip()
+    if not secret or secret == _cfg.INSECURE_DEFAULT_API_SECRET:
+        raise RuntimeError(
+            "API_SECRET_KEY is missing or still the documented default. "
+            "Set a unique secret in .env."
+        )
+    return secret
+
+
 def create_user_token(user_id: str, email: str) -> str:
     """Create a signed JWT for a user. Expires in JWT_EXPIRY_DAYS days."""
+    secret = _require_api_secret()
     now = int(time.time())
     payload = {
         "sub":   user_id,
@@ -40,7 +52,7 @@ def create_user_token(user_id: str, email: str) -> str:
         "iat":   now,
         "exp":   now + _cfg.JWT_EXPIRY_DAYS * 86_400,
     }
-    return jwt.encode(payload, _cfg.API_SECRET_KEY, algorithm=_cfg.JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=_cfg.JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> dict | None:
@@ -49,7 +61,7 @@ def decode_token(token: str) -> dict | None:
     the token is expired / invalid.
     """
     try:
-        return jwt.decode(token, _cfg.API_SECRET_KEY, algorithms=[_cfg.JWT_ALGORITHM])
+        return jwt.decode(token, _require_api_secret(), algorithms=[_cfg.JWT_ALGORITHM])
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         return None
 

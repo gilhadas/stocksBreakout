@@ -8,8 +8,22 @@
 # This conftest.py is loaded by pytest before any test file is collected,
 # so the stub is in place before any import happens.
 
+import os
 import sys
 from unittest.mock import MagicMock
+
+# Fail-closed API config: neutralize documented defaults *before* any import of
+# trading_api_kit.config (api.server calls create_app() at import time).
+_TEST_API_SECRET = "ci-test-secret-not-for-production"
+os.environ.setdefault("API_SECRET_KEY", _TEST_API_SECRET)
+if os.environ.get("API_SECRET_KEY") == "change-me-in-production":
+    os.environ["API_SECRET_KEY"] = _TEST_API_SECRET
+os.environ.setdefault("APP_PASSWORD", "")
+if os.environ.get("APP_PASSWORD") == "breakout2026":
+    os.environ["APP_PASSWORD"] = ""
+os.environ.setdefault("CORS_ORIGINS", "")
+if os.environ.get("CORS_ORIGINS", "").strip() == "*":
+    os.environ["CORS_ORIGINS"] = ""
 
 # Stub the entire ib_insync namespace so CI runners without IB Gateway can import
 if 'ib_insync' not in sys.modules:

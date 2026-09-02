@@ -15,8 +15,9 @@ import base64
 import json as _json
 import secrets
 import uuid
+import os
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -30,11 +31,7 @@ from trading_api_kit.auth import (
     hash_password,
     verify_password,
 )
-from trading_api_kit.config import (
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-    GOOGLE_REDIRECT_URI,
-)
+import trading_api_kit.config as _cfg
 from trading_api_kit.database import get_db
 from trading_api_kit.deps import get_current_user
 from trading_api_kit.models import User
@@ -101,10 +98,10 @@ def get_me(current_user: User = Depends(get_current_user)):
 def google_redirect(client: str = "web"):
     """
     Redirect to Google consent screen.
-    client='web'    → POST-login redirect to /?token=...
+    client='web'    → POST-login redirect to /#token=... (fragment, not query)
     client='mobile' → redirect to stocksbreakout://oauth-callback?token=...
     """
-    if not GOOGLE_CLIENT_ID:
+    if not _cfg.GOOGLE_CLIENT_ID:
         raise HTTPException(
             status_code=501,
             detail="Google OAuth not configured — add GOOGLE_CLIENT_ID to .env",
@@ -113,8 +110,8 @@ def google_redirect(client: str = "web"):
     _oauth_states[state] = client
 
     params = {
-        "client_id":     GOOGLE_CLIENT_ID,
-        "redirect_uri":  GOOGLE_REDIRECT_URI,
+        "client_id":     _cfg.GOOGLE_CLIENT_ID,
+        "redirect_uri":  _cfg.GOOGLE_REDIRECT_URI,
         "response_type": "code",
         "scope":         "openid email profile",
         "state":         state,
@@ -130,14 +127,15 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     """
     Exchange Google auth code for id_token, upsert user, return JWT.
 
-    Web: redirects to /?token=...
-    Mobile: redirects to <APP_SCHEME>://oauth-callback?token=...
+    Web: redirects to /#token=... (URL fragment — not sent in Referer or logs).
+    Dashboard: httpOnly cookie + redirect with no token in the URL.
+    Mobile: custom-scheme query (not an HTTP URL, so not Referer-able).
     """
     if state not in _oauth_states:
         raise HTTPException(status_code=400, detail="Invalid OAuth state — please try again")
     client_type = _oauth_states.pop(state)
 
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+    if not _cfg.GOOGLE_CLIENT_ID or not _cfg.GOOGLE_CLIENT_SECRET:
         raise HTTPException(status_code=501, detail="Google OAuth not configured")
 
     # Exchange code for Google tokens
@@ -145,9 +143,9 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
         "https://oauth2.googleapis.com/token",
         data={
             "code":          code,
-            "client_id":     GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri":  GOOGLE_REDIRECT_URI,
+            "client_id":     _cfg.GOOGLE_CLIENT_ID,
+            "client_secret": _cfg.GOOGLE_CLIENT_SECRET,
+            "redirect_uri":  _cfg.GOOGLE_REDIRECT_URI,
             "grant_type":    "authorization_code",
         },
         timeout=10,
@@ -171,7 +169,14 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     if not google_id or not email:
         raise HTTPException(status_code=400, detail="Incomplete Google profile")
 
-    # Upsert: find by google_id first, then by email (account linking)
+    if not _cfg.google_email_allowed(email):
+        raise HTTPException(
+            status_code=403,
+            detail="Google account is not allowlisted",
+        )
+
+    # Upsert: find by google_id first, then by email (account linking).
+    # Linking is only reached for allowlisted emails (checked above).
     user = (
         db.query(User).filter(User.google_id == google_id).first()
         or db.query(User).filter(User.email == email).first()
@@ -196,20 +201,61 @@ def google_callback(code: str, state: str, db: Session = Depends(get_db)):
     db.refresh(user)
 
     token = create_user_token(user.id, user.email)
+    return _deliver_token(token, client_type)
 
-    import os
-    app_scheme = os.getenv("MOBILE_APP_SCHEME", "myapp")
+
+def _cookie_domain_for(url: str) -> str | None:
+    """Parent-domain cookie so api.* can hand a token to dashboard.*.
+
+    Configurable via COOKIE_DOMAIN for deployments other than the default
+    (e.g. a multi-part TLD like .co.uk, or where api/dashboard don't share a
+    domain suffix). Blank COOKIE_DOMAIN derives the parent domain from this
+    URL's own host (last two labels) — correct for gilhadas-stocks.com and
+    any other simple single-part-TLD domain without hardcoding one name.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    override = _cfg.COOKIE_DOMAIN.strip()
+    if override:
+        dom = override if override.startswith(".") else f".{override}"
+        return dom if (host == dom.lstrip(".") or host.endswith(dom)) else None
+    labels = host.split(".")
+    return "." + ".".join(labels[-2:]) if len(labels) >= 2 else None
+
+
+def _deliver_token(token: str, client_type: str) -> RedirectResponse:
+    """Hand the JWT to the client without putting it in an HTTP query string.
+
+    Fragment (#token=) is used for the mobile web SPA (JS can read it; browsers
+    do not send fragments in Referer or to the server). The Streamlit dashboard
+    cannot see fragments, so it gets a short-lived httpOnly cookie instead.
+    Native mobile keeps a custom-scheme query param — that is not an HTTP URL
+    and is not Referer-able; existing app builds parse searchParams.
+    """
+    app_scheme = os.getenv("MOBILE_APP_SCHEME", "stocksbreakout")
 
     if client_type == "mobile":
         return RedirectResponse(f"{app_scheme}://oauth-callback?token={token}")
+
     if client_type == "dashboard":
-        # A second web frontend can live on its OWN origin (e.g. a Streamlit
-        # dashboard on a different subdomain than this callback). The relative
-        # "/?token=" redirect below resolves against THIS callback's host, so
-        # it would silently land such a frontend back on the wrong app instead.
-        # DASHBOARD_PUBLIC_URL must be an absolute URL; if unset, fall through
-        # to the same relative redirect as "web" (safe no-op default).
-        dashboard_url = os.getenv("DASHBOARD_PUBLIC_URL", "")
-        return RedirectResponse(f"{dashboard_url}/?token={token}")
-    # Web: redirect to root — frontend picks up ?token= in useEffect
-    return RedirectResponse(f"/?token={token}")
+        dashboard_url = os.getenv("DASHBOARD_PUBLIC_URL", "").rstrip("/")
+        if not dashboard_url:
+            return _fragment_redirect("/", token)
+        resp = RedirectResponse(dashboard_url)
+        resp.set_cookie(
+            _cfg.OAUTH_COOKIE_NAME,
+            token,
+            max_age=120,
+            httponly=True,
+            secure=dashboard_url.startswith("https://"),
+            samesite="lax",
+            path="/",
+            domain=_cookie_domain_for(dashboard_url),
+        )
+        return resp
+
+    return _fragment_redirect("/", token)
+
+
+def _fragment_redirect(path: str, token: str) -> RedirectResponse:
+    # Token is in the fragment so it never appears in server logs or Referer.
+    return RedirectResponse(f"{path}#token={token}")

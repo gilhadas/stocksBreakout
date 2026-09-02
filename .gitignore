@@ -1,4 +1,5 @@
 *.txt
+*.bak
 .DS_Store
 .env
 /venv

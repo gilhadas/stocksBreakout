@@ -40,7 +40,7 @@ export default function LoginScreen() {
 
       const { Platform } = require('react-native');
       if (Platform.OS === 'web') {
-        // Web: full-page redirect — API sends back to /?token= which useEffect catches
+        // Web: full-page redirect — API sends back to /#token= which useEffect catches
         window.location.href = url;
         return;
       }
@@ -49,7 +49,8 @@ export default function LoginScreen() {
       const result = await WebBrowser.openAuthSessionAsync(url, 'stocksbreakout://oauth-callback');
       if (result.type === 'success' && result.url) {
         const urlObj = new URL(result.url);
-        const token = urlObj.searchParams.get('token');
+        const hashParams = new URLSearchParams(urlObj.hash.replace(/^#/, ''));
+        const token = urlObj.searchParams.get('token') || hashParams.get('token');
         if (token) {
           await saveToken(token);
           router.replace('/(tabs)');

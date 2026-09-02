@@ -82,7 +82,8 @@ await loginWithEmail('user@example.com', 'password');
 const url = await getGoogleAuthUrl('myapp'); // matches MOBILE_APP_SCHEME env
 const result = await WebBrowser.openAuthSessionAsync(url, 'myapp://oauth-callback');
 if (result.type === 'success') {
-  const token = new URL(result.url).searchParams.get('token')!;
+  const token = new URL(result.url).hash.replace(/^#/, '').split('token=')[1]
+    || new URL(result.url).searchParams.get('token')!;
   await saveToken(token);
 }
 ```
@@ -119,6 +120,7 @@ DEFAULT_USER_ID=00000000-0000-0000-0000-000000000001
 GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-xxx
 GOOGLE_REDIRECT_URI=https://my-scanner.example.com/auth/google/callback
+GOOGLE_ALLOWLIST=you@example.com          # extra Google accounts; unlisted accounts get 403
 MOBILE_APP_SCHEME=myapp                   # Custom URL scheme for native OAuth
 
 # Optional — admin
@@ -130,7 +132,7 @@ DATABASE_URL=postgresql://user:pass@localhost/mydb
 # Optional — push notifications
 PUSH_TOKEN_FILE=scanner_output/.expo_push_tokens.json
 
-# Optional — CORS (defaults to *)
+# Optional — CORS (explicit origins; '*' is refused because credentials are on)
 CORS_ORIGINS=https://my-scanner.example.com,https://app.my-scanner.example.com
 ```
 

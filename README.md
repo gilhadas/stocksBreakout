@@ -2013,7 +2013,7 @@ Any device (iPhone, browser)
 
 Open **`https://api.gilhadas-stocks.com`** in any browser — no app install needed.
 
-- Password: `APP_PASSWORD` in `.env` (default: `breakout2026`)
+- Password: `APP_PASSWORD` in `.env` (required for legacy login; there is no documented default — the API will not boot if it is set to a published example password)
 - URL never changes (named Cloudflare tunnel with permanent domain)
 
 ### One-Time Setup
@@ -2148,8 +2148,8 @@ stat -f %Sm api/server.py auto_portfolio.py
 ### Environment Variables (`.env`)
 
 ```bash
-APP_PASSWORD=breakout2026        # Web app login password
-API_SECRET_KEY=<random string>   # JWT signing key
+APP_PASSWORD=<unique password>   # Legacy web/app login; leave blank to disable. Do not use a documented example.
+API_SECRET_KEY=<random string>   # JWT signing key — required; the API refuses to boot on the documented default
 ```
 
 ---
