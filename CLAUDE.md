@@ -2285,7 +2285,17 @@ available cash $1,331 → **$6,272**.
 - The sizing anti-correlation (−0.27) — needs a `--realistic-sizing` arm.
 - §26's degenerate skipped-signal ranking is still unfixed.
 
-## 28. Pinned/Compressed-Range Veto — validated (inconclusive), shipped live (2026-08-21)
+## 28. Pinned/Compressed-Range Veto — validated (inconclusive), shipped live (2026-08-28)
+
+> 🔴 **Date correction (2026-09-03):** every "2026-08-21" date in this section
+> is wrong — `git log` shows the commit that both wrote this section and shipped
+> the veto (`ab90cbd`) is dated **2026-08-28**, and the `sb-scanner-cron`
+> container that could first have run it was not built until **2026-09-01**
+> (`docker inspect` `StartedAt`). Found while diagnosing why STEL/PRA/JHG kept
+> re-admitting into the live book at their frozen merger-arb price on 8/24 and
+> 8/27 despite this section claiming the veto was already live — those
+> admissions simply predate the fix existing (git) or being deployed (image
+> build), not a gap in the veto's logic. No code changed as a result.
 
 Picks up §27's "best lead out of that session": PRA/JHG/HOLX/STEL scored GOLD/
 TREND_CONFIRM while pinned near their merger-arb deal price — collapsed
