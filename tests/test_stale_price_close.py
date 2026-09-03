@@ -127,7 +127,12 @@ def _pos(symbol, entry=100.0, shares=10, stop=None, **extra):
 
 
 def _run(positions, live_prices, capital=100_000.0, **kwargs):
-    """Drive refresh_prices with a fake yfinance; return (result, saved_data)."""
+    """Drive refresh_prices with a fake yfinance; return (result, saved_data).
+
+    Pins today=TODAY so this stays hermetic against the real wall clock —
+    without it, stale_since/date_added fixtures below (all set relative to
+    2026-08-12) silently drift stale/MaxHold as real time passes them."""
+    kwargs.setdefault('today', TODAY)
     data = {'capital': capital, 'positions': positions, 'closed': [],
             'skipped_cash': [], 'processed_files': [], 'equity_history': []}
 

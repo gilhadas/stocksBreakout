@@ -1815,7 +1815,8 @@ def _apply_stale_price(p: dict, has_data: bool, today: str,
 
 def refresh_prices(user_id: str | None = None,
                    book: str | None = DEFAULT_BOOK,
-                   stale_max_days: int = STALE_PRICE_MAX_DAYS) -> dict:
+                   stale_max_days: int = STALE_PRICE_MAX_DAYS,
+                   today: str | None = None) -> dict:
     """
     Fetch current prices for all open positions.
     Auto-close any position where the close-basis price <= stop (close-based —
@@ -1840,12 +1841,13 @@ def refresh_prices(user_id: str | None = None,
     around a concurrent scan_and_add's.
     """
     with _book_lock(user_id, book):
-        return _refresh_prices_impl(user_id=user_id, book=book, stale_max_days=stale_max_days)
+        return _refresh_prices_impl(user_id=user_id, book=book, stale_max_days=stale_max_days, today=today)
 
 
 def _refresh_prices_impl(user_id: str | None = None,
                          book: str | None = DEFAULT_BOOK,
-                         stale_max_days: int = STALE_PRICE_MAX_DAYS) -> dict:
+                         stale_max_days: int = STALE_PRICE_MAX_DAYS,
+                         today: str | None = None) -> dict:
     """The real body of refresh_prices — call refresh_prices(), not this, so
     the book lock in _book_lock actually covers the whole load-modify-save span."""
     import yfinance as yf
@@ -1868,7 +1870,12 @@ def _refresh_prices_impl(user_id: str | None = None,
         except Exception:
             pass
 
-    now_et     = datetime.now(_NY_TZ)
+    # today is test-only injection (real callers never pass it) — keeps this
+    # function hermetic against the wall clock instead of the stale-price and
+    # MaxHold checks below silently drifting as real dates advance past
+    # whatever a test's fixtures assumed "today" was.
+    now_et = (datetime.strptime(today, '%Y-%m-%d').replace(tzinfo=_NY_TZ)
+              if today else datetime.now(_NY_TZ))
     now_str    = now_et.strftime('%Y-%m-%d')
     closed_now = []
     still_open = []
