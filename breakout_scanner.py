@@ -1431,6 +1431,129 @@ async def run_simulation_mode(args, ib, data_source='auto'):
 
 
 
+def _gather_exit_positions_from_portfolios() -> tuple[list[dict], dict[str, list]]:
+    """Collect every open position across every user's manual and auto books,
+    in exit-evaluator format, deduped by symbol, with per-user notification
+    routing.
+
+    Returns (exit_positions, symbol_to_users) where symbol_to_users maps a
+    symbol to [{email, user_id, books}] — 'books' records which book(s) each
+    user holds it in ('manual', 'control', 'autoswap'); it is informational
+    only (notifier.send_exit_notification iterates the list for email/user_id
+    and never branches on its content).
+
+    Falls back to the single unscoped default file for each portfolio type
+    (Portfolio() / auto_portfolio.load(), both with no user_id) if the users
+    DB can't be reached — matching what this always did before per-user
+    accounts existed, and discarding any partial multi-user state collected
+    before the failure so the result is never a mix of the two paths.
+    """
+    from portfolio import Portfolio
+    import auto_portfolio
+
+    exit_positions: list = []
+    existing_symbols: set = set()
+    symbol_to_users: dict[str, list] = {}  # symbol -> [{email, user_id, books}]
+    try:
+        from api.database import get_db as _get_db
+        from api.models import User as _User
+        _db = next(_get_db())
+        _users = _db.query(_User).all()
+
+        # 1. Load from each user's manual portfolio.json (CLAUDE.md §14:
+        # Portfolio() with no user_id read the ONE unscoped file regardless
+        # of who bought what — a manually-bought position got no exit
+        # check, ever, because this loop didn't exist.
+        for _user in _users:
+            _p = Portfolio(user_id=_user.id)
+            for pos in _p.get_positions_as_exit_format():
+                sym = pos['symbol']
+                if sym not in existing_symbols:
+                    exit_positions.append(pos)
+                    existing_symbols.add(sym)
+                _entry = next(
+                    (u for u in symbol_to_users.setdefault(sym, [])
+                     if u['user_id'] == _user.id),
+                    None,
+                )
+                if _entry is None:
+                    symbol_to_users[sym].append(
+                        {'email': _user.email, 'user_id': _user.id, 'books': ['manual']}
+                    )
+                elif 'manual' not in _entry['books']:
+                    _entry['books'].append('manual')
+
+        # 2. Load from ALL users' auto_portfolio (dedup by symbol, track per-user)
+        # Every user holds one book per BOOKS entry (control + autoswap).
+        # Exit evaluation is advisory — the actual auto-close happens in
+        # refresh_prices — so one verdict per SYMBOL is still correct; the
+        # book only affects who is told about it.
+        for _user in _users:
+            for _book in auto_portfolio.BOOKS:
+                _ap_data = auto_portfolio.load(user_id=_user.id, book=_book)
+                for pos in _ap_data.get('positions', []):
+                    sym = pos['symbol']
+                    # Dedup: add to exit list only once
+                    if sym not in existing_symbols:
+                        mode = pos.get('mode', 'swing')
+                        exit_positions.append({
+                            'symbol': sym,
+                            'mode': mode,
+                            'entry': pos['entry_price'],
+                            'entry_date': pos.get('date_added', ''),
+                            'stop': pos['stop'],
+                            'target': pos['target'],
+                            'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
+                            'quality': pos.get('quality', 'PREMIUM'),
+                        })
+                        existing_symbols.add(sym)
+                    # One entry per (symbol, user) — NOT per book.
+                    # Notifier.send_exit_notification appends a signal
+                    # once per matching entry (notifier.py:540-542), so
+                    # a second entry for the same user would list the
+                    # same position twice in their exit email. Which
+                    # books hold it is recorded on the single entry.
+                    _entry = next(
+                        (u for u in symbol_to_users.setdefault(sym, [])
+                         if u['user_id'] == _user.id),
+                        None,
+                    )
+                    if _entry is None:
+                        symbol_to_users[sym].append(
+                            {'email': _user.email, 'user_id': _user.id,
+                             'books': [_book]}
+                        )
+                    elif _book not in _entry['books']:
+                        _entry['books'].append(_book)
+    except Exception as _e:
+        logger.warning(f"Multi-user portfolio load failed, falling back to default: {_e}")
+        # Discard whatever partial multi-user state accumulated before the
+        # failure — the fallback must be exactly the two unscoped single-user
+        # sources, not a mix of some users' data and the default file.
+        exit_positions = []
+        existing_symbols = set()
+        _p = Portfolio()
+        exit_positions.extend(_p.get_positions_as_exit_format())
+        existing_symbols.update(ep['symbol'] for ep in exit_positions)
+        _ap_data = auto_portfolio.load()
+        for pos in _ap_data.get('positions', []):
+            if pos['symbol'] not in existing_symbols:
+                mode = pos.get('mode', 'swing')
+                exit_positions.append({
+                    'symbol': pos['symbol'],
+                    'mode': mode,
+                    'entry': pos['entry_price'],
+                    'entry_date': pos.get('date_added', ''),
+                    'stop': pos['stop'],
+                    'target': pos['target'],
+                    'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
+                    'quality': pos.get('quality', 'PREMIUM'),
+                })
+        symbol_to_users = {}
+
+    return exit_positions, symbol_to_users
+
+
 async def main():
     """Main execution flow"""
     parser = argparse.ArgumentParser(
@@ -1838,81 +1961,7 @@ Examples:
             getattr(args, 'exit_from_portfolio', False) or
             getattr(args, 'both', False)
         ):
-            from portfolio import Portfolio
-            import auto_portfolio
-
-            exit_positions = []
-
-            # 1. Load from portfolio.json
-            p = Portfolio()
-            exit_positions.extend(p.get_positions_as_exit_format())
-
-            # 2. Load from ALL users' auto_portfolio (dedup by symbol, track per-user)
-            existing_symbols = {ep['symbol'] for ep in exit_positions}
-            symbol_to_users: dict[str, list] = {}  # symbol -> [{email, user_id}]
-            try:
-                from api.database import get_db as _get_db
-                from api.models import User as _User
-                _db = next(_get_db())
-                _users = _db.query(_User).all()
-                # Every user holds one book per BOOKS entry (control + autoswap).
-                # Exit evaluation is advisory — the actual auto-close happens in
-                # refresh_prices — so one verdict per SYMBOL is still correct; the
-                # book only affects who is told about it.
-                for _user in _users:
-                    for _book in auto_portfolio.BOOKS:
-                        _ap_data = auto_portfolio.load(user_id=_user.id, book=_book)
-                        for pos in _ap_data.get('positions', []):
-                            sym = pos['symbol']
-                            # Dedup: add to exit list only once
-                            if sym not in existing_symbols:
-                                mode = pos.get('mode', 'swing')
-                                exit_positions.append({
-                                    'symbol': sym,
-                                    'mode': mode,
-                                    'entry': pos['entry_price'],
-                                    'entry_date': pos.get('date_added', ''),
-                                    'stop': pos['stop'],
-                                    'target': pos['target'],
-                                    'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
-                                    'quality': pos.get('quality', 'PREMIUM'),
-                                })
-                                existing_symbols.add(sym)
-                            # One entry per (symbol, user) — NOT per book.
-                            # Notifier.send_exit_notification appends a signal
-                            # once per matching entry (notifier.py:540-542), so
-                            # a second entry for the same user would list the
-                            # same position twice in their exit email. Which
-                            # books hold it is recorded on the single entry.
-                            _entry = next(
-                                (u for u in symbol_to_users.setdefault(sym, [])
-                                 if u['user_id'] == _user.id),
-                                None,
-                            )
-                            if _entry is None:
-                                symbol_to_users[sym].append(
-                                    {'email': _user.email, 'user_id': _user.id,
-                                     'books': [_book]}
-                                )
-                            elif _book not in _entry['books']:
-                                _entry['books'].append(_book)
-            except Exception as _e:
-                logger.warning(f"Multi-user portfolio load failed, falling back to default: {_e}")
-                _ap_data = auto_portfolio.load()
-                for pos in _ap_data.get('positions', []):
-                    if pos['symbol'] not in existing_symbols:
-                        mode = pos.get('mode', 'swing')
-                        exit_positions.append({
-                            'symbol': pos['symbol'],
-                            'mode': mode,
-                            'entry': pos['entry_price'],
-                            'entry_date': pos.get('date_added', ''),
-                            'stop': pos['stop'],
-                            'target': pos['target'],
-                            'timeframe': MODES.get(mode, MODES['swing'])['default_timeframe'],
-                            'quality': pos.get('quality', 'PREMIUM'),
-                        })
-                symbol_to_users = {}
+            exit_positions, symbol_to_users = _gather_exit_positions_from_portfolios()
 
             if not exit_positions:
                 logger.info("Portfolio has no open positions — nothing to evaluate")

@@ -10,11 +10,47 @@ from datetime import datetime
 from utils import load_data, load_text, save_data, save_text, list_files
 
 
+def _decode_user_id_from_token() -> str | None:
+    """Decode user_id from the session's JWT without importing api.auth (avoids
+    heavy deps in Streamlit context). Mirrors _render_auto_portfolio's helper
+    below — the two sections must resolve the same user the same way."""
+    token = st.session_state.get('token', '')
+    if not token:
+        return None
+    try:
+        import base64, json as _json
+        parts = token.split('.')
+        if len(parts) != 3:
+            return None
+        pad = parts[1] + '=' * (-len(parts[1]) % 4)
+        return _json.loads(base64.urlsafe_b64decode(pad)).get('sub')
+    except Exception:
+        return None
+
+
 def _get_portfolio():
-    """Get or create Portfolio instance (cached in session state)."""
-    if 'portfolio_obj' not in st.session_state:
+    """Get or create Portfolio instance (cached in session state).
+
+    Scoped by user_id (CLAUDE.md §14): Portfolio() with no argument reads the
+    single unscoped scanner_output/portfolio/portfolio.json, which is NOT
+    where /manual-portfolio/buy|sell write for a logged-in user (they always
+    write scanner_output/portfolio/<user_id>/portfolio.json). Before this fix
+    a user who bought a position on mobile would open this tab and see an
+    empty portfolio — reading a different file than the one they wrote to.
+
+    Cached object is keyed by which user_id built it, not just its presence:
+    the cache must not keep serving user A's instance after the session's
+    token resolves to user B (e.g. a fresh login replacing an anonymous or
+    stale session).
+    """
+    user_id = _decode_user_id_from_token()
+    if (
+        'portfolio_obj' not in st.session_state
+        or st.session_state.get('portfolio_obj_user_id') != user_id
+    ):
         from portfolio import Portfolio
-        st.session_state['portfolio_obj'] = Portfolio()
+        st.session_state['portfolio_obj'] = Portfolio(user_id=user_id)
+        st.session_state['portfolio_obj_user_id'] = user_id
         st.session_state['prices_fetched_session'] = False  # refresh once per session
     return st.session_state['portfolio_obj']
 
@@ -525,20 +561,7 @@ def _render_auto_portfolio():
     """Auto Virtual Portfolio section — tracks all V9-C signals automatically."""
     import auto_portfolio as ap
 
-    # Decode user_id from JWT without importing api.auth (avoids heavy deps in Streamlit context)
-    def _decode_sub(token: str):
-        try:
-            import base64, json as _json
-            parts = token.split('.')
-            if len(parts) != 3:
-                return None
-            pad = parts[1] + '=' * (-len(parts[1]) % 4)
-            return _json.loads(base64.urlsafe_b64decode(pad)).get('sub')
-        except Exception:
-            return None
-
-    _token = st.session_state.get('token', '')
-    _user_id = _decode_sub(_token) if _token else None
+    _user_id = _decode_user_id_from_token()
 
     st.subheader("Auto Virtual Portfolio (V9-H Signals)")
     st.caption(

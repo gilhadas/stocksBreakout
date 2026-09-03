@@ -27,6 +27,12 @@ SNAPSHOTS_DIR = f"{PORTFOLIO_DIR}/snapshots"
 PORTFOLIO_FILE = f"{PORTFOLIO_DIR}/portfolio.json"
 
 
+def _portfolio_dir_for(user_id: str | None) -> str:
+    """user_id=None keeps the original unscoped path — nothing that already
+    calls Portfolio() with no user_id changes behavior."""
+    return PORTFOLIO_DIR if not user_id else f"{PORTFOLIO_DIR}/{user_id}"
+
+
 def _atomic_write(path: str, data: dict):
     """Write JSON atomically: write to .tmp then os.replace() (local), or save_json (S3)."""
     save_json(data, path)
@@ -42,14 +48,32 @@ class Portfolio:
         update_prices(price_map)
         daily_snapshot()
         get_summary() / get_performance()
+
+    Storage is scoped by user_id (default None = the original single-book
+    layout at PORTFOLIO_FILE). Without this, Portfolio() always read/wrote
+    the one unscoped file regardless of who was asking — the mobile app's
+    /manual-portfolio/buy|sell already wrote to a genuinely per-user path
+    (api/server.py's _portfolio_key, always populated for an authenticated
+    request), so a manually-bought position could never be seen by anything
+    that instantiated Portfolio() with no argument: the cron exit-evaluator
+    and monitor (breakout_scanner.py), the Streamlit dashboard's manual
+    portfolio tab, and the surge monitor all read the wrong file, silently.
+    A bought position got no stop-loss check, no exit alert, ever, with
+    nothing anywhere reporting it — found 2026-09 while investigating an
+    unrelated timezone bug in the same buy/sell endpoints (CLAUDE.md §14).
     """
 
-    def __init__(self, capital: float = None):
-        if not _is_cloud():
-            os.makedirs(PORTFOLIO_DIR, exist_ok=True)
-            os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
+    def __init__(self, capital: float = None, user_id: str | None = None):
+        self.user_id = user_id
+        _dir = _portfolio_dir_for(user_id)
+        self._portfolio_file = f"{_dir}/portfolio.json"
+        self._snapshots_dir = f"{_dir}/snapshots"
 
-        loaded = load_json(PORTFOLIO_FILE)
+        if not _is_cloud():
+            os.makedirs(_dir, exist_ok=True)
+            os.makedirs(self._snapshots_dir, exist_ok=True)
+
+        loaded = load_json(self._portfolio_file)
         if loaded is not None:
             self._data = loaded
             # Backfill missing keys in case the file was written by a different schema
@@ -83,7 +107,7 @@ class Portfolio:
     # ------------------------------------------------------------------
     def _save(self):
         self._data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-        _atomic_write(PORTFOLIO_FILE, self._data)
+        _atomic_write(self._portfolio_file, self._data)
 
     # ------------------------------------------------------------------
     # Position management
@@ -301,7 +325,7 @@ class Portfolio:
             'positions_count': len(self._data['positions']),
         }
 
-        snap_file = f"{SNAPSHOTS_DIR}/snap_{snap['date']}.json"
+        snap_file = f"{self._snapshots_dir}/snap_{snap['date']}.json"
         _atomic_write(snap_file, snap)
         logger.info(f"Portfolio snapshot saved: ${snap['total_value']:,.2f}")
         return snap
@@ -355,7 +379,7 @@ class Portfolio:
 
         for i in range(10):
             check = target_date - timedelta(days=i)
-            snap_file = f"{SNAPSHOTS_DIR}/snap_{check.strftime('%Y-%m-%d')}.json"
+            snap_file = f"{self._snapshots_dir}/snap_{check.strftime('%Y-%m-%d')}.json"
             snap = load_json(snap_file)
             if snap is not None:
                 # Skip snapshots from on or before this portfolio was created
@@ -369,7 +393,7 @@ class Portfolio:
     def ensure_today_snapshot(self):
         """Save today's snapshot if one doesn't exist yet. Idempotent."""
         today_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d')
-        snap_file = f"{SNAPSHOTS_DIR}/snap_{today_str}.json"
+        snap_file = f"{self._snapshots_dir}/snap_{today_str}.json"
         if load_json(snap_file) is None:
             self.daily_snapshot()
             return True
@@ -408,7 +432,7 @@ class Portfolio:
                 break
             if created_date and check < created_date:
                 continue  # skip pre-creation snapshots
-            snap_file = f"{SNAPSHOTS_DIR}/snap_{check.strftime('%Y-%m-%d')}.json"
+            snap_file = f"{self._snapshots_dir}/snap_{check.strftime('%Y-%m-%d')}.json"
             snap = load_json(snap_file)
             if snap is not None:
                 return round(self._current_portfolio_value() - snap['total_value'], 2)
@@ -421,9 +445,9 @@ class Portfolio:
         """
         # Load all snapshots sorted by date
         snaps = []
-        for fname in sorted(list_files(SNAPSHOTS_DIR, 'snap_*.json')):
+        for fname in sorted(list_files(self._snapshots_dir, 'snap_*.json')):
             try:
-                snap = load_json(f"{SNAPSHOTS_DIR}/{fname}")
+                snap = load_json(f"{self._snapshots_dir}/{fname}")
                 if snap is not None:
                     snaps.append(snap)
             except Exception:
