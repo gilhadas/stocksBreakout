@@ -1077,6 +1077,72 @@ def close_basis_history(hist, now_et) -> Optional[pd.DataFrame]:
     return hist
 
 
+def pace_adjust_volume_ratio(df: 'pd.DataFrame', now_et, max_projection: float = 4.0):
+    """
+    Project today's still-forming Vol_Ratio onto a full-day-equivalent basis.
+
+    ``calculate_all_indicators`` computes ``Vol_Ratio`` as raw volume over a
+    20-day average — correct for a completed bar, but a live intraday scan
+    (docker/crontab's 9:35 ET swing scan is 5 minutes after the open) fetches
+    a "today" bar whose volume is only a few minutes old against a denominator
+    built from full trading days. That understates Vol_Ratio for most symbols
+    (or, for a genuine gap-and-go with a heavy opening print, can overstate
+    it) — either way it is not the like-for-like comparison every detector's
+    ``vol_confirm = latest['Vol_Ratio'] >= vol_thresh`` check assumes it is.
+
+    Unlike :func:`close_basis_history`, this does NOT drop today's bar —
+    that would silence new-signal detection on every intraday scan until
+    15:30 ET, defeating the point of an early scan. Price/candle checks
+    keep reading today's real, developing bar; only the volume comparison
+    is rescaled.
+
+    Rule: while the session is open and today's bar is still forming, scale
+    today's raw volume by (full session minutes / minutes elapsed since the
+    9:30 ET open), against YESTERDAY's Vol_MA — a clean 20-day trailing
+    average that does not itself include today's partial volume (using
+    today's own Vol_MA would dilute the baseline with the same undercount
+    this function exists to correct). This is a coarse linear estimate —
+    real intraday volume is front- and back-loaded (heavier near the open
+    and close than midday), so it tends to overstate the projection in the
+    first 30-60 minutes — capped at `max_projection` so an early-session
+    read can't produce an absurd multiple.
+
+    Only meaningful for daily bars, and only ever wired into the live scan
+    path (``orchestrator._scan_symbol`` passes a ``live_now_et`` kwarg into
+    each detector). Backtest's direct ``detector.detect()`` calls never pass
+    it, so historical replay is untouched by construction.
+    """
+    if (df is None or df.empty or 'Vol_Ratio' not in df.columns
+            or 'Vol_MA' not in df.columns or 'volume' not in df.columns):
+        return df
+    last_ts = df.index[-1]
+    last_date = last_ts.date() if hasattr(last_ts, 'date') else last_ts
+    if last_date != now_et.date():
+        return df  # not today's bar — nothing to project
+
+    session_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    session_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    if now_et >= session_close or now_et < session_open:
+        return df  # bar is final, or the session hasn't opened yet
+
+    if len(df) < 2:
+        return df
+    baseline = df['Vol_MA'].iloc[-2]
+    if baseline is None or pd.isna(baseline) or baseline <= 0:
+        return df
+
+    elapsed_min = max((now_et - session_open).total_seconds() / 60.0, 1.0)
+    session_min = (session_close - session_open).total_seconds() / 60.0
+    projection = min(session_min / elapsed_min, max_projection)
+
+    raw_vol_today = df['volume'].iloc[-1]
+    projected_ratio = (raw_vol_today * projection) / baseline
+
+    df = df.copy()
+    df.iloc[-1, df.columns.get_loc('Vol_Ratio')] = projected_ratio
+    return df
+
+
 def setup_logging(log_file: str = None, debug: bool = False):
     """
     Setup logging configuration with output to nested folder

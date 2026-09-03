@@ -361,7 +361,21 @@ class ScannerOrchestrator:
                 if len(df) < 50:
                     logger.scan(f"{symbol}: skip — insufficient bars ({len(df)} < 50)")
                     return None
-                
+
+                # Live intraday scans (docker/crontab's 9:35 ET swing scan is 5
+                # minutes after the open) fetch a daily bar whose last row is
+                # still forming — Vol_Ratio computed off it compares a few
+                # minutes of volume against a full-day 20-day average. Passed
+                # to every detector below; None on intraday timeframes (a 5-min
+                # bar is already complete once it closes, no pacing applies)
+                # and never set by backtest's direct detector.detect() calls,
+                # so historical replay is untouched. See utils.pace_adjust_volume_ratio.
+                live_now_et = (
+                    datetime.now(_NY_TZ)
+                    if 'min' not in timeframe.lower() and 'hour' not in timeframe.lower()
+                    else None
+                )
+
                 # Check spread for scalping (skip in mock/yfinance fallback — no real-time quotes)
                 spread_pct = None
                 if mode == 'scalping' and not self.market_data.yf_fallback:
@@ -407,6 +421,7 @@ class ScannerOrchestrator:
                     spy_df=spy_df,
                     sector_df=sector_df,
                     daily_df=daily_df,
+                    live_now_et=live_now_et,
                 )
                 
                 # V5: Multi-TF confirmation for swing mode
@@ -517,11 +532,13 @@ class ScannerOrchestrator:
                         if signal is None:
                             # Try continuation + trend_confirm only — skip bounce/sma20_cross in bear macro
                             signal = self.detector.detect_continuation(
-                                df, symbol, mode, timeframe, spy_perf
+                                df, symbol, mode, timeframe, spy_perf,
+                                live_now_et=live_now_et,
                             )
                             if signal is None:
                                 signal = self.detector.detect_trend_confirm(
-                                    df, symbol, mode, timeframe, spy_perf
+                                    df, symbol, mode, timeframe, spy_perf,
+                                    live_now_et=live_now_et,
                                 )
                             return signal
                     elif regime == 'BEARISH':
@@ -532,11 +549,13 @@ class ScannerOrchestrator:
                         else:
                             # No breakout — allow continuation + trend_confirm, block BOUNCE/SMA20_CROSS
                             signal = self.detector.detect_continuation(
-                                df, symbol, mode, timeframe, spy_perf
+                                df, symbol, mode, timeframe, spy_perf,
+                                live_now_et=live_now_et,
                             )
                             if signal is None:
                                 signal = self.detector.detect_trend_confirm(
-                                    df, symbol, mode, timeframe, spy_perf
+                                    df, symbol, mode, timeframe, spy_perf,
+                                    live_now_et=live_now_et,
                                 )
                             return signal
 
@@ -550,7 +569,8 @@ class ScannerOrchestrator:
                 )
                 if signal is None and detect_bounces and not bounce_gated:
                     signal = self.detector.detect_bounce(
-                        df, symbol, mode, timeframe
+                        df, symbol, mode, timeframe,
+                        live_now_et=live_now_et,
                     )
                 elif signal is None and bounce_gated and detect_bounces:
                     logger.debug(
@@ -560,22 +580,26 @@ class ScannerOrchestrator:
 
                 if signal is None:
                     signal = self.detector.detect_continuation(
-                        df, symbol, mode, timeframe, spy_perf
+                        df, symbol, mode, timeframe, spy_perf,
+                        live_now_et=live_now_et,
                     )
 
                 if signal is None:
                     signal = self.detector.detect_trend_confirm(
-                        df, symbol, mode, timeframe, spy_perf
+                        df, symbol, mode, timeframe, spy_perf,
+                        live_now_et=live_now_et,
                     )
 
                 if signal is None:
                     signal = self.detector.detect_sma20_cross(
-                        df, symbol, mode, timeframe, spy_perf
+                        df, symbol, mode, timeframe, spy_perf,
+                        live_now_et=live_now_et,
                     )
 
                 if signal is None and SLOW_GRIND_CONFIG.get('enabled'):
                     signal = self.detector.detect_slow_grind(
-                        df, symbol, mode, timeframe, spy_perf
+                        df, symbol, mode, timeframe, spy_perf,
+                        live_now_et=live_now_et,
                     )
 
                 return signal

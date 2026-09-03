@@ -21,6 +21,7 @@ from indicators import (
 )
 from market_data import check_liquidity
 from pattern_recognition import get_pattern_score
+from utils import pace_adjust_volume_ratio
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,9 @@ class BreakoutDetector:
         df = calculate_all_indicators(
             df, cfg['trend_type'], cfg.get('trend_period'), timeframe
         )
+        live_now_et = kwargs.get('live_now_et')
+        if live_now_et is not None:
+            df = pace_adjust_volume_ratio(df, live_now_et)
 
         # Pinned/compressed-range check (deal-pin veto, see PINNED_RANGE_CONFIG) —
         # computed once up front since it's used by the GOLD/PREMIUM downgrade below.
@@ -1167,7 +1171,10 @@ class BreakoutDetector:
         # Calculate indicators if not present
         if 'ATR' not in df.columns:
             df = calculate_all_indicators(df, cfg['trend_type'], cfg.get('trend_period'), timeframe)
-        
+        live_now_et = kwargs.get('live_now_et')
+        if live_now_et is not None:
+            df = pace_adjust_volume_ratio(df, live_now_et)
+
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         
@@ -1350,6 +1357,9 @@ class BreakoutDetector:
             df = calculate_all_indicators(
                 df, cfg['trend_type'], cfg.get('trend_period'), timeframe
             )
+        live_now_et = kwargs.get('live_now_et')
+        if live_now_et is not None:
+            df = pace_adjust_volume_ratio(df, live_now_et)
 
         # Count consecutive green candles from the latest bar backward
         streak = 0
@@ -1562,6 +1572,9 @@ class BreakoutDetector:
             df = calculate_all_indicators(
                 df, mcfg['trend_type'], mcfg.get('trend_period'), timeframe
             )
+        live_now_et = kwargs.get('live_now_et')
+        if live_now_et is not None:
+            df = pace_adjust_volume_ratio(df, live_now_et)
 
         latest = df.iloc[-1]
         window = df.iloc[-lookback:]
@@ -1745,6 +1758,9 @@ class BreakoutDetector:
             df = calculate_all_indicators(
                 df, cfg['trend_type'], cfg.get('trend_period'), timeframe
             )
+        live_now_et = kwargs.get('live_now_et')
+        if live_now_et is not None:
+            df = pace_adjust_volume_ratio(df, live_now_et)
 
         sma150 = df['Trend_Line']
         sma50  = df['close'].rolling(50).mean()
@@ -1885,6 +1901,9 @@ class BreakoutDetector:
             df = calculate_all_indicators(
                 df, cfg['trend_type'], cfg.get('trend_period'), timeframe
             )
+        live_now_et = kwargs.get('live_now_et')
+        if live_now_et is not None:
+            df = pace_adjust_volume_ratio(df, live_now_et)
 
         # Pinned/compressed-range check (deal-pin veto, see PINNED_RANGE_CONFIG) —
         # same primitive detect()/detect_trend_confirm() already gate on. A stock
