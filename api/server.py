@@ -95,8 +95,9 @@ def _load_portfolio_json(user_id: str) -> dict:
 
 def _save_portfolio_json(data: dict, user_id: str):
     import json, boto3, toml
-    from datetime import datetime, timezone, timedelta
-    ny_tz = timezone(timedelta(hours=-4))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ny_tz = ZoneInfo('America/New_York')
     data["last_updated"] = datetime.now(ny_tz).isoformat()
     body = json.dumps(data, indent=2)
     s3_key, local = _portfolio_key(user_id)
@@ -439,8 +440,9 @@ def compute_stops(current_user: User = Depends(get_current_user)):
         except Exception as e:
             updated[sym] = {**pos, "stop_note": str(e)}
 
-    from datetime import datetime, timezone, timedelta
-    ny_tz = timezone(timedelta(hours=-4))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ny_tz = ZoneInfo('America/New_York')
     data["positions"] = updated
     data["last_updated"] = datetime.now(ny_tz).isoformat()
 
@@ -468,8 +470,9 @@ class SellRequest(BaseModel):
 
 @app.post("/manual-portfolio/sell")
 def sell_position(req: SellRequest, current_user: User = Depends(get_current_user)):
-    from datetime import datetime, timezone, timedelta
-    ny_tz = timezone(timedelta(hours=-4))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ny_tz = ZoneInfo('America/New_York')
 
     data = _load_portfolio_json(current_user.id)
     positions = data.get("positions", {})
@@ -519,8 +522,9 @@ class BuyRequest(BaseModel):
 
 @app.post("/manual-portfolio/buy")
 def buy_position(req: BuyRequest, current_user: User = Depends(get_current_user)):
-    from datetime import datetime, timezone, timedelta
-    ny_tz = timezone(timedelta(hours=-4))
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ny_tz = ZoneInfo('America/New_York')
 
     data = _load_portfolio_json(current_user.id)
     positions = data.get("positions", {})
@@ -655,7 +659,10 @@ def portfolio_recalculate_endpoint(
     # Validate the book on the request thread — inside _run it would only ever
     # surface as a job error the caller has to poll for.
     _bk = _book_of(req)
-    _RECALC_JOBS[job_id] = {"status": "running", "started": time.time(), "book": _bk}
+    _RECALC_JOBS[job_id] = {
+        "status": "running", "started": time.time(), "book": _bk,
+        "user_id": current_user.id,
+    }
 
     def _run():
         import auto_portfolio as ap
@@ -670,9 +677,11 @@ def portfolio_recalculate_endpoint(
             summary["backup_path"] = result.get("backup_path")
             if result.get("warning"):
                 summary["warning"] = result["warning"]
-            _RECALC_JOBS[job_id] = {"status": "done", "result": _clean(summary)}
+            _RECALC_JOBS[job_id] = {"status": "done", "result": _clean(summary),
+                                     "user_id": current_user.id}
         except Exception as exc:
-            _RECALC_JOBS[job_id] = {"status": "error", "error": str(exc)}
+            _RECALC_JOBS[job_id] = {"status": "error", "error": str(exc),
+                                     "user_id": current_user.id}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id, "status": "running"}
@@ -682,7 +691,11 @@ def portfolio_recalculate_endpoint(
 def portfolio_recalculate_status(job_id: str, current_user: User = Depends(get_current_user)):
     import time
     job = _RECALC_JOBS.get(job_id)
-    if not job:
+    # Same 404 whether the job_id is unknown or belongs to another user — a
+    # distinct "forbidden" response would confirm the id exists to anyone who
+    # merely guessed or intercepted it (job_id is a bare uuid4 hex fragment
+    # with no other access control on this endpoint besides being logged in).
+    if not job or job.get("user_id") != current_user.id:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.get("status") == "running" and (time.time() - job.get("started", 0)) > _RECALC_JOB_TTL:
         _RECALC_JOBS[job_id] = {**job, "status": "error", "error": "timeout"}
