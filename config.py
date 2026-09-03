@@ -681,6 +681,17 @@ FINBERT_PROMOTION = {
         'min_net':   0.60,   # raised from 0.40 — strong bullish consensus
         'min_headlines': 3,  # NEW: at least 3 headlines analyzed
     },
+    # GOLD means "passed hard structural gates" for the detectors that define
+    # one: BREAKOUT (Type '' or 'Momentum', scanner.py detect() gold_gates —
+    # R:R>=3, trend line, vol_ratio>=2, near 52w high, hot sector) and
+    # TREND_CONFIRM (vol_ratio_gold + golden cross). BOUNCE/CONTINUATION/
+    # SMA20_CROSS/PULLBACK/SLOW_GRIND have NO native GOLD tier at all — for
+    # those, sentiment alone must not mint a label that downstream code
+    # (regime-restricted admission, BOUNCE notification gate, priority
+    # ranking, quality_risk_penalty) treats as hard-gated-safe. Only these
+    # types may be promoted PREMIUM->GOLD by FinBERT; every other type stays
+    # capped at PREMIUM regardless of sentiment strength.
+    'premium_to_gold_types': {'', 'Momentum', 'TREND_CONFIRM'},
 }
 
 # --- Sector Baskets (momentum trigger for correlated groups) ---

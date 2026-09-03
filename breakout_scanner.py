@@ -90,6 +90,76 @@ async def connect_to_ib(live: bool = False, mock: bool = False, mock_mode: str =
     return None
 
 
+def _apply_finbert_promotion(results: list) -> None:
+    """Bullish FinBERT at sufficient confidence promotes HIGH->PREMIUM or
+    PREMIUM->GOLD in place. Promotion-only: bearish FinBERT does not downgrade.
+
+    PREMIUM->GOLD is capped to config.FINBERT_PROMOTION['premium_to_gold_types']
+    — only detector types with a real structural GOLD gate (BREAKOUT, TREND_CONFIRM)
+    may be promoted into it. BOUNCE/CONTINUATION/SMA20_CROSS/etc. have no native
+    GOLD tier, and downstream code (regime-restricted admission, the BOUNCE
+    notification gate, priority ranking, quality_risk_penalty) treats GOLD as
+    hard-gated-safe — sentiment alone must not mint that label for them.
+    """
+    try:
+        from config import FINBERT_PROMOTION as _fb_promo_cfg
+        if not _fb_promo_cfg.get('enabled', True):
+            return
+        _h2p = _fb_promo_cfg['high_to_premium']
+        _p2g = _fb_promo_cfg['premium_to_gold']
+        _p2g_types = _fb_promo_cfg.get(
+            'premium_to_gold_types', {'', 'Momentum', 'TREND_CONFIRM'})
+        for sig in results:
+            fb_label = sig.get('FinBERT')
+            fb_score = sig.get('FinBERT_Score', 0.0)
+            fb_net   = sig.get('FinBERT_Net', 0.0)
+            quality  = sig.get('Quality', '')
+            sym      = sig.get('Symbol', '')
+            sig_type = sig.get('Type', '')
+
+            if fb_label != 'bullish':
+                continue
+
+            # Use actual headline count stored during enrichment, fall back to heuristic
+            _total_headlines = sig.get('FinBERT_Total', 0)
+            if _total_headlines == 0:
+                _total_headlines = 1
+                if abs(fb_net) < 1.0 and fb_net != 0.0:
+                    _total_headlines = max(2, int(round(1 / max(abs(fb_net), 0.01))))
+
+            _h2p_min_hl = _h2p.get('min_headlines', 1)
+            _p2g_min_hl = _p2g.get('min_headlines', 1)
+
+            if quality == 'HIGH' and fb_score >= _h2p['min_score'] and fb_net >= _h2p['min_net'] and _total_headlines >= _h2p_min_hl:
+                sig['Quality'] = 'PREMIUM'
+                sig['FinBERT_Promoted'] = 'HIGH→PREMIUM'
+                logger.info(
+                    f"  ⬆ {sym} promoted HIGH→PREMIUM "
+                    f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f}, ~{_total_headlines} headlines)"
+                )
+            elif (quality == 'PREMIUM' and sig_type in _p2g_types
+                    and fb_score >= _p2g['min_score'] and fb_net >= _p2g['min_net']
+                    and _total_headlines >= _p2g_min_hl):
+                sig['Quality'] = 'GOLD'
+                sig['FinBERT_Promoted'] = 'PREMIUM→GOLD'
+                logger.info(
+                    f"  ⬆ {sym} promoted PREMIUM→GOLD "
+                    f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f}, ~{_total_headlines} headlines)"
+                )
+            elif (quality == 'PREMIUM' and sig_type not in _p2g_types
+                    and fb_score >= _p2g['min_score'] and fb_net >= _p2g['min_net']
+                    and _total_headlines >= _p2g_min_hl):
+                # Sentiment cleared the GOLD bar, but this Type has no native
+                # structural GOLD gate to promote INTO. Stay at PREMIUM.
+                logger.info(
+                    f"  ⊘ {sym} FinBERT bullish enough for GOLD "
+                    f"(score={fb_score:.2f}) but Type={sig_type!r} has no "
+                    f"native GOLD gate — staying PREMIUM"
+                )
+    except Exception as _fp_e:
+        logger.debug(f"FinBERT promotion skipped: {_fp_e}")
+
+
 async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notifier):
     """Execute scan mode"""
     # Load watchlist
@@ -236,49 +306,7 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
             logger.warning(f"FinBERT enrichment failed: {_e}")
 
     # ── FinBERT quality promotion ─────────────────────────────────────────────
-    # Bullish FinBERT at sufficient confidence promotes HIGH→PREMIUM or PREMIUM→GOLD.
-    # Promotion-only: bearish FinBERT does NOT downgrade signals.
-    try:
-        from config import FINBERT_PROMOTION as _fb_promo_cfg
-        if _fb_promo_cfg.get('enabled', True):
-            _h2p = _fb_promo_cfg['high_to_premium']
-            _p2g = _fb_promo_cfg['premium_to_gold']
-            for sig in results:
-                fb_label = sig.get('FinBERT')
-                fb_score = sig.get('FinBERT_Score', 0.0)
-                fb_net   = sig.get('FinBERT_Net', 0.0)
-                quality  = sig.get('Quality', '')
-                sym      = sig.get('Symbol', '')
-
-                if fb_label != 'bullish':
-                    continue
-
-                # Use actual headline count stored during enrichment, fall back to heuristic
-                _total_headlines = sig.get('FinBERT_Total', 0)
-                if _total_headlines == 0:
-                    _total_headlines = 1
-                    if abs(fb_net) < 1.0 and fb_net != 0.0:
-                        _total_headlines = max(2, int(round(1 / max(abs(fb_net), 0.01))))
-
-                _h2p_min_hl = _h2p.get('min_headlines', 1)
-                _p2g_min_hl = _p2g.get('min_headlines', 1)
-
-                if quality == 'HIGH' and fb_score >= _h2p['min_score'] and fb_net >= _h2p['min_net'] and _total_headlines >= _h2p_min_hl:
-                    sig['Quality'] = 'PREMIUM'
-                    sig['FinBERT_Promoted'] = 'HIGH→PREMIUM'
-                    logger.info(
-                        f"  ⬆ {sym} promoted HIGH→PREMIUM "
-                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f}, ~{_total_headlines} headlines)"
-                    )
-                elif quality == 'PREMIUM' and fb_score >= _p2g['min_score'] and fb_net >= _p2g['min_net'] and _total_headlines >= _p2g_min_hl:
-                    sig['Quality'] = 'GOLD'
-                    sig['FinBERT_Promoted'] = 'PREMIUM→GOLD'
-                    logger.info(
-                        f"  ⬆ {sym} promoted PREMIUM→GOLD "
-                        f"(FinBERT bullish {fb_score:.2f}, net={fb_net:+.2f}, ~{_total_headlines} headlines)"
-                    )
-    except Exception as _fp_e:
-        logger.debug(f"FinBERT promotion skipped: {_fp_e}")
+    _apply_finbert_promotion(results)
 
     # ── 4. Finnhub buzz (article-volume-vs-baseline) ─────────────────────────
     # Orthogonal to tone: tells us a name is getting unusual attention.

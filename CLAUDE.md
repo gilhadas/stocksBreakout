@@ -2581,3 +2581,79 @@ logic, fills, bounce filters, or monitor trails.
   `deploy/OPERATIONS.md`, and CLAUDE.md in favor of `$ORACLE_HOST` / `$SSH_KEY`
   (private ops note).
 
+## 32. Handoff audit follow-through: SURGE breadth sentinel, FinBERT GOLD gate, sizing-parity nuance (2026-09-02/03)
+
+Working a 19-item external handoff document in priority order (§28-31 already
+covered several of its items). Two more closed, one documented-only.
+
+### Item #11 — SURGE breadth fail-open: FIXED (commit `780d798`, deployed)
+`classify_market_regime()`'s intraday fallback checked `breadth == 0` to mean
+"no premarket breadth data" — but that is the exact value a real premarket
+scan writes when it genuinely finds zero gappers. A calm, non-broad breadth
+reading (0 gappers) on a day SPY gapped hard from a macro event was being
+treated identically to "we never measured breadth," incorrectly firing SURGE.
+Fixed with `None` as the explicit unmeasured-sentinel (`utils.py`,
+`orchestrator.py`'s synthesized fallback, `check_signal.py`'s mirror);
+`premarket_monitor.py`'s real writer (a genuine `len(gappers)`, 0 included)
+was untouched. 11 tests, mutation-verified.
+
+### Item #12 — ATR must exclude the signal spike bar: NOT A BUG
+Both entry-time ATR (`quantkit/indicators.py`, Wilder EWM) and the live
+trailing stop (`auto_portfolio.py::_raise_atr_trail`, 15-bar mean)
+intentionally include the current/signal bar — that's standard ATR
+convention, the spike bar's weight is diluted to ~7% of the average, and the
+champion strategy's validated backtests were built and measured with this
+exact convention (§7: "trail activates from entry bar 1"). No change.
+
+### Item #10 — FinBERT GOLD bypass: FIXED (uncommitted as of this write-up)
+`_apply_finbert_promotion()` (extracted from `run_scan_mode`'s inline block,
+`breakout_scanner.py`) promoted PREMIUM→GOLD on sentiment score alone,
+regardless of signal `Type`. But `detect_bounce()`/`detect_continuation()`/
+`detect_sma20_cross()` never natively assign `Quality='GOLD'` — only
+`detect()` (BREAKOUT/Momentum, `gold_gates`: R:R≥3, trend line, vol≥2x, near
+52w high, hot sector) and `detect_trend_confirm()` (vol_ratio_gold + golden
+cross) define a real structural GOLD gate. So the *only* path a BOUNCE ever
+reached GOLD was a bullish headline — yet downstream code treats GOLD as
+"passed hard gates": the regime-restricted watchlist admits BOUNCE in
+CHOPPY/RED_MARKET only if `Quality == 'GOLD'`, the notification gate is
+literally commented `# GOLD only — PREMIUM bounces have negative expected
+value`, and `auto_portfolio.py` gives GOLD top priority rank and a 0.0
+`quality_risk_penalty`.
+
+**Fix, per explicit user choice ("ship the narrow block now" over "label
+only" or "document only"):** `config.FINBERT_PROMOTION['premium_to_gold_types']
+= {'', 'Momentum', 'TREND_CONFIRM'}` — only these types may be promoted into
+GOLD; everything else caps at PREMIUM regardless of sentiment strength.
+HIGH→PREMIUM is unaffected for all types. 15 tests
+(`tests/test_finbert_gold_gate.py`), mutation-verified.
+
+⚠ **Known, accepted consequence — not a bug, a chosen trade-off:** GOLD
+BOUNCE had no other source, so this closes off the *only* path BOUNCE
+currently has to GOLD. Live effect: BOUNCE stops being admitted to the
+regime-restricted watchlist in CHOPPY/RED_MARKET/BEARISH, and the BOUNCE
+notification gate (`GOLD only`) goes permanently silent, until/unless a real
+structural GOLD gate is designed for BOUNCE specifically. This is a genuine
+strategy change to a currently-live rule, not validated by backtest before
+shipping — the user chose to accept that rather than leave the mislabeling
+live. Worth a `--realistic-sizing` backtest ablation before/after to quantify
+the actual cost, and worth designing what a legitimate "structurally-gated
+GOLD BOUNCE" would even mean (the historical "GOLD bounce +1.72% vs PREMIUM
+-1.97%" comparison this gate's comment cites can only have been measuring
+FinBERT-promoted vs non-promoted BOUNCE trades, since native GOLD BOUNCE
+doesn't exist — that's a sentiment-momentum confound, not evidence of a hard
+structural effect).
+
+### Item #9 — sizing parity: documented nuance, no code change
+§11 already documents that backtest sizing omits live's quality/ATR/event/
+balance multiplier stack. Not previously spelled out: live has **no
+risk-based (stop-distance) position sizing at all** — it only ever does
+capital% × `QUALITY_SIZING` × `_compute_atr_adjustment` (volatility-scaling,
+not risk-scaling) × event/balance multipliers, capped at
+`max_single_position_pct` (10%). The backtest's `--realistic-sizing` arm adds
+a `qty_by_risk = capital × MAX_RISK_PCT(2%) / risk_per_share` leg with **no
+live counterpart** — so "realistic-sizing" isn't fully realistic either: it
+adds a constraint live doesn't have while still missing several live has.
+Net direction on sizing is untested. Not fixed here — reworking either
+formula would silently invalidate every headline backtest number in §7-§13
+and needs its own dedicated validation pass, per §11's own standing rule.
+
