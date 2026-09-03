@@ -983,7 +983,13 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
         manual_positions = _portfolio.get_positions_as_exit_format()
         all_positions.extend(manual_positions)
         logger.info(f"Loaded {len(manual_positions)} positions from portfolio.json")
-    else:
+    elif not from_auto_portfolio:
+        # CSV path — only when NEITHER book was requested. This was `else:`,
+        # which bound to `if from_portfolio:` alone: running with just
+        # --monitor-auto-portfolio loaded the auto book above and then fell in
+        # here, warned "called without ... and no --monitor path", and returned,
+        # silently discarding the positions it had just read. docker/crontab
+        # always passes both flags, so the bug never surfaced in production.
         if not args.monitor:
             logger.warning("run_monitor_mode called without from_auto_portfolio/from_portfolio and no --monitor path")
             return
@@ -1025,78 +1031,32 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
         else:
             price_map[symbol] = price
 
-    # Trail stops upward (V9: activate trailing when TP reached)
-    # Mode-aware trailing: longterm 5%, swing 3%, daytrade/scalping 1%
-    _TRAIL_PCT_BY_MODE = {
-        'longterm': 0.05, 'swing': 0.03,
-        'daytrade': 0.01, 'scalping': 0.01,
-    }
-    if from_auto_portfolio:
-        # Update stops in auto_portfolio.json directly
-        import auto_portfolio as _ap
-        _ap_data_live = _ap.load()
-        _pos_map = {p['symbol']: p for p in _ap_data_live.get('positions', [])}
-        for pos in all_positions:
-            symbol = pos['symbol']
-            current_price = price_map.get(symbol)
-            if current_price is None:
-                continue
-            mode = pos.get('mode', 'swing').lower()
-            trail_pct = _TRAIL_PCT_BY_MODE.get(mode, 0.03)
-            new_trailing_stop = round(current_price * (1.0 - trail_pct), 2)
-            # Never let trailing stop exceed entry price (lock in risk, not loss)
-            entry = pos.get('entry', pos.get('entry_price', 0))
-            if entry > 0 and new_trailing_stop > entry:
-                new_trailing_stop = min(new_trailing_stop, round(entry * 1.005, 2))
-            if new_trailing_stop > pos['stop']:
-                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f}, {mode} trail {trail_pct:.0%})")
-                if symbol in _pos_map:
-                    _pos_map[symbol]['stop'] = new_trailing_stop
-                pos['stop'] = new_trailing_stop
-        # Persist updated stops
-        _ap._save(_ap_data_live)
-    elif from_portfolio:
-        # Update stops in portfolio.json directly
-        for pos in all_positions:
-            symbol = pos['symbol']
-            current_price = price_map.get(symbol)
-            if current_price is None:
-                continue
-
-            # V9: Check if target reached — activate trailing stop
-            target = pos.get('target', 0)
-            if target > 0 and current_price >= target and not pos.get('tp_reached', False):
-                _portfolio.mark_tp_reached(symbol)
-                pos['tp_reached'] = True
-                # Compute ATR-based trailing stop (2.0 ATR)
-                try:
-                    from yfinance_adapter import YFinanceAdapter
-                    yf = YFinanceAdapter()
-                    hist = yf.get_historical_data(symbol, '1 day', lookback_bars=20)
-                    if hist is not None and len(hist) >= 14:
-                        h_l = hist['high'] - hist['low']
-                        h_pc = abs(hist['high'] - hist['close'].shift(1))
-                        l_pc = abs(hist['low'] - hist['close'].shift(1))
-                        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
-                        atr = tr.tail(14).mean()
-                        new_stop = round(current_price - (atr * 2.0), 2)
-                        if new_stop > pos['stop']:
-                            logger.info(f"  🎯 {symbol} TP reached @ ${current_price:.2f} — trail stop: ${pos['stop']:.2f} → ${new_stop:.2f}")
-                            _portfolio.update_stop(symbol, new_stop)
-                            pos['stop'] = new_stop
-                        continue
-                except Exception as e:
-                    logger.debug(f"ATR calc failed for {symbol}: {e}")
-
-            # Mode-aware trailing stop
-            mode = pos.get('mode', 'swing').lower()
-            trail_pct = _TRAIL_PCT_BY_MODE.get(mode, 0.03)
-            new_trailing_stop = round(current_price * (1.0 - trail_pct), 2)
-            if new_trailing_stop > pos['stop']:
-                logger.info(f"  ↑ {symbol} stop: ${pos['stop']:.2f} → ${new_trailing_stop:.2f} (price ${current_price:.2f}, {mode} trail {trail_pct:.0%})")
-                _portfolio.update_stop(symbol, new_trailing_stop)
-                pos['stop'] = new_trailing_stop
-    else:
+    # This monitor is ALERT-ONLY on both books. It must never write stops.
+    #
+    # It used to trail them here — a mode-aware last-price trail (swing 3%,
+    # longterm 5%, daytrade/scalping 1%) persisted straight into the book on
+    # every run. docker/crontab fires this ~25× per trading day, so that quietly
+    # became the de-facto stop policy for both books. Neither book wants it:
+    #
+    #   * auto books (auto_portfolio.json) — the validated champion exit is a
+    #     CLOSE-based ATR×2.0 ratchet, written only by refresh_prices() at 10:00
+    #     and 15:45 ET. A 15-minute last-price trail ratchets on intraday noise
+    #     and can only tighten, so it stopped positions out ahead of the trail
+    #     that was actually backtested (CLAUDE.md §7: the ATR trail is worth
+    #     ~+97 pts compound / +0.45 Sharpe — this was overriding it).
+    #
+    #   * portfolio.json — a MANUAL book. Its stops are hand-set on demand by
+    #     /manual-portfolio/compute-stops using a deliberately wider ATR×3.0 /
+    #     20-day-swing-low rule, and Portfolio.update_prices' docstring forbids
+    #     auto-trailing it ("or hand-set stops get overwritten", issue #7,
+    #     decided 2026-08-11). That guard named refresh_prices as the thing not
+    #     to wire in; this function was already doing it by another route.
+    #
+    # Alerts below read each position's STORED stop, so HIT_STOP / NEAR_STOP now
+    # report against the real exit level instead of a number invented moments
+    # earlier by this function. Exits remain refresh_prices' job for the auto
+    # books, and a human's for the manual one.
+    if not (from_auto_portfolio or from_portfolio):
         if args.monitor:
             from utils import update_position_stops
             for fpath in args.monitor.split(','):
@@ -1123,7 +1083,8 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
                 unique_positions.append(pos)
         all_positions = unique_positions
 
-    # Calculate status with updated stops
+    # Calculate status against each position's STORED stop (this function no
+    # longer writes stops — see the note above).
     dashboard = []
     alerts = []
 
@@ -1141,7 +1102,10 @@ async def run_monitor_mode(orchestrator: ScannerOrchestrator, args, notifier,
         dist_to_stop_pct = ((price - stop) / price) * 100 if price > 0 else 0
         progress_pct = ((price - entry) / (target - entry)) * 100 if target != entry else 0
 
-        # Classify status (NEAR_STOP at 0.5% since stops trail at 1%)
+        # Classify status. NEAR_STOP's 0.5% band dates from when this function
+        # trailed stops to within 1% of price; against the champion ATR×2.0 trail
+        # (and the manual book's wider ATR×3.0) stops sit much further away, so
+        # NEAR_STOP now fires rarely and HIT_STOP carries the signal.
         if price <= stop:
             status = 'HIT_STOP'
         elif dist_to_stop_pct < 0.5:
