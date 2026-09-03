@@ -754,14 +754,23 @@ def classify_market_regime(spy_perf: float, spy_vol: float,
     # SURGE takes highest priority — broad market gap-up day
     if SURGE_DAY_CONFIG.get('enabled') and surge_context:
         spy_gap = surge_context.get('spy_gap_pct', 0)
-        breadth = surge_context.get('num_gappers', 0)
-        # Pre-market path: SPY gap + breadth confirmation
-        if (spy_gap >= SURGE_DAY_CONFIG['spy_gap_min_pct']
+        # None means "breadth was never measured" (premarket scan didn't run,
+        # or its file is missing/stale) — a genuinely-measured zero gappers is
+        # a real int 0, not None. These must not be treated the same: a calm
+        # breadth reading (0 gappers) on a day SPY still gapped hard is
+        # evidence AGAINST a broad surge, while a missing reading is simply
+        # unknown. Writers must emit None, never 0, to mean "no data."
+        breadth = surge_context.get('num_gappers')
+        # Pre-market path: SPY gap + breadth confirmation (breadth must be a
+        # real measurement)
+        if (breadth is not None
+                and spy_gap >= SURGE_DAY_CONFIG['spy_gap_min_pct']
                 and breadth >= SURGE_DAY_CONFIG['breadth_min_gappers']):
             return 'SURGE'
-        # Intraday fallback: SPY moved strongly from open (no breadth data)
+        # Intraday fallback: SPY moved strongly from open AND breadth is
+        # genuinely unavailable (not just measured-and-zero)
         intraday_thresh = SURGE_DAY_CONFIG.get('spy_intraday_fallback_pct', 1.5)
-        if spy_gap >= intraday_thresh and breadth == 0:
+        if spy_gap >= intraday_thresh and breadth is None:
             return 'SURGE'
 
     if spy_perf <= V9H_REGIME_GATE['red_market_thresh']:

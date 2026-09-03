@@ -97,16 +97,17 @@ class TestSurgeRegimeIntraday(_SurgeTestBase):
     """Test SURGE detection from intraday SPY move (no premarket data)."""
 
     def test_intraday_surge_detected(self):
-        """SPY intraday move >= 1.5% with no breadth -> SURGE."""
+        """SPY intraday move >= 1.5% with breadth genuinely UNMEASURED (None)
+        -> SURGE. None, not 0, is how a writer signals 'no breadth data'."""
         from utils import classify_market_regime
-        ctx = {'spy_gap_pct': 1.8, 'num_gappers': 0}
+        ctx = {'spy_gap_pct': 1.8, 'num_gappers': None}
         result = classify_market_regime(0.02, 0.5, surge_context=ctx)
         self.assertEqual(result, 'SURGE')
 
     def test_intraday_no_surge_below_threshold(self):
         """SPY intraday move 1.2% (below 1.5%) with no breadth -> not SURGE."""
         from utils import classify_market_regime
-        ctx = {'spy_gap_pct': 1.2, 'num_gappers': 0}
+        ctx = {'spy_gap_pct': 1.2, 'num_gappers': None}
         result = classify_market_regime(0.02, 0.5, surge_context=ctx)
         self.assertNotEqual(result, 'SURGE')
 
@@ -117,6 +118,87 @@ class TestSurgeRegimeIntraday(_SurgeTestBase):
         result = classify_market_regime(0.01, 0.5, surge_context=ctx)
         # 1.2% < 1.5% intraday threshold AND 5 < 15 breadth threshold
         self.assertNotEqual(result, 'SURGE')
+
+    def test_measured_zero_breadth_does_not_trigger_intraday_fallback(self):
+        """Item #11 regression: premarket_monitor ran fine and genuinely found
+        ZERO gappers (a real, calm-breadth reading) while SPY itself gapped
+        hard. This must NOT be treated like missing data — a measured 0 is
+        evidence AGAINST a broad surge, not evidence of an unknown one."""
+        from utils import classify_market_regime
+        ctx = {'spy_gap_pct': 1.8, 'num_gappers': 0}  # real scan, real zero
+        result = classify_market_regime(0.02, 0.5, surge_context=ctx)
+        self.assertNotEqual(
+            result, 'SURGE',
+            "a genuinely-measured zero-breadth day must not fire the "
+            "'no data' intraday fallback just because 0 == 0")
+
+    def test_none_vs_zero_breadth_diverge_on_identical_spy_move(self):
+        """Direct A/B on the exact sentinel: same SPY gap, only the breadth
+        value differs (None vs measured 0) -> different regimes. Pins the
+        None/0 distinction itself, not just one side of it."""
+        from utils import classify_market_regime
+        unmeasured = classify_market_regime(
+            0.02, 0.5, surge_context={'spy_gap_pct': 1.8, 'num_gappers': None})
+        measured_zero = classify_market_regime(
+            0.02, 0.5, surge_context={'spy_gap_pct': 1.8, 'num_gappers': 0})
+        self.assertEqual(unmeasured, 'SURGE')
+        self.assertNotEqual(measured_zero, 'SURGE')
+
+
+# -- 2b. Surge context WRITERS must emit None, never 0, for "no data" --------
+
+class TestSurgeContextWriters(_SurgeTestBase):
+    """Both fallback-context producers (orchestrator.py's scan_watchlist and
+    check_signal.py's _load_surge_context) must signal 'breadth unmeasured'
+    with None, never the real-data value 0 — classify_market_regime relies on
+    that distinction (see test_measured_zero_breadth_does_not_trigger_intraday_fallback)."""
+
+    def test_check_signal_intraday_fallback_emits_none_not_zero(self):
+        from check_signal import _load_surge_context
+        with patch('check_signal.OUTPUT_DIR', self._tmpdir):
+            ctx = _load_surge_context(spy_perf_pct=1.8, force_no_surge=False)
+        self.assertIsNotNone(ctx)
+        self.assertIsNone(
+            ctx['num_gappers'],
+            "the intraday-fallback context has no real breadth measurement — "
+            "must be None, not 0")
+
+    def test_check_signal_below_threshold_returns_none_context(self):
+        from check_signal import _load_surge_context
+        with patch('check_signal.OUTPUT_DIR', self._tmpdir):
+            ctx = _load_surge_context(spy_perf_pct=0.5, force_no_surge=False)
+        self.assertIsNone(ctx)
+
+    def test_check_signal_reads_real_premarket_file_breadth_unchanged(self):
+        """When a real surge_context.json exists, its genuine (possibly-zero)
+        num_gappers must pass through untouched — only the SYNTHESIZED
+        fallback gets the None sentinel."""
+        from check_signal import _load_surge_context
+        from datetime import datetime
+        lists_dir = Path(self._tmpdir) / 'lists'
+        lists_dir.mkdir(parents=True, exist_ok=True)
+        today = datetime.now().strftime('%Y-%m-%d')
+        (lists_dir / 'surge_context.json').write_text(
+            json.dumps({'date': today, 'spy_gap_pct': 1.8, 'num_gappers': 0}))
+        with patch('check_signal.OUTPUT_DIR', self._tmpdir):
+            ctx = _load_surge_context(spy_perf_pct=1.8, force_no_surge=False)
+        self.assertEqual(ctx['num_gappers'], 0,
+                          "a real on-disk measurement of 0 must stay 0, not become None")
+
+    def test_orchestrator_intraday_fallback_source_uses_none_sentinel(self):
+        """Structural guard: scan_watchlist's synthesized fallback dict (no
+        premarket file, SPY moved on its own) must literally write
+        'num_gappers': None. A full behavioral test would require mocking
+        IB/market-data plumbing several layers deep for a one-line dict
+        literal; this pins the exact regression (a stray '0' creeping back
+        in) the same way the project's other source-guard tests do."""
+        import inspect
+        import orchestrator
+        src = inspect.getsource(orchestrator.ScannerOrchestrator.scan_watchlist)
+        fallback_start = src.index('Fallback: no premarket file')
+        fallback_block = src[fallback_start:fallback_start + 400]
+        self.assertIn("'num_gappers': None", fallback_block)
+        self.assertNotIn("'num_gappers': 0", fallback_block)
 
 
 # -- 3. SURGE_DAY_CONFIG gating -----------------------------------------------

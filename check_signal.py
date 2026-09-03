@@ -256,7 +256,8 @@ def _load_surge_context(spy_perf_pct: float, force_no_surge: bool) -> dict | Non
             pass
     # 2. Intraday fallback: SPY moved enough on its own
     if spy_perf_pct >= SURGE_DAY_CONFIG.get('spy_intraday_fallback_pct', 1.5):
-        return {'spy_gap_pct': spy_perf_pct, 'num_gappers': 0}
+        # None means "unmeasured", not zero — see classify_market_regime
+        return {'spy_gap_pct': spy_perf_pct, 'num_gappers': None}
     return None
 
 

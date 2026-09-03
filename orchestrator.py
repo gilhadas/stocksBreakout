@@ -98,7 +98,7 @@ class ScannerOrchestrator:
                     if spy_intraday_pct >= SURGE_DAY_CONFIG['spy_intraday_fallback_pct']:
                         surge_context = {
                             'spy_gap_pct': spy_intraday_pct,
-                            'num_gappers': 0,
+                            'num_gappers': None,  # unmeasured, not zero — see classify_market_regime
                         }
                         logger.info(
                             f"Surge fallback: SPY intraday {spy_intraday_pct:+.1f}% "
