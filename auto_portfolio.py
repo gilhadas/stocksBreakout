@@ -13,9 +13,11 @@ Rules
 - Re-entry: a symbol that was closed CAN be re-added from a newer signal file
 - File tracking: each signal file is processed only once (via 'processed_files' set)
 """
+import contextlib
 import json
 import math
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -225,25 +227,76 @@ def load(user_id: str | None = None, book: str | None = DEFAULT_BOOK) -> dict:
     return _empty()
 
 
-def _save(data: dict, user_id: str | None = None, book: str | None = DEFAULT_BOOK):
-    from utils import save_json, _is_cloud, _to_local_abs
-    path = _portfolio_path_for(user_id, book)
-    data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-    if _is_cloud():
-        # On cloud (Streamlit Cloud / S3), skip fcntl — S3 is the source of truth
-        # and the local filesystem may be read-only or the directory may not exist.
-        save_json(data, path)
-    else:
-        import fcntl, os
-        abs_path = _to_local_abs(path)
-        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        lock_path = abs_path + '.lock'
+def _lock_path_for(user_id: str | None, book: str | None) -> str:
+    from utils import _to_local_abs
+    import os
+    abs_path = _to_local_abs(_portfolio_path_for(user_id, book))
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    return abs_path + '.lock'
+
+
+_lock_state = threading.local()
+
+
+@contextlib.contextmanager
+def _book_lock(user_id: str | None = None, book: str | None = DEFAULT_BOOK):
+    """Hold one book's lock file for an entire load-modify-save cycle.
+
+    Locking only inside _save() — the old behavior — still lets two processes
+    interleave a full load-modify-save around each other's save: both load the
+    same state, both mutate their own copy, and the second save silently
+    discards the first (a lost update). That is not hypothetical here: the
+    9:35 wide scan's scan_and_add tail has no fixed finish time (§16/§17 record
+    it taking 60-90+ min) and is NOT mutexed against 10:00's fixed-time
+    refresh_prices_all_users — the two can and do run as concurrent processes
+    against the same book. This lock must therefore wrap the caller's entire
+    load...save span, not just the save.
+
+    Cloud mode used to skip this lock entirely ("the local filesystem may be
+    read-only"), but save_json() already writes locally unconditionally in
+    every mode (utils.py) and add_position_direct's own hand-written lock
+    below has never had a cloud exception — so the skip was protecting nothing
+    and was the reason flock never actually ran in production, where
+    AWS_ACCESS_KEY_ID is always set. Locking is now unconditional.
+
+    Reentrant per (thread, lock path): ensure_forked() calls _save() while
+    scan_and_add()/refresh_prices() may already be holding this same lock for
+    the same book, and fcntl.flock does not recurse across file descriptors
+    even within one process — a naive second acquisition would deadlock the
+    process against itself (exactly the class of bug §26.1 hit forking inside
+    add_position_direct). A lock for a DIFFERENT book (e.g. ensure_forked's
+    second save, into the control book) is a different path and genuinely
+    re-acquires.
+    """
+    import fcntl
+
+    lock_path = _lock_path_for(user_id, book)
+    held = getattr(_lock_state, 'held', None)
+    if held is None:
+        held = _lock_state.held = set()
+
+    if lock_path in held:
+        yield  # already held by an outer call in this thread — reentrant no-op
+        return
+
+    held.add(lock_path)
+    try:
         with open(lock_path, 'w') as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
-                save_json(data, path)
+                yield
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
+    finally:
+        held.discard(lock_path)
+
+
+def _save(data: dict, user_id: str | None = None, book: str | None = DEFAULT_BOOK):
+    from utils import save_json
+    path = _portfolio_path_for(user_id, book)
+    data['last_updated'] = datetime.now(_NY_TZ).isoformat()
+    with _book_lock(user_id, book):
+        save_json(data, path)
 
 
 # ── Forking a variant book off control ───────────────────────────────────────
@@ -573,7 +626,28 @@ def scan_and_add(min_date: str | None = None,
             signals into a live book backdates date_added and sizes stops off
             stale volatility.
     Returns summary dict with counts.
+
+    Holds the book's lock for its ENTIRE load-modify-save span (see
+    _book_lock): this function's own scan_and_add_all_users caller can overlap
+    a concurrent refresh_prices_all_users process for 60-90+ minutes (§16/§17)
+    with no other mutual exclusion between them.
     """
+    with _book_lock(user_id, book):
+        return _scan_and_add_impl(
+            min_date=min_date, position_pct=position_pct, user_id=user_id,
+            notify=notify, book=book, user_label=user_label, allow_stale=allow_stale,
+        )
+
+
+def _scan_and_add_impl(min_date: str | None = None,
+                       position_pct: float | None = None,
+                       user_id: str | None = None,
+                       notify: bool = True,
+                       book: str | None = DEFAULT_BOOK,
+                       user_label: str | None = None,
+                       allow_stale: bool = False) -> dict:
+    """The real body of scan_and_add — call scan_and_add(), not this, so the
+    book lock in _book_lock actually covers the whole load-modify-save span."""
     import pandas as pd
     import memory_trace as memt   # no-op unless SB_MEM_TRACE=1
     from utils import list_files, load_data
@@ -1759,7 +1833,21 @@ def refresh_prices(user_id: str | None = None,
     Pass ``stale_max_days=0`` to settle known-dead symbols immediately.
 
     Returns {'closed': [symbols], 'updated': int, 'data': data}
+
+    Holds the book's lock for its ENTIRE load-modify-save span (see
+    _book_lock) — this is the fixed-time half of the documented 9:35-scan /
+    10:00-refresh overlap (§16/§17), so it must not interleave a load-modify-save
+    around a concurrent scan_and_add's.
     """
+    with _book_lock(user_id, book):
+        return _refresh_prices_impl(user_id=user_id, book=book, stale_max_days=stale_max_days)
+
+
+def _refresh_prices_impl(user_id: str | None = None,
+                         book: str | None = DEFAULT_BOOK,
+                         stale_max_days: int = STALE_PRICE_MAX_DAYS) -> dict:
+    """The real body of refresh_prices — call refresh_prices(), not this, so
+    the book lock in _book_lock actually covers the whole load-modify-save span."""
     import yfinance as yf
     from config import MAX_HOLD_BARS
 
@@ -2278,73 +2366,64 @@ def add_position_direct(
     Used by scan_feedback_agent.py when a real-time BREAKOUT is detected.
     Returns {'added': bool, 'reason': str}.
 
-    Load + duplicate check + save are performed atomically under the file lock
-    to prevent two concurrent processes from adding the same symbol.
+    Load + duplicate check + save are performed atomically under the book
+    lock to prevent two concurrent processes from adding the same symbol.
     """
-    from utils import save_json, load_json, _is_cloud, _to_local_abs
-    import fcntl, os
+    from utils import save_json
 
     # NOTE: this function deliberately bypasses _save() — it needs load, dedup
     # check and save to happen inside ONE lock acquisition. It must therefore
     # resolve the path through _portfolio_path_for with the same `book`, or a
     # swap would close in one book and open its replacement in another.
     path = _portfolio_path_for(user_id, book)
-    abs_path = _to_local_abs(path)
-    lock_path = abs_path + '.lock'
-    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
-    # ⚠ Fork BEFORE taking the lock, never inside it. ensure_forked writes the
-    # variant through _save(), which acquires this exact lock file on its own
-    # descriptor — and fcntl.flock does not recurse, so a second acquisition from
-    # the same process blocks forever against itself. Doing it here keeps the
-    # load/dedup/save below in one uninterrupted lock acquisition, which is the
-    # whole reason this function bypasses _save() in the first place.
+    # Fork BEFORE taking the lock below. _book_lock is reentrant per (thread,
+    # path) so this is no longer strictly required to avoid a deadlock — but
+    # keeping it here still keeps the load/dedup/save below as one lock
+    # acquisition with no fork bookkeeping inside it, which is the whole
+    # reason this function bypasses _save() in the first place.
     ensure_forked(user_id, book)
 
-    with open(lock_path, 'w') as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            # Re-load inside lock to get latest state
-            data = load(user_id=user_id, book=book)
+    with _book_lock(user_id, book):
+        # Re-load inside lock to get latest state
+        data = load(user_id=user_id, book=book)
 
-            if symbol.upper() in open_symbols(data):
-                return {'added': False, 'reason': 'duplicate'}
+        if symbol.upper() in open_symbols(data):
+            return {'added': False, 'reason': 'duplicate'}
 
-            pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
-            shares = int(data['capital'] * pct / entry_price)
-            if shares < 1:
-                return {'added': False, 'reason': 'shares_zero'}
+        pct   = position_pct if position_pct is not None else POSITION_SIZE_PCT
+        shares = int(data['capital'] * pct / entry_price)
+        if shares < 1:
+            return {'added': False, 'reason': 'shares_zero'}
 
-            cost = round(entry_price * shares, 2)
-            if cost > available_cash(data):
-                return {'added': False, 'reason': 'no_cash'}
+        cost = round(entry_price * shares, 2)
+        if cost > available_cash(data):
+            return {'added': False, 'reason': 'no_cash'}
 
-            # Guard: stop must be BELOW entry price
-            if stop >= entry_price:
-                _trail_pct = {'longterm': 0.05, 'swing': 0.03, 'daytrade': 0.01, 'scalping': 0.01}
-                stop = entry_price * (1.0 - _trail_pct.get(mode, 0.05))
+        # Guard: stop must be BELOW entry price
+        if stop >= entry_price:
+            _trail_pct = {'longterm': 0.05, 'swing': 0.03, 'daytrade': 0.01, 'scalping': 0.01}
+            stop = entry_price * (1.0 - _trail_pct.get(mode, 0.05))
 
-            now_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
-            position = {
-                'symbol':          symbol.upper(),
-                'date_added':      now_str,
-                'mode':            mode,
-                'quality':         quality,
-                'minervini_score': 0,
-                'entry_price':     round(entry_price, 4),
-                'stop':            round(stop, 4),
-                'target':          round(target, 4),
-                'shares':          shares,
-                'cost':            cost,
-                'current_price':   round(entry_price, 4),
-                'vol_ratio':       round(vol_ratio, 2),
-            }
-            data['positions'].append(position)
-            data['last_updated'] = datetime.now(_NY_TZ).isoformat()
-            save_json(data, path)
-            return {'added': True, 'reason': 'ok'}
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+        now_str = datetime.now(_NY_TZ).strftime('%Y-%m-%d %H:%M')
+        position = {
+            'symbol':          symbol.upper(),
+            'date_added':      now_str,
+            'mode':            mode,
+            'quality':         quality,
+            'minervini_score': 0,
+            'entry_price':     round(entry_price, 4),
+            'stop':            round(stop, 4),
+            'target':          round(target, 4),
+            'shares':          shares,
+            'cost':            cost,
+            'current_price':   round(entry_price, 4),
+            'vol_ratio':       round(vol_ratio, 2),
+        }
+        data['positions'].append(position)
+        data['last_updated'] = datetime.now(_NY_TZ).isoformat()
+        save_json(data, path)
+        return {'added': True, 'reason': 'ok'}
 
 
 # ── Mode promotion (exit_evaluator PROMOTE_MODE) ─────────────────────────────

@@ -232,10 +232,14 @@ def test_refresh_prices_is_still_the_auto_book_stop_writer():
     """The other half of the invariant: the legitimate writer still exists.
 
     Without this, deleting the trail everywhere would also pass the test above.
+
+    refresh_prices() itself is now a thin _book_lock wrapper (2026-09 book-
+    lock fix) around _refresh_prices_impl(), which holds the real body — so
+    the trail must be looked for there, not on the wrapper's own source.
     """
     import auto_portfolio as ap
 
-    src = inspect.getsource(ap.refresh_prices)
+    src = inspect.getsource(ap._refresh_prices_impl)
     assert '_raise_atr_trail' in src or 'trail' in src, (
         'refresh_prices no longer appears to trail stops — the champion exit '
         'must keep exactly one writer, not zero')

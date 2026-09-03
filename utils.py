@@ -18,6 +18,7 @@ import csv
 import json
 import logging
 import os
+import tempfile
 import threading
 
 # ---------------------------------------------------------------------------
@@ -396,11 +397,30 @@ def save_json(data, local_path: str, s3_path: str = None):
 
     content = json.dumps(data, indent=2, default=str)
 
-    # Always write locally so the local filesystem stays in sync with S3
+    # Always write locally so the local filesystem stays in sync with S3.
+    # Write to a sibling temp file and os.replace() it into place — `open(...,
+    # 'w')` truncates before writing a byte, so a process killed mid-write
+    # (OOM, container restart — this box has taken 13+ OOM kills, §17-§21)
+    # left the book at 0 bytes or a half-written object. os.replace() is
+    # atomic on POSIX: a reader always sees either the complete old file or
+    # the complete new one. The temp file lives next to the target so the
+    # replace stays on one filesystem (no cross-device rename failure).
     abs_path = _to_local_abs(local_path)
-    os.makedirs(os.path.dirname(abs_path) or '.', exist_ok=True)
-    with open(abs_path, 'w') as f:
-        f.write(content)
+    abs_dir = os.path.dirname(abs_path) or '.'
+    os.makedirs(abs_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=abs_dir, prefix='.tmp-', suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, abs_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
     if _is_cloud():
         try:
