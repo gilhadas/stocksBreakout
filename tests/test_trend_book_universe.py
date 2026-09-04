@@ -69,6 +69,12 @@ def archive(monkeypatch, tmp_path):
     # Prices/entries would otherwise hit the network. Fixed values keep the
     # admission arithmetic deterministic.
     monkeypatch.setattr(ap, '_fetch_entry_and_current', lambda *a, **k: (10.0, 10.0))
+    # Admission looks up a sector per candidate; unstubbed that is a live
+    # yfinance call per fake symbol (§20's hermetic-test trap).
+    import sentiment
+    monkeypatch.setattr(sentiment, 'get_sector_for_ticker', lambda t: 'Technology')
+    monkeypatch.setattr(ap, '_detect_split_factor', lambda *a, **k: 1.0)
+    monkeypatch.setattr(ap, '_compute_atr_pct', lambda s: 0.03)
 
     books: dict[str, dict] = {}
 
@@ -447,3 +453,108 @@ def test_save_results_rejects_a_path_as_subdir():
     for bad in ('../evil', 'a/b', '..'):
         with pytest.raises(ValueError):
             orch.save_results([{'Symbol': 'X'}], 'swing', 'signals', subdir_override=bad)
+
+
+# ── Notification provenance ─────────────────────────────────────────────────
+#
+# With three books x N users, one scan_and_add_all_users run can fire many
+# "positions added" alerts. They used to be byte-identical, which was not only
+# ambiguous but actively lossy: notifier._generate_cache_key is
+# "subject:symbols" over ONE global cache file, so identical subjects with the
+# same symbols dedup each other away. Control and autoswap hold the same
+# positions and admit the same symbols on the same day, so autoswap's alert was
+# suppressed by control's every time.
+
+import notifier as _notifier_mod
+_REAL_NOTIFIER = _notifier_mod.Notifier      # captured before any patching
+
+
+def test_stream_label_names_the_scanner_input():
+    assert ap._stream_label('signals_swing_20260904_1.csv') == 'all'
+    assert ap._stream_label('signals_trend/signals_swing_20260904_1.csv') == 'trend'
+    assert ap._stream_label('') == 'all'
+
+
+def _capture_notifications(monkeypatch):
+    """Collect (subject, message) from every Notifier.send_all call."""
+    sent = []
+    import notifier as _n
+
+    class _Fake:
+        def send_all(self, subject, message, **kw):
+            sent.append((subject, message, kw))
+
+    monkeypatch.setattr(_n, 'Notifier', lambda: _Fake())
+    return sent
+
+
+def test_added_notification_names_book_and_source(archive, monkeypatch):
+    _use_universe(monkeypatch, ['NVDA', 'PLTR'])
+    sent = _capture_notifications(monkeypatch)
+
+    ap.scan_and_add(book='trend', notify=True, user_label='u@x')
+
+    assert sent, 'no notification was sent for newly added positions'
+    subject, message, _ = sent[0]
+    assert 'trend' in subject, f"subject does not name the book: {subject}"
+    assert 'u@x' in subject, f"subject does not name the user: {subject}"
+    assert 'src:all' in subject, f"subject does not name the scanner input: {subject}"
+    assert 'scanner input: all' in message
+
+
+def test_two_books_do_not_dedup_each_other(archive, monkeypatch):
+    """The same symbols admitted to two books must produce two distinct alerts."""
+    _use_universe(monkeypatch, ['NVDA', 'PLTR'])
+    sent = _capture_notifications(monkeypatch)
+
+    # Pre-stamp both books so each starts empty and independent. Without this,
+    # ensure_forked clones autoswap from control AFTER control's scan, so it
+    # inherits control's processed_files, admits nothing, and never notifies —
+    # correct behaviour, but it would leave this test measuring one alert.
+    for _b in ('control', 'autoswap'):
+        _d = ap._empty()
+        _d['fork'] = {'date': '2026-08-11', 'source': 'control',
+                      'peer': 'autoswap', 'book': _b}
+        archive[_b] = _d
+
+    # control vs autoswap is the real case: neither has a universe filter, so
+    # they admit an IDENTICAL symbol set on the same day and the pre-fix subject
+    # was byte-identical too. (control vs trend differ by symbol set and would
+    # not have collided regardless, so they would not test the dedup at all.)
+    ap.scan_and_add(book='control', notify=True, user_label='u@x')
+    ap.scan_and_add(book='autoswap', notify=True, user_label='u@x')
+
+    assert len(sent) == 2
+    subjects = [s for s, _, _ in sent]
+    assert subjects[0] != subjects[1], \
+        f"identical subjects would dedup each other away: {subjects[0]!r}"
+
+    # The real dedup key, reproduced: subject + sorted symbols. Uses the class
+    # captured at import — _capture_notifications has replaced notifier.Notifier
+    # with a factory function by now, so the name is no longer a type.
+    n = _REAL_NOTIFIER.__new__(_REAL_NOTIFIER)
+    keys = {n._generate_cache_key(s, kw.get('signals')) for s, _, kw in sent}
+    assert len(keys) == 2, 'both books collapse to one cache key — one alert is lost'
+
+    # Non-vacuity, without mutating the source: the PRE-FIX subject carried no
+    # book, so reproduce it and confirm the two really would have collapsed.
+    # If this passes trivially, the assertion above proves nothing.
+    old_style = [
+        (f"📋 Auto Portfolio: {len(kw['signals'])} position(s) added — "
+         f"{', '.join(x['Symbol'] for x in kw['signals'])}", kw.get('signals'))
+        for _, _, kw in sent
+    ]
+    old_keys = {n._generate_cache_key(sub, sig) for sub, sig in old_style}
+    assert len(old_keys) == 1, (
+        'the old subject format did NOT collide, so this test would have passed '
+        'before the fix and proves nothing')
+
+
+def test_position_records_its_source_stream(archive, monkeypatch):
+    _use_universe(monkeypatch, ['NVDA'])
+    books = archive
+    ap.scan_and_add(book='trend')
+    pos = books['trend']['positions']
+    assert pos, 'nothing was admitted'
+    assert all(p['source'] == 'all' for p in pos), \
+        f"source not recorded: {[p.get('source') for p in pos]}"

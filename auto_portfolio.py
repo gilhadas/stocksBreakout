@@ -603,6 +603,20 @@ def _book_signals_dirs(book: str | None) -> list[str]:
     return _book_cfg(book).get('signals_dirs') or [_SIGNALS_DIR]
 
 
+def _stream_label(ref: str) -> str:
+    """Which scanner input a signal came from: 'all' or e.g. 'trend'.
+
+    The shared stream is written by the daily wide scans, so it reads as 'all';
+    a private directory is named after the watchlist whose scan writes into it
+    (scanner_output/signals_trend -> 'trend'). Used to say, in a notification,
+    which scan a position actually came from.
+    """
+    directory, _ = _split_signal_ref(ref)
+    if directory == _SIGNALS_DIR:
+        return 'all'
+    return directory.rsplit('/', 1)[-1].removeprefix('signals_') or directory
+
+
 def _signal_ref(directory: str, fname: str) -> str:
     """A book-portable id for one signal file: what goes in `processed_files`.
 
@@ -1189,6 +1203,11 @@ def _scan_and_add_impl(min_date: str | None = None,
                 'current_price':   current_price,
                 'sector':          _sector,
                 'type':            str(row.get('Type', '')),
+                # Which scanner input produced this: 'all' (the shared wide scan)
+                # or a private stream such as 'trend'. Recorded per position so a
+                # notification can say where a pick came from without re-reading
+                # the archive, and so it stays true after the file ages out.
+                'source':          _stream_label(str(row.get('_source_file', ''))),
             }
             data['positions'].append(pos_dict)
             open_syms.add(sym)
@@ -1229,10 +1248,23 @@ def _scan_and_add_impl(min_date: str | None = None,
                     'Type':    'AUTO_PORTFOLIO',
                     'Shares':  p['shares'],
                     'Cost':    p['cost'],
+                    'Source':  p.get('source', ''),
                 }
                 for p in data['positions']
                 if p['symbol'] in added_syms
             ]
+            # Which scanner input(s) fed this batch — 'all', 'trend', or both.
+            _srcs = sorted({s['Source'] for s in _signals if s['Source']})
+            _src_tag = '+'.join(_srcs) if _srcs else 'all'
+            # Identify the book (and user) in the SUBJECT, not just the body.
+            # notifier._generate_cache_key is "subject:symbols" over a single
+            # GLOBAL cache file, so before this every book and every user
+            # produced a byte-identical subject: control and autoswap hold the
+            # same positions and admit the same symbols on the same day, so the
+            # second alert was silently deduped away and never sent. Three books
+            # x N users collapsed into one notification.
+            _who = f"{user_label} · {book}" if user_label else str(book)
+            cfg_label = _book_cfg(book)['label']
             # Write a temp CSV so the email has an attachment
             import tempfile, csv as _csv, os as _os
             _tmp = tempfile.NamedTemporaryFile(
@@ -1246,13 +1278,16 @@ def _scan_and_add_impl(min_date: str | None = None,
             _tmp.close()
 
             _notifier.send_all(
-                subject=f"📋 Auto Portfolio: {len(added_syms)} position(s) added — {', '.join(added_syms)}",
+                subject=f"📋 Auto Portfolio [{_who} · src:{_src_tag}]: "
+                        f"{len(added_syms)} position(s) added — {', '.join(added_syms)}",
                 message=(
-                    f"{len(added_syms)} new position(s) added to auto portfolio.\n\n"
+                    f"{len(added_syms)} new position(s) added to the "
+                    f"{cfg_label} book ({_who}), from scanner input: {_src_tag}.\n\n"
                     + "\n".join(
                         f"• {s['Symbol']} [{s['Mode'].upper()}] @ ${s['Price']:.2f} | "
                         f"SL: ${s['Stop']:.2f} | TP: ${s['Target']:.2f} | "
                         f"R:R: {s['R:R']} | {s['Shares']} shares"
+                        + (f" | src: {s['Source']}" if s['Source'] else "")
                         for s in _signals
                     )
                 ),
