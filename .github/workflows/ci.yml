@@ -18,6 +18,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history: test_pacing_fix_no_regression.py rebuilds a pre-fix
+          # scanner.py from a pinned older revision as its control. At the
+          # default depth 1 that revision is unreachable and the test skips.
+          fetch-depth: 0
 
       - name: Set up Python 3.14
         uses: actions/setup-python@v5

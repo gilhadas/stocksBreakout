@@ -2782,6 +2782,32 @@ assignments and fails if any is absent from the fixture, so a third instance
 cannot be introduced silently. **Lesson (a re-run of §24's): fixing two
 instances of a bug shape is not the same as grepping for every instance of it.**
 
+### ⚠ CI had been executing ZERO tests since 2026-09-03 (found while checking deploy readiness)
+`tests/test_pacing_fix_no_regression.py` built its control by loading
+**`HEAD:scanner.py`** — correct only while the pacing fix sat uncommitted in the
+working tree. The moment it landed (`dcf3f78`) HEAD became post-fix and the
+module-level assertion started firing at **collection** time, which aborts the
+whole run: every push since reported `942 selected / 1 error / Interrupted` and
+ran **0 tests** in ~45 s. The last genuinely green run is `6e83fa0` (905 passed
+in 8.13 s). Four of the last five CI runs on `main` were red for this one reason.
+
+Fixed three ways, because any one alone is insufficient:
+- the control is now a **pinned** `PRE_FIX_REV = 'dcf3f78^'`, not `HEAD`;
+- an unreachable revision **skips the module** (`allow_module_level=True`)
+  instead of erroring, so a test that cannot build its control can never again
+  take the suite down with it;
+- `.github/workflows/ci.yml` sets `fetch-depth: 0` — `actions/checkout` defaults
+  to depth 1, where a pinned historical revision does not exist and the file
+  would silently skip forever.
+
+145 tests in that file went from never running to passing. **Lesson: a
+collection-time assertion is not a test failure, it is a suite outage** — and CI
+being "red for a known unrelated reason" is indistinguishable from CI being off.
+
+⚠ `tests/test_scan_feedback_agent.py` hangs on this **Mac** on live yfinance
+calls (§28, `CLOSE_WAIT`) but runs fine in CI — the last green run executed it
+in a suite that finished in 8.13 s. Exclude it locally; do not exclude it in CI.
+
 ### Deployment — not live until this runs
 ```bash
 ssh -i "$SSH_KEY" ubuntu@"$ORACLE_HOST"

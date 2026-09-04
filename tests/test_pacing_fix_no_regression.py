@@ -46,15 +46,38 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # ─── Load the pre-fix scanner.py straight from git, as an independent module ──
 
+# The control is a PINNED pre-fix revision, not HEAD.
+#
+# This file originally read HEAD:scanner.py, which was correct only while the
+# pacing fix sat uncommitted in the working tree. The moment it landed (dcf3f78,
+# 2026-09-03) HEAD became post-fix, the assertion below started firing at import
+# time, and because that happens during COLLECTION it aborted the entire run:
+# CI reported "942 selected / 1 error / Interrupted" and executed zero tests on
+# every push from 2026-09-03 until 2026-09-04. A test that cannot find its own
+# control must not take the whole suite down with it.
+PRE_FIX_REV = 'dcf3f78^'      # parent of the pacing fix — last scanner.py without it
+
+
 def _load_pre_fix_scanner():
-    src = subprocess.run(
-        ['git', 'show', 'HEAD:scanner.py'],
-        cwd=ROOT, capture_output=True, text=True, check=True,
-    ).stdout
+    try:
+        src = subprocess.run(
+            ['git', 'show', f'{PRE_FIX_REV}:scanner.py'],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # A shallow clone (actions/checkout defaults to depth 1) has no history
+        # to reach back into. Skip loudly rather than error — the rest of the
+        # suite is the thing that must keep running.
+        pytest.skip(
+            f"pre-fix revision {PRE_FIX_REV} is unreachable (shallow clone or "
+            f"rewritten history) — this regression control cannot be built. "
+            f"CI needs fetch-depth: 0 for it to run.",
+            allow_module_level=True,
+        )
     assert 'live_now_et' not in src, (
-        "HEAD:scanner.py already contains live_now_et — this test needs a "
-        "commit hash from BEFORE the pacing fix to be a meaningful control. "
-        "Pass an explicit pre-fix rev instead of HEAD."
+        f"{PRE_FIX_REV}:scanner.py already contains live_now_et — the pinned "
+        f"revision is no longer a pre-fix control. Re-point PRE_FIX_REV at the "
+        f"commit before the pacing fix."
     )
     spec = importlib.util.spec_from_loader('scanner_pre_pacing_fix', loader=None)
     module = importlib.util.module_from_spec(spec)
