@@ -45,3 +45,8 @@ _bmad/
 # here rather than duplicate that branch's ignore rules. Remove/narrow this if
 # research/auto-agents is ever merged into main.
 /research/
+
+# .env backups: '.env' and '*.bak' both miss '.env.bak.<timestamp>',
+# which is how a .bak holding live secrets got committed once before (§31).
+.env.bak*
+.env.*.bak
