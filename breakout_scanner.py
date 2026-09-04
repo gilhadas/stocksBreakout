@@ -556,7 +556,9 @@ async def run_scan_mode(orchestrator: ScannerOrchestrator, args, notifier: Notif
         df = pd.DataFrame(results).sort_values(by='Vol', ascending=False)
         print(df.to_string(index=False))
 
-        output_file = orchestrator.save_results(results, args.mode, 'signals')
+        output_file = orchestrator.save_results(
+            results, args.mode, 'signals',
+            subdir_override=getattr(args, 'signals_subdir', None))
         memt.mark('3-save:csv_written')
 
         # Auto-append to positions file if requested.
@@ -1620,6 +1622,13 @@ Examples:
     
     parser.add_argument('file', nargs='?', default='input/1_26_Setups.txt',
                         help='Path to watchlist file (default: input/1_26_Setups.txt)')
+    parser.add_argument('--signals-subdir', default=None, metavar='NAME',
+                        help="Write this scan's signals CSV to scanner_output/NAME/ "
+                             "instead of scanner_output/signals/. Only portfolio books "
+                             "that list that directory ingest them (see "
+                             "auto_portfolio._book_signals_dirs) — use it to scan a narrow "
+                             "watchlist without feeding the books that read the shared "
+                             "stream. Single path segment.")
     parser.add_argument(
         '--mode',
         choices=['longterm', 'swing', 'daytrade', 'scalping'],

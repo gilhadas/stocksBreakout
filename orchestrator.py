@@ -685,29 +685,44 @@ class ScannerOrchestrator:
         """Get list of rejection reasons for analysis"""
         return self.detector.rejection_reasons
     
-    def save_results(self, results: List[Dict], mode: str, 
-                    result_type: str = 'signals') -> str:
+    def save_results(self, results: List[Dict], mode: str,
+                    result_type: str = 'signals',
+                    subdir_override: str = None) -> str:
         """
         Save results to CSV file in appropriate subdirectory
-        
+
         Args:
             results: List of result dictionaries
             mode: Trading mode
             result_type: 'signals', 'exits', or 'rejections'
-        
+            subdir_override: write into this subdirectory of OUTPUT_DIR instead
+                of the one implied by result_type. Used to route a scan's signals
+                to a PRIVATE stream that only one portfolio book lists, so an
+                ad-hoc scan of a narrow watchlist cannot leak into the books that
+                read the shared stream (see auto_portfolio._book_signals_dirs).
+
         Returns:
             Output filename (full path)
         """
         if not results:
             return ""
-        
+
         timestamp = datetime.now(_NY_TZ).strftime('%Y%m%d_%H%M%S')
         filename = f"{result_type}_{mode}_{timestamp}.csv"
-        
+
         # Save to appropriate subdirectory
         subdir = result_type if result_type in ['signals', 'exits', 'rejections'] else 'signals'
+        if subdir_override:
+            # Constrain to a single path segment: this lands in an S3 key and a
+            # local path, and '..' or a nested path would write outside the
+            # output tree entirely.
+            if '/' in subdir_override or subdir_override in ('.', '..'):
+                raise ValueError(
+                    f"subdir_override must be a single directory name, got {subdir_override!r}")
+            subdir = subdir_override
         filepath = os.path.join(OUTPUT_DIR, subdir, filename)
-        
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
         df = pd.DataFrame(results)
         df.to_csv(filepath, index=False)
 

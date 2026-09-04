@@ -58,7 +58,11 @@ def archive(monkeypatch, tmp_path):
     Returns the dict of books written, so a test can assert on what was saved.
     """
     monkeypatch.setattr(utils, '_is_cloud', lambda: False)
-    monkeypatch.setattr(utils, 'list_files', lambda *a, **k: [_fname()])
+    # Directory-aware: the file lives in the SHARED stream only. Without this a
+    # book that reads two directories would list the same name twice and every
+    # count in these tests would double.
+    monkeypatch.setattr(utils, 'list_files',
+                        lambda d, pat='*', **k: [_fname()] if d == ap._SIGNALS_DIR else [])
     monkeypatch.setattr(utils, 'load_data',
                         lambda p: _frame(['NVDA', 'ZZZZ_OFF', 'PLTR']))
 
@@ -324,3 +328,122 @@ def test_shipped_trend_watchlist_is_present_and_parses():
     assert os.path.exists(path), f"{path} is missing — the trend book cannot buy anything"
     symbols = utils.get_watchlist_from_file(path)
     assert len(symbols) > 50, f"only {len(symbols)} symbols parsed from {path}"
+
+
+# ── Private signal streams: isolation is structural, not a filter ────────────
+#
+# A scan of a narrow watchlist writes into a directory only the trend book
+# lists. Control and autoswap never enumerate it, so an ad-hoc trend scan cannot
+# reach them even if the universe filter were removed entirely. That is the
+# difference between isolation and a filter: a filter has to be right every
+# time, a listing that never happens cannot be wrong.
+
+def test_only_the_trend_book_lists_the_private_directory():
+    assert ap._book_signals_dirs('control') == [ap._SIGNALS_DIR]
+    assert ap._book_signals_dirs('autoswap') == [ap._SIGNALS_DIR]
+    dirs = ap._book_signals_dirs('trend')
+    assert dirs[0] == ap._SIGNALS_DIR, 'trend must still read the shared stream'
+    assert 'scanner_output/signals_trend' in dirs
+
+
+def test_signal_ref_round_trips_and_keeps_shared_refs_bare():
+    """A qualified ref must not change how EXISTING processed_files entries look.
+
+    Those sets are the bookmark that stops a book replaying the archive (§18).
+    Re-encoding shared files would invalidate every persisted bookmark at once.
+    """
+    bare = ap._signal_ref(ap._SIGNALS_DIR, 'signals_swing_20260904_1.csv')
+    assert bare == 'signals_swing_20260904_1.csv', 'shared refs must stay bare'
+    assert ap._split_signal_ref(bare) == (ap._SIGNALS_DIR, 'signals_swing_20260904_1.csv')
+
+    q = ap._signal_ref('scanner_output/signals_trend', 'signals_swing_20260904_1.csv')
+    assert q == 'signals_trend/signals_swing_20260904_1.csv'
+    assert ap._split_signal_ref(q) == ('scanner_output/signals_trend',
+                                       'signals_swing_20260904_1.csv')
+    # The age bound reads the date out of a ref, not just a bare filename; if it
+    # fell through to "today" a stale private file would be admitted forever.
+    assert ap._date_from_filename(q) == '2026-09-04'
+
+
+def _dir_aware_archive(monkeypatch, per_dir):
+    """Stub list_files/load_data so each directory has its own files."""
+    monkeypatch.setattr(utils, '_is_cloud', lambda: False)
+    monkeypatch.setattr(utils, 'list_files',
+                        lambda d, pat='*', **k: list(per_dir.get(d, {})))
+
+    def _load(path):
+        d, f = path.rsplit('/', 1)
+        return per_dir.get(d, {}).get(f)
+    monkeypatch.setattr(utils, 'load_data', _load)
+    monkeypatch.setattr(ap, '_fetch_entry_and_current', lambda *a, **k: (10.0, 10.0))
+
+    books = {}
+    monkeypatch.setattr(ap, 'load',
+                        lambda **kw: books.setdefault(kw.get('book') or ap.DEFAULT_BOOK,
+                                                      ap._empty()))
+    monkeypatch.setattr(ap, '_save',
+                        lambda d, **kw: books.__setitem__(kw.get('book') or ap.DEFAULT_BOOK, d))
+    return books
+
+
+def test_private_stream_is_invisible_to_control(archive, monkeypatch):
+    """The whole point: a trend-only scan must not reach control."""
+    _use_universe(monkeypatch, ['NVDA', 'PLTR'])
+    fn = _fname()
+    _dir_aware_archive(monkeypatch, {
+        'scanner_output/signals': {},
+        'scanner_output/signals_trend': {fn: _frame(['NVDA', 'PLTR'])},
+    })
+
+    ctl = ap.scan_and_add(book='control')
+    assert ctl['files_scanned'] == 0, \
+        'control listed the private directory — isolation is broken'
+    assert ctl['added_symbols'] == []
+
+    tr = ap.scan_and_add(book='trend')
+    assert tr['files_scanned'] == 1, 'trend did not read its own directory'
+    assert set(tr['added_symbols']) == {'NVDA', 'PLTR'}
+
+
+def test_trend_still_reads_the_shared_stream(archive, monkeypatch):
+    """Isolation must be additive — the daily all.txt scan still feeds trend."""
+    _use_universe(monkeypatch, ['NVDA'])
+    fn = _fname()
+    _dir_aware_archive(monkeypatch, {
+        'scanner_output/signals': {fn: _frame(['NVDA', 'ZZZZ_OFF'])},
+        'scanner_output/signals_trend': {},
+    })
+
+    tr = ap.scan_and_add(book='trend')
+    assert tr['files_scanned'] == 1
+    assert tr['added_symbols'] == ['NVDA'], 'trend stopped seeing the shared stream'
+    assert tr['skipped_universe'] == 1
+
+
+def test_same_named_file_in_both_dirs_is_not_masked(archive, monkeypatch):
+    """Both directories name files signals_<mode>_<ts>.csv, so a collision is
+    possible. Each must be loaded on its own, not served from the other's cache
+    entry, or one day's private signals would silently replace the shared ones."""
+    _use_universe(monkeypatch, ['NVDA', 'PLTR'])
+    fn = _fname()
+    _dir_aware_archive(monkeypatch, {
+        'scanner_output/signals': {fn: _frame(['NVDA'])},
+        'scanner_output/signals_trend': {fn: _frame(['PLTR'])},
+    })
+    ap._SCAN_FILE_CACHE = {}                     # the multi-user run's cache
+    try:
+        tr = ap.scan_and_add(book='trend')
+    finally:
+        ap._SCAN_FILE_CACHE = None
+
+    assert tr['files_scanned'] == 2, 'a same-named file in the other dir was masked'
+    assert set(tr['added_symbols']) == {'NVDA', 'PLTR'}
+
+
+def test_save_results_rejects_a_path_as_subdir():
+    """subdir_override lands in an S3 key and a local path."""
+    import orchestrator
+    orch = orchestrator.ScannerOrchestrator.__new__(orchestrator.ScannerOrchestrator)
+    for bad in ('../evil', 'a/b', '..'):
+        with pytest.raises(ValueError):
+            orch.save_results([{'Symbol': 'X'}], 'swing', 'signals', subdir_override=bad)

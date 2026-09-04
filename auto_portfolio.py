@@ -72,6 +72,13 @@ BOOKS = {
         'universe': 'input/trend.txt',
         'seed': None,
         'advise_swaps': False,
+        # Reads the shared stream (so the daily all.txt scan still feeds it,
+        # filtered to `universe`) PLUS a private directory only it lists. A scan
+        # written to signals_trend/ is therefore invisible to control and
+        # autoswap — isolation by construction, not by a filter that could be
+        # forgotten. Write to it with:
+        #   breakout_scanner.py input/trend.txt --signals-subdir signals_trend
+        'signals_dirs': [_SIGNALS_DIR, 'scanner_output/signals_trend'],
     },
 }
 DEFAULT_BOOK = 'control'
@@ -584,8 +591,45 @@ def open_symbols(data: dict) -> set:
     return {p['symbol'] for p in data['positions']}
 
 
+def _book_signals_dirs(book: str | None) -> list[str]:
+    """Directories this book ingests signals from, in order.
+
+    Default is the one shared stream every book has always read. A book may add
+    PRIVATE directories: signals written there are visible to it and to nothing
+    else, which is what makes an isolated ad-hoc scan possible. Isolation is
+    structural — control's file listing simply never looks in the other
+    directory — rather than a filter that could be forgotten or inverted.
+    """
+    return _book_cfg(book).get('signals_dirs') or [_SIGNALS_DIR]
+
+
+def _signal_ref(directory: str, fname: str) -> str:
+    """A book-portable id for one signal file: what goes in `processed_files`.
+
+    Files in the shared directory keep their BARE filename, so every
+    `processed_files` set already persisted stays valid — this must not
+    invalidate bookmarks and make books replay the archive (§18). Files from a
+    private directory are qualified with it, so two directories can hold a file
+    of the same name without one masking the other.
+    """
+    return fname if directory == _SIGNALS_DIR else f"{directory.rsplit('/', 1)[-1]}/{fname}"
+
+
+def _split_signal_ref(ref: str) -> tuple[str, str]:
+    """Inverse of _signal_ref: (directory, filename)."""
+    if '/' not in ref:
+        return _SIGNALS_DIR, ref
+    sub, fname = ref.rsplit('/', 1)
+    return f"{_SIGNALS_DIR.rsplit('/', 1)[0]}/{sub}", fname
+
+
 def _date_from_filename(fname: str) -> str:
-    """Extract YYYY-MM-DD from signals_swing_20240115_093500.csv"""
+    """Extract YYYY-MM-DD from signals_swing_20240115_093500.csv
+
+    Accepts a bare filename or a qualified signal ref — the date is read from
+    the basename either way, so a ref never falls through to "today".
+    """
+    fname = fname.rsplit('/', 1)[-1]
     m = re.search(r'(\d{8})', fname)
     if m:
         d = m.group(1)
@@ -606,22 +650,26 @@ def _date_from_filename(fname: str) -> str:
 _SCAN_FILE_CACHE: 'dict[str, pd.DataFrame | None] | None' = None
 
 
-def _load_signal_frame(fname: str):
-    """Load one signal CSV, through the per-run cache when one is active.
+def _load_signal_frame(ref: str):
+    """Load one signal CSV by ref, through the per-run cache when one is active.
 
     Always hands out a COPY. scan_and_add mutates what it gets — `df_raw.columns
     = [c.strip() ...]` rewrites the columns in place — so sharing one frame
     across users would let the first book's edits reach the second. That is
     cross-user data corruption, not a performance detail.
+
+    Keyed by the REF, not the bare filename, so a private directory's file can
+    never be served from the cache in place of a same-named shared one.
     """
     from utils import load_data
 
-    path = f"{_SIGNALS_DIR}/{fname}"
+    directory, fname = _split_signal_ref(ref)
+    path = f"{directory}/{fname}"
     if _SCAN_FILE_CACHE is None:
         return load_data(path)
-    if fname not in _SCAN_FILE_CACHE:
-        _SCAN_FILE_CACHE[fname] = load_data(path)
-    df = _SCAN_FILE_CACHE[fname]
+    if ref not in _SCAN_FILE_CACHE:
+        _SCAN_FILE_CACHE[ref] = load_data(path)
+    df = _SCAN_FILE_CACHE[ref]
     return None if df is None else df.copy()
 
 
@@ -772,7 +820,21 @@ def _scan_and_add_impl(min_date: str | None = None,
     # Sort oldest-first so chronological order is respected.
     # list_files() returns newest-first; alphabetical sort gives oldest-first
     # for timestamped filenames and works for both local and S3.
-    all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    #
+    # One listing per directory this book reads. For control and autoswap that is
+    # the single shared directory and this is byte-identical to what it always
+    # did; a book with private directories additionally sees files nothing else
+    # lists.
+    #
+    # This sort only orders files WITHIN a directory (a qualified ref sorts after
+    # every bare one). That is fine: chronological order across directories is
+    # re-established by the date grouping below, which is what the per-day pooled
+    # cap actually consumes.
+    all_fnames = sorted(
+        _signal_ref(d, f)
+        for d in _book_signals_dirs(book)
+        for f in list_files(d, 'signals_*.csv')
+    )
     memt.mark('scan_and_add:listed', archive=len(all_fnames),
               processed=len(processed))
     if not all_fnames:
@@ -2367,7 +2429,13 @@ def rebuild_skipped_cash(user_id: str | None = None,
     taken_syms = ({p['symbol'] for p in data['positions']} |
                   {t['symbol'] for t in data['closed']})
 
-    all_fnames = sorted(list_files(_SIGNALS_DIR, 'signals_*.csv'))
+    # Same book-scoped sources admission uses, or "missed trades" is computed
+    # over a different signal set than the one the book could actually buy from.
+    all_fnames = sorted(
+        _signal_ref(d, f)
+        for d in _book_signals_dirs(book)
+        for f in list_files(d, 'signals_*.csv')
+    )
     if max_age_days:
         cutoff = (datetime.now(_NY_TZ).date()
                   - timedelta(days=max_age_days)).isoformat()
