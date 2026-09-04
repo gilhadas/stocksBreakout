@@ -431,3 +431,28 @@ def test_every_module_level_patch_is_restored():
     assert not missing, (
         f"restore_sandbox_patches does not restore {missing} — these will leak "
         f"into every test that runs after this file. Add them to `saved`.")
+
+
+def test_stub_atr_is_a_fraction_so_admission_actually_runs():
+    """`_stub_network` must not block the very path it exists to keep alive.
+
+    `_compute_atr_pct` returns atr/close — a FRACTION. The stub returned 3.0
+    (a 300% ATR), so the portfolio ATR risk cap blocked the first candidate into
+    an empty book and every one after it, and every replay arm added zero
+    positions while reporting success. A units error in a stub is invisible:
+    nothing errors, the run just measures less than it claims to.
+    """
+    import auto_portfolio as ap
+    import debug_memory_scan as dbg
+
+    real = ap._compute_atr_pct
+    try:
+        dbg._stub_network()
+        assert ap._compute_atr_pct('X') < ap.MAX_PORTFOLIO_ATR_RISK, (
+            'stubbed ATR exceeds the whole-portfolio risk cap on a single trade')
+        blocked = ap._check_portfolio_balance(
+            ap._empty(), 'NVDA', 'swing', ap.POSITION_SIZE_PCT)
+        assert not blocked['blocked'], (
+            f"the stub blocks the first add into an empty book: {blocked['reason']}")
+    finally:
+        ap._compute_atr_pct = real

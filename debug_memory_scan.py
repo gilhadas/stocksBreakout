@@ -257,7 +257,15 @@ def _stub_network() -> None:
     ap._fetch_entry_and_current = fake_fetch
     ap._detect_split_factor = fake_split
     ap._save_entry_price_cache = lambda *a, **k: None
-    ap._compute_atr_pct = lambda symbol: 3.0
+    # ⚠ A FRACTION, not a percent — `_compute_atr_pct` returns atr/close (0.03 =
+    # 3%). This stub returned 3.0, i.e. a 300% ATR, so the portfolio ATR risk cap
+    # (MAX_PORTFOLIO_ATR_RISK = 0.12) blocked the FIRST candidate into an empty
+    # book and every one after it: 0.05 × 3.0 = 15% projected risk on trade one.
+    # Every replay arm therefore added zero positions and never exercised the
+    # accumulators this function's own docstring exists to keep alive. Found
+    # 2026-09-04 (see CLAUDE.md §33) — it leaked into the test session too, where
+    # it silently blocked admission in every suite that ran after this one.
+    ap._compute_atr_pct = lambda symbol: 0.03
     ap._queue_ib_order = lambda pos: None
 
     # The admission path also does a yfinance *sector* lookup per candidate

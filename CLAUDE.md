@@ -1729,6 +1729,17 @@ Mac artifact — always read the box's. There is **no default
 writes per-user books only, so an unauthenticated Streamlit session (`user_id=None`) loads
 an empty legacy book and correctly reports "No open positions."
 
+> **🔴 BOTH identity facts above are STALE as of 2026-09-04** (verified by reading
+> the box, not recalled). Production now has **three** users — a third,
+> `a06cb8c8-bbe5-4b74-9aae-02018a59b29f`, forked 2026-09-01 — and a default
+> `scanner_output/portfolio/auto_portfolio.json` **does** exist, holding 1
+> position and carrying no fork stamp. Practical consequence: `fork_books.py`
+> now creates a variant for 3 users **plus** the default book, not 2 users; and
+> anything that reasoned "the default book is always empty in production" no
+> longer holds. Re-read the box before trusting either number again — this is
+> the second time a "still open"/identity note in this file has been carried
+> forward across a change that silently invalidated it (cf. §22.3's resolution).
+
 ### 23.2 A manual Streamlit scan is not a small cron scan
 `pages/scan_page.py::_run_scan` calls `orchestrator.scan_watchlist` + `save_results`
 **directly**, so the signals CSV lands in S3 like any other and `scan_and_add` — which is
@@ -2787,10 +2798,30 @@ box only**: the local `users.db` is the stale Mac artifact and would resurrect a
 book for the user deleted 2026-08-04 (§23.1). Append the 11 `all.txt` symbols on
 the box; do not overwrite it from the Mac.
 
+**Pre-deploy baseline, read from the box 2026-09-04** — the numbers the
+post-deploy check is against. `fork.date` on every control book, which is what
+the §33 `ensure_forked` guard exists to protect:
+
+| book | positions | fork.date | peer |
+|---|---|---|---|
+| `cf699841…/auto_portfolio.json` | 11 | **2026-08-11** | autoswap |
+| `6cf6c4a5…/auto_portfolio.json` | 12 | **2026-08-11** | autoswap |
+| `a06cb8c8…/auto_portfolio.json` | 8 | **2026-09-01** | autoswap |
+| `portfolio/auto_portfolio.json` (default) | 1 | *(none)* | — |
+
+All intact — the landmine never fired, because the trend book has never been
+forked in production. The default book having no stamp is expected and correct:
+under the new guard it is a first-ever fork and *will* be stamped, which is the
+one case that should still write.
+
+Note control and autoswap hold identical position counts in all three books
+after ~3.5 weeks — consistent with §11's finding that swap-on-skip fires
+essentially never; the policy A/B has not yet produced a divergence to measure.
+
 **Verify after the first scan:** control's position set is unchanged versus the
 run before deploy (the real regression check), `skipped_universe` is non-zero
 for trend in `cron_swing.log`, every symbol trend admitted is in `input/trend.txt`,
-and control's `fork.date` in S3 did not move.
+and the three `fork.date` values above did not move.
 
 ### Open
 - Not yet deployed as of this writing — the steps above are untested against the
@@ -2807,3 +2838,15 @@ and control's `fork.date` in S3 did not move.
 - Nothing enforces the `trend.txt ⊆ all.txt` invariant. A test or a scan-time
   warning naming trend symbols absent from the scanned universe would turn the
   standing maintenance burden above into something that announces itself.
+- `debug_memory_scan._stub_network` stubbed `_compute_atr_pct` as **3.0** when
+  the real function returns a FRACTION (`atr/close`, so 0.03 = 3%). At 300% the
+  portfolio ATR risk cap (0.12) blocked the first candidate into an empty book —
+  `0.05 × 3.0 = 15%` on trade one — so **every replay arm added zero positions**
+  while reporting success, silently defeating the docstring's own stated purpose
+  ("the admission path must run to completion, or the accumulators under test …
+  never get exercised"). Fixed to 0.03 and pinned. §19–§21's conclusions stand:
+  they measured the READ side (per-call S3 client growth, file replay), which
+  this never touched — but the harness has never actually exercised the write
+  side, so do not read its `added`/`skipped_cash` output as meaningful for any
+  run before 2026-09-04. A units error in a stub is invisible: nothing fails,
+  the run just measures less than it claims to.
