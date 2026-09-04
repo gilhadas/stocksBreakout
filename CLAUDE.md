@@ -2679,19 +2679,34 @@ under test.
 Consequence: nothing about the scan, the crontab, or signal provenance changed.
 `--cron` already calls `scan_and_add_all_users()`, which loops user × book.
 
-### The 12-symbol coverage gap, and the one that does not exist
-12 trend symbols were **not** in `all.txt` and therefore could never have
-produced a signal for this book: `AGNC BLKB CHWY GTLB HIVE LPTH NOK OZEM PYPD
-SIVE TE WGMI`. 11 were probed on yfinance and resolve; **`SIVE` does not** (a
-Stockholm listing, `OMXSTO:SIVE` in the source export). The 11 were appended to
-`input/all.txt` locally.
+### The coverage gap — inherent to filter-not-rescan, and it needs maintaining
+The live `input/trend.txt` is a hand-curated **148-symbol** list (placed on the
+box 2026-09-04; the repo copy is an exact mirror of it, NOT the `trending.txt`
+seed the first draft used). **23 of its 148 were not in `all.txt`** and could
+therefore never produce a signal for this book. Probed from the box — per §27,
+the Mac rate-limits and would have reported live tickers as delisted — **22
+resolve and were added to `all.txt`**: `AEHR ASST AVAH CBRS DRAM ET GRND GTLB
+HIVE KBR MELI MRVL NCLD NOK PLUG RIVN SKHY SOXL SOXS SPCX SUGP WGMI`. Only
+`XRPUSD` does not; it is a crypto pair and yfinance wants `XRP-USD`. It is left
+in `trend.txt` as an inert filter entry (costs no fetch, will never contribute).
+
+⚠ **This is a standing maintenance burden, not a one-off.** Because the trend
+book filters a stream it does not generate, *any symbol added to `trend.txt`
+that is absent from `all.txt` is silently invisible* — no error, it simply never
+appears. Every edit to `trend.txt` must be followed by the set-difference check
+against `all.txt`, and the resolvable remainder appended.
+
+It also means the choice is not free: giving the trend book full coverage widens
+the scanned universe for control and autoswap too (+22/1363 ≈ 1.6%). Both arms
+shift together so the policy A/B stays fair, but it is a real perturbation of a
+running experiment, and there is no way to avoid it under filter-not-rescan.
 
 ⚠ **`input/all.txt` is NOT in git** (blanket `*.txt` ignore, no watchlist is
-tracked) and the local copy may differ from the box's, so it was deliberately
-NOT committed and must NOT be copied wholesale over production's. Append the 11
-on the box idempotently instead. Note this widens the candidate pool for control
-and autoswap by 11/1374 too — both arms shift together, so the policy A/B stays
-fair, but it is a real (small) perturbation of a running experiment.
+tracked), so it is not committed and must NOT be copied wholesale over
+production's. It was verified on 2026-09-04 that the box's copy (1363 symbols)
+and the Mac's were byte-identical apart from local edits, so the repo copy is
+currently a faithful base — but that is a snapshot, not a guarantee. Re-diff
+before trusting it again, and append the 22 on the box idempotently.
 
 `input/trend.txt` **is** force-added to git (`git add -f`), unlike every other
 watchlist, because it is load-bearing for admission logic rather than just a
@@ -2786,6 +2801,9 @@ and control's `fork.date` in S3 did not move.
   computes. Per §26 the equity delta needs months; there is no per-swap
   counterpart here to read sooner, so this A/B is inherently slower to settle
   than the swap one.
-- `SIVE` remains in `input/trend.txt` and is inert (never in `all.txt`, does not
-  resolve on yfinance). Harmless — it is a filter entry, not a scan input, so it
-  costs no fetch — but it will never contribute.
+- `XRPUSD` remains in `input/trend.txt` and is inert. Harmless — a filter entry,
+  not a scan input, so it costs no fetch — but it will never contribute. If it is
+  wanted, it needs the `XRP-USD` yfinance form AND an `all.txt` entry.
+- Nothing enforces the `trend.txt ⊆ all.txt` invariant. A test or a scan-time
+  warning naming trend symbols absent from the scanned universe would turn the
+  standing maintenance burden above into something that announces itself.
