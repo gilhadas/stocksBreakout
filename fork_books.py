@@ -93,19 +93,29 @@ def fork_user(user_id, label, *, force=False, dry_run=False) -> dict:
             out['skipped'].append(variant)
             continue
 
+        # What the variant will actually contain depends on its seed. A book
+        # seeded from control gets control's holdings; a `seed: None` book
+        # (universe variants — it could never have bought control's names) starts
+        # empty at INITIAL_CAPITAL. Reporting control's counts for both made the
+        # 2026-09-04 trend fork print "WOULD fork (12 positions, 21 closed,
+        # capital $99,111.00)" for a book that was about to be created empty —
+        # a dry run that describes the wrong outcome is worse than no dry run.
+        if ap.BOOKS[variant].get('seed'):
+            shape = (f"{n_pos} positions, {n_closed} closed, "
+                     f"capital ${control.get('capital', 0):,.2f}")
+        else:
+            shape = (f"empty book, capital ${ap.INITIAL_CAPITAL:,.2f} "
+                     f"— seed=None, not a clone of control")
+
         if dry_run:
-            print(f"  → {label} [{variant}]: WOULD fork "
-                  f"({n_pos} positions, {n_closed} closed, "
-                  f"capital ${control.get('capital', 0):,.2f})")
+            print(f"  → {label} [{variant}]: WOULD fork ({shape})")
         else:
             # The clone itself lives in auto_portfolio.ensure_forked — the same
             # code the automatic first-write path runs — so an explicit fork and
             # an auto-fork produce byte-identical books. This script keeps the
             # --force / --dry-run / reporting shell around it.
             ap.ensure_forked(user_id=user_id, book=variant, force=True)
-            print(f"  ✓ {label} [{variant}]: forked "
-                  f"({n_pos} positions, {n_closed} closed, "
-                  f"capital ${control.get('capital', 0):,.2f})")
+            print(f"  ✓ {label} [{variant}]: forked ({shape})")
         out['forked'].append(variant)
 
     return out

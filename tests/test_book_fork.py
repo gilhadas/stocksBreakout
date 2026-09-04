@@ -133,3 +133,27 @@ def test_fork_of_an_empty_book_is_harmless(sandbox):
 def test_variant_books_excludes_the_control_book():
     assert ap.DEFAULT_BOOK not in fork_books.VARIANT_BOOKS
     assert set(fork_books.VARIANT_BOOKS) == set(ap.BOOKS) - {ap.DEFAULT_BOOK}
+
+
+def test_dry_run_describes_a_seedless_book_as_empty(sandbox, capsys):
+    """A dry run that describes the wrong outcome is worse than no dry run.
+
+    The reporting shell printed control's position/capital counts for every
+    variant. For a `seed: None` book — which starts empty, because a universe
+    variant could never have bought control's names — that announced
+    "WOULD fork (12 positions, ... capital $99,111.00)" for a book about to be
+    created with 0 positions and $100,000 (observed on the live 2026-09-04
+    trend fork).
+    """
+    _seed_control()
+    fork_books.fork_user('U1', 'u@x', force=False, dry_run=True)
+    out = capsys.readouterr().out
+
+    trend_line = next(l for l in out.splitlines() if '[trend]' in l)
+    assert 'empty book' in trend_line and 'seed=None' in trend_line, trend_line
+    assert '1 positions' not in trend_line, \
+        "dry run still reports control's holdings for a book that starts empty"
+
+    auto_line = next(l for l in out.splitlines() if '[autoswap]' in l)
+    assert 'positions' in auto_line and 'empty book' not in auto_line, \
+        "a control-seeded book must still report what it will actually clone"
