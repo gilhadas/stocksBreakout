@@ -122,10 +122,11 @@ def _save_portfolio_json(data: dict, user_id: str):
         pass
 
 
-# ── Book variants (live control-vs-autoswap A/B) ─────────────────────────────
+# ── Book variants (live A/Bs) ────────────────────────────────────────────────
 
-_BOOK_DESC = ("Portfolio variant: 'control' (no swaps, the default and the book "
-              "every pre-A/B client sees) or 'autoswap'.")
+_BOOK_DESC = ("Portfolio variant. 'control' is the default and the book every "
+              "pre-A/B client sees; 'autoswap' varies the swap policy; 'trend' "
+              "varies the universe. Call /portfolio/books rather than hardcoding.")
 
 
 class BookRequest(BaseModel):
@@ -170,7 +171,10 @@ def list_books(current_user: User = Depends(get_current_user)):
         "default": ap.DEFAULT_BOOK,
         "books": [
             {"name": n, "label": c["label"], "auto_swap": c["auto_swap"],
-             "max_swaps_per_day": c["max_swaps_per_day"]}
+             "max_swaps_per_day": c["max_swaps_per_day"],
+             # Which watchlist constrains this book, if any. Null means "may buy
+             # anything in the signal stream" — the pre-existing behaviour.
+             "universe": c.get("universe")}
             for n, c in ap.BOOKS.items()
         ],
     }

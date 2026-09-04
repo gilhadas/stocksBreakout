@@ -224,23 +224,35 @@ def swap_attribution(user_id: str | None = None,
 def compare_books(user_id: str | None = None, price_lookup=None) -> dict:
     """Full A/B payload for one user: per-book metrics + swap attribution."""
     books = {}
+    raw = {}
     fork_date = None
     for name in BOOKS:
         data = ap.load(user_id=user_id, book=name)
+        raw[name] = data
         fork_date = fork_date or (data.get('fork') or {}).get('date')
         books[name] = {'label': BOOKS[name]['label'], **book_metrics(data)}
 
+    control_data = raw.get(DEFAULT_BOOK) or {}
     control = books.get(DEFAULT_BOOK, {})
     deltas = {}
     for name, m in books.items():
         if name == DEFAULT_BOOK:
             continue
+        # Difference over the VARIANT's window, not control's. Books forked on
+        # the same day (control/autoswap) share a window and this is a no-op; a
+        # book added later has its own start date, and subtracting control's
+        # since-inception numbers from a three-week-old book's would compare two
+        # different stretches of market and read as a huge spurious edge.
+        base = control
+        if m.get('since') and m['since'] != control.get('since'):
+            base = book_metrics(control_data, since=m['since'])
         deltas[name] = {
-            k: (None if m.get(k) is None or control.get(k) is None
-                else round(m[k] - control[k], 2))
+            k: (None if m.get(k) is None or base.get(k) is None
+                else round(m[k] - base[k], 2))
             for k in ('return_pct', 'sharpe', 'max_drawdown_pct',
                       'realized_since', 'total_value')
         }
+        deltas[name]['since'] = m.get('since')
 
     return {
         'user_id':     user_id,

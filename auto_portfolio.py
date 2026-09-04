@@ -45,12 +45,33 @@ BOOKS = {
         'label':  'Control (no swaps)',
         'auto_swap': False,
         'max_swaps_per_day': 0,
+        'universe': None,
+        'seed': 'control',
+        'advise_swaps': True,
     },
     'autoswap': {
         'suffix': '_autoswap',
         'label':  'Auto-swap',
         'auto_swap': True,
         'max_swaps_per_day': 3,
+        'universe': None,
+        'seed': 'control',
+        'advise_swaps': True,
+    },
+    # Universe A/B: same engine, same signal stream, same admission rules — the
+    # ONLY difference is that this book may buy nothing outside `universe`.
+    # Seeded empty rather than cloned from control, because cloning would open
+    # it holding control's broad-universe names and there would be nothing left
+    # to measure. Advice is off: the swap stage runs per book and Telegram has
+    # no per-book routing, so a third advising book is a third daily message.
+    'trend': {
+        'suffix': '_trend',
+        'label':  'Trend (curated list)',
+        'auto_swap': False,
+        'max_swaps_per_day': 0,
+        'universe': 'input/trend.txt',
+        'seed': None,
+        'advise_swaps': False,
     },
 }
 DEFAULT_BOOK = 'control'
@@ -71,6 +92,54 @@ def _book_cfg(book: str | None) -> dict:
         raise ValueError(
             f"unknown book {name!r} — expected one of {sorted(BOOKS)}"
         ) from None
+
+
+_UNIVERSE_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _book_universe(book: str | None) -> frozenset[str] | None:
+    """Symbols this book is allowed to buy, or None when it may buy anything.
+
+    None (no `universe` configured) is the pre-existing behaviour and must stay
+    distinguishable from "configured but empty" — the two mean opposite things.
+
+    FAILS CLOSED. A configured watchlist that is missing or parses to zero
+    symbols returns an EMPTY set, so the book admits nothing and the breakage is
+    obvious on day one. Returning None there would silently turn a universe book
+    into a second copy of control and the A/B would look healthy while measuring
+    nothing — the same shape as every "state that looks live but isn't" bug in
+    sections 22/23. The file is gitignored, lives on a docker volume seeded once,
+    and is copied in by hand, so "missing" is a real operational state.
+
+    A successful read is cached for the life of the process. Under supercronic
+    each scan is its own process, so an edited watchlist takes effect on the very
+    next scan; the long-lived API container would keep its copy until restarted,
+    which only affects the missed-trades view, never admission.
+    """
+    path = _book_cfg(book).get('universe')
+    if not path:
+        return None
+
+    cached = _UNIVERSE_CACHE.get(path)
+    if cached is not None:
+        return cached
+
+    import logging as _logging
+    from utils import get_watchlist_from_file
+
+    symbols = frozenset(get_watchlist_from_file(path))
+    if not symbols:
+        _logging.getLogger(__name__).error(
+            f"book {book!r}: universe {path!r} is missing or empty — the book "
+            f"will admit NO signals until it is restored. Not caching, so a "
+            f"fixed file takes effect on the next scan without a restart."
+        )
+        return frozenset()
+
+    _UNIVERSE_CACHE[path] = symbols
+    _logging.getLogger(__name__).info(
+        f"book {book!r}: universe {path!r} loaded, {len(symbols)} symbols")
+    return symbols
 
 
 def _portfolio_path_for(user_id: str | None = None,
@@ -340,10 +409,19 @@ def _book_has_state(data: dict) -> bool:
 def ensure_forked(user_id: str | None = None,
                   book: str | None = DEFAULT_BOOK,
                   *, force: bool = False) -> dict:
-    """Clone the control book into `book` if it has never been used.
+    """Seed a variant book if it has never been used.
 
     No-op for the control book itself, and no-op for any variant that already has
     state (unless `force`). Returns the variant's data either way.
+
+    How it is seeded depends on the book's `seed` config:
+
+    * ``seed='control'`` — clone control. Right for a book that differs from
+      control only in POLICY (autoswap): both arms must start from the same
+      holdings or the difference between them is just their opening positions.
+    * ``seed=None`` — start empty at INITIAL_CAPITAL. Right for a book that
+      differs in UNIVERSE (trend): cloning would open it holding names its own
+      watchlist does not even contain, and it could never have bought them.
 
     Both books are stamped with the same fork record, so neither can be read as
     "the original" and book_compare has a `since` date on both sides. An empty
@@ -368,11 +446,17 @@ def ensure_forked(user_id: str | None = None,
     stamp = datetime.now(_NY_TZ)
     fork_date = stamp.strftime('%Y-%m-%d')
 
-    clone = copy.deepcopy(control)
+    seed = cfg.get('seed', DEFAULT_BOOK)
+    if not seed:
+        clone = _empty()
+    elif seed == DEFAULT_BOOK:
+        clone = copy.deepcopy(control)          # already loaded above
+    else:
+        clone = copy.deepcopy(load(user_id=user_id, book=seed))
     clone['fork'] = {
         'date':   fork_date,
         'at':     stamp.isoformat(),
-        'source': DEFAULT_BOOK,
+        'source': seed,
         'peer':   DEFAULT_BOOK,
         'book':   name,
     }
@@ -384,7 +468,19 @@ def ensure_forked(user_id: str | None = None,
     _save(clone, user_id=user_id, book=name)
 
     # Stamp control too, so both sides agree on when the clock started.
-    if control.get('fork', {}).get('date') != fork_date or force:
+    #
+    # ⚠ Control's stamp is the `since` date book_compare measures every one of its
+    # metrics from, so it must NOT move just because some later book was forked:
+    # add a third book today and the running control-vs-autoswap comparison would
+    # silently restart from today, discarding every trade since the original fork.
+    # A book added later gets its own start date and is compared over its own
+    # window (book_compare normalises this); it does not drag control's clock.
+    #
+    # So: stamp control the first time it is ever forked, and re-stamp it only on
+    # a forced re-fork of the very book it is already paired with — which is the
+    # deliberate "restart this experiment" case fork_books --force exists for.
+    _ctrl_fork = control.get('fork') or {}
+    if (not _ctrl_fork.get('date')) or (force and _ctrl_fork.get('peer') == name):
         control['fork'] = {
             'date':   fork_date,
             'at':     stamp.isoformat(),
@@ -665,7 +761,13 @@ def _scan_and_add_impl(min_date: str | None = None,
     skipped_risk  = []
     skipped_cap   = []
     skipped_no_v9c = 0
+    skipped_universe = 0
     files_scanned  = 0
+
+    # None => this book may buy anything (control/autoswap, unchanged behaviour).
+    # A frozenset => only these symbols; empty means the configured watchlist is
+    # missing, and the book deliberately admits nothing (see _book_universe).
+    universe = _book_universe(book)
 
     # Sort oldest-first so chronological order is respected.
     # list_files() returns newest-first; alphabetical sort gives oldest-first
@@ -796,8 +898,23 @@ def _scan_and_add_impl(min_date: str | None = None,
                         sel &= pd.to_numeric(df_filtered['MinerviniScore'], errors='coerce').fillna(0) >= sm['min_minervini']
                     df_filtered = df_filtered[sel].copy()
 
+            # Universe gate: books with a configured watchlist may only buy
+            # symbols on it. Applied AFTER the quality gates so skipped_no_v9c
+            # keeps meaning "failed the quality bar" — a row dropped here passed
+            # every rule and was rejected purely for being off-universe, which is
+            # the one number that says whether this book is actually a variant.
+            passed_quality = len(df_filtered)
+            if universe is not None and passed_quality:
+                on_universe = df_filtered['Symbol'].astype(str).str.strip().isin(universe)
+                skipped_universe += int((~on_universe).sum())
+                df_filtered = df_filtered[on_universe].copy()
+
             if df_filtered.empty:
-                skipped_no_v9c += len(df_raw)
+                # Only attribute this file to the quality gate if the quality gate
+                # is what emptied it; otherwise every off-universe file would
+                # inflate skipped_no_v9c and hide why the book bought nothing.
+                if not passed_quality:
+                    skipped_no_v9c += len(df_raw)
                 processed.add(fname)
                 continue
             df_filtered['_source_file'] = fname
@@ -1124,7 +1241,8 @@ def _scan_and_add_impl(min_date: str | None = None,
               skipped_cash=len(data.get('skipped_cash', [])))
 
     return _build_result(added_syms, skipped_dup, skipped_cash,
-                         skipped_no_v9c, files_scanned, data, stale_clamped)
+                         skipped_no_v9c, files_scanned, data, stale_clamped,
+                         skipped_universe=skipped_universe)
 
 
 def _queue_ib_order(pos: dict):
@@ -1614,7 +1732,8 @@ def _find_stop_hit_date(symbol: str, stop: float,
     return fallback
 
 
-def _build_result(added, dup, cash, no_v9c, files, data, stale_clamped=None):
+def _build_result(added, dup, cash, no_v9c, files, data, stale_clamped=None,
+                  skipped_universe=0):
     return {
         'added':           len(added),
         'added_symbols':   added,
@@ -1622,6 +1741,9 @@ def _build_result(added, dup, cash, no_v9c, files, data, stale_clamped=None):
         'skipped_cash':    len(cash),
         'skipped_cash_syms': cash,
         'skipped_no_v9c':  no_v9c,
+        # Rows that cleared every quality gate and were rejected only for being
+        # off this book's universe. Always 0 for books without one.
+        'skipped_universe': skipped_universe,
         'files_scanned':   files,
         # {'requested': ..., 'applied': ...} when a min_date was pulled forward to
         # the age bound, else None. Returned rather than only logged so the caller
@@ -2241,6 +2363,7 @@ def rebuild_skipped_cash(user_id: str | None = None,
     from utils import list_files
 
     data      = _load_for_write(user_id=user_id, book=book)
+    universe  = _book_universe(book)
     taken_syms = ({p['symbol'] for p in data['positions']} |
                   {t['symbol'] for t in data['closed']})
 
@@ -2269,9 +2392,16 @@ def rebuild_skipped_cash(user_id: str | None = None,
         if 'Quality' not in df.columns or 'Symbol' not in df.columns:
             continue
         # type_bypass=False — deliberately stricter than admission; see _v9h_mask.
+        v9h_frame = df[_v9h_mask(df, type_bypass=False)]
+        # Same universe gate admission uses, or "missed trades" lists names this
+        # book was never eligible to buy — every off-universe signal would show
+        # up as an opportunity it passed on.
+        if universe is not None and not v9h_frame.empty:
+            v9h_frame = v9h_frame[
+                v9h_frame['Symbol'].astype(str).str.strip().isin(universe)]
         per_file.append((fname, _date_from_filename(fname),
                          _mode_from_filename(fname),
-                         df[_v9h_mask(df, type_bypass=False)]))
+                         v9h_frame))
 
     # Keep live-breakout entries (not in any signal file) so they survive the rebuild.
     # Re-validate their stop/target in case the original scanner used bad price data.
@@ -3268,6 +3398,11 @@ def _run_swap_stage(data: dict,
     _logger = _log.getLogger(__name__)
 
     cfg = _book_cfg(book)
+    # A book that neither executes nor advises has no swap stage at all. Without
+    # this, every book added to the registry becomes another daily Telegram
+    # stream into a chat that still has no per-book routing.
+    if not cfg.get('auto_swap') and not cfg.get('advise_swaps', True):
+        return []
     if not data.get('positions') or not data.get('skipped_cash'):
         return []
 

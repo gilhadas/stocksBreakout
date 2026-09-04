@@ -92,8 +92,10 @@ def test_refork_is_refused_without_force(sandbox):
     ap._save(var, user_id='U1', book='autoswap')
 
     out = fork_books.fork_user('U1', 'u@x', force=False, dry_run=False)
-    assert out['skipped'] == ['autoswap']
-    assert out['forked'] == []
+    # Registry-driven, not a hardcoded list: adding a book to BOOKS must not
+    # make this test fail for a reason that has nothing to do with re-forking.
+    assert 'autoswap' in out['skipped']
+    assert 'autoswap' not in out['forked']
 
     after = ap.load(user_id='U1', book='autoswap')
     assert 'DIVERGED' in [p['symbol'] for p in after['positions']], \
@@ -108,14 +110,14 @@ def test_force_does_overwrite(sandbox):
     ap._save(var, user_id='U1', book='autoswap')
 
     out = fork_books.fork_user('U1', 'u@x', force=True, dry_run=False)
-    assert out['forked'] == ['autoswap']
+    assert 'autoswap' in out['forked']
     assert len(ap.load(user_id='U1', book='autoswap')['positions']) == 1
 
 
 def test_dry_run_writes_nothing(sandbox):
     _seed_control()
     out = fork_books.fork_user('U1', 'u@x', force=False, dry_run=True)
-    assert out['forked'] == ['autoswap']
+    assert 'autoswap' in out['forked']
     assert ap.load(user_id='U1', book='autoswap')['positions'] == [], \
         "--dry-run must not create the variant"
     assert ap.load(user_id='U1', book='control').get('fork') is None, \
@@ -124,7 +126,7 @@ def test_dry_run_writes_nothing(sandbox):
 
 def test_fork_of_an_empty_book_is_harmless(sandbox):
     out = fork_books.fork_user('U1', 'u@x', force=False, dry_run=False)
-    assert out['forked'] == ['autoswap']
+    assert 'autoswap' in out['forked']
     assert ap.load(user_id='U1', book='autoswap')['positions'] == []
 
 

@@ -239,26 +239,51 @@ def test_scan_and_add_is_silent_when_tracing_is_off(monkeypatch, caplog):
 def restore_sandbox_patches():
     """Undo `_sandbox`'s module-level reassignments after the test.
 
-    `debug_memory_scan._sandbox` patches by plain assignment, not monkeypatch —
-    correct for a standalone CLI run, but under pytest the patches survive into
-    every later test in the session. That leaked `_portfolio_path_for` stub into
-    unrelated suites and failed them with a TypeError as soon as the real
-    function grew a `book` parameter. Save and restore the attributes it owns.
+    `debug_memory_scan._sandbox` AND `_stub_network` patch by plain assignment,
+    not monkeypatch — correct for a standalone CLI run, but under pytest the
+    patches survive into every later test in the session. That leaked
+    `_portfolio_path_for` stub into unrelated suites and failed them with a
+    TypeError as soon as the real function grew a `book` parameter.
+
+    ⚠ `_stub_network`'s patches were NOT covered when that was first fixed, and
+    they bite harder because they fail *silently*: the leaked
+    `_compute_atr_pct = lambda symbol: 3.0` is read by the portfolio-balance
+    guard as a 300% ATR, so the risk cap blocks EVERY admission in every later
+    test. Nothing errors — a later suite just sees `added_symbols == []` and
+    looks like a broken feature rather than a polluted session. Found 2026-09-04
+    when it silently emptied the trend book's admission tests.
+
+    Save and restore every attribute both functions own.
     """
     import auto_portfolio as ap
+    import sentiment
     import utils
 
     saved = {
+        # _sandbox
         (ap, '_portfolio_path_for'): ap._portfolio_path_for,
         (ap, '_ENTRY_CACHE_PATH'):   ap._ENTRY_CACHE_PATH,
         (utils, '_is_cloud'):        utils._is_cloud,
         (utils, 'save_json'):        utils.save_json,
+        # _stub_network
+        (ap, '_fetch_entry_and_current'):  ap._fetch_entry_and_current,
+        (ap, '_detect_split_factor'):      ap._detect_split_factor,
+        (ap, '_save_entry_price_cache'):   ap._save_entry_price_cache,
+        (ap, '_compute_atr_pct'):          ap._compute_atr_pct,
+        (ap, '_queue_ib_order'):           ap._queue_ib_order,
+        (sentiment, 'get_sector_for_ticker'): sentiment.get_sector_for_ticker,
     }
     try:
         yield
     finally:
         for (mod, name), val in saved.items():
             setattr(mod, name, val)
+        # Both functions also seed the real cache dicts (that is deliberate —
+        # they are part of what the harness measures). Left populated, a later
+        # test reads a stubbed price for a symbol it never stubbed.
+        ap._ENTRY_PRICE_CACHE.clear()
+        ap._SPLIT_CACHE.clear()
+        ap._CURRENT_PRICE_CACHE.clear()
 
 
 def test_harness_sandbox_blocks_s3_and_project_writes(tmp_path, monkeypatch,
@@ -370,3 +395,39 @@ def test_replay_succeeds_when_the_unbounded_arm_loaded_files(monkeypatch, caplog
 
     assert rc == 0, 'a valid A/B with a bounded arm at 0 files must still pass'
     assert 'INVALID MEASUREMENT' not in caplog.text
+
+
+# ── The restoring fixture must stay complete ────────────────────────────────
+#
+# Twice now a plain-assignment patch in debug_memory_scan has leaked into later
+# suites: first `_sandbox`'s `_portfolio_path_for` (loud, a TypeError), then
+# `_stub_network`'s `_compute_atr_pct` (silent — a 300% ATR that made the
+# balance guard block every admission in the session). Both were found by an
+# unrelated suite failing for reasons that had nothing to do with it.
+#
+# This is the structural half: it fails when a NEW plain assignment is added to
+# either function without being added to `restore_sandbox_patches`, instead of
+# waiting for some future suite to be mysteriously poisoned by it.
+
+def test_every_module_level_patch_is_restored():
+    import ast
+    import inspect
+    import debug_memory_scan as dbg
+
+    patched = set()
+    for fn in (dbg._sandbox, dbg._stub_network):
+        tree = ast.parse(inspect.getsource(fn).lstrip())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for tgt in node.targets:
+                # `mod.attr = ...` — a module-level reassignment that outlives
+                # the call. `x = ...` and `d[k] = ...` are local/contained.
+                if isinstance(tgt, ast.Attribute) and isinstance(tgt.value, ast.Name):
+                    patched.add(f'{tgt.value.id}.{tgt.attr}')
+
+    src = inspect.getsource(restore_sandbox_patches)
+    missing = sorted(p for p in patched if f"'{p.split('.')[1]}'" not in src)
+    assert not missing, (
+        f"restore_sandbox_patches does not restore {missing} — these will leak "
+        f"into every test that runs after this file. Add them to `saved`.")
