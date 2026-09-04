@@ -2853,6 +2853,38 @@ and the three `fork.date` values above did not move.
 - Not yet deployed as of this writing — the steps above are untested against the
   box.
 - No editing UI for `input/trend.txt`; changing it means editing and re-copying.
+
+⚠ **`trend.txt` exists in THREE places and nothing enforces that they agree.**
+It is tracked in git (force-added past the blanket `*.txt` rule), copied into
+the image at build, and served at runtime from the `input_data` **volume** —
+and the volume MASKS the image. So:
+
+* editing it in git, committing, pulling and rebuilding **does nothing** to the
+  running scanner: the volume copy still wins, and the change silently has no
+  effect on admissions;
+* editing the volume copy directly leaves git behind, and a fresh box or a
+  recreated volume resurrects the old list.
+
+This is the §13 `cron_jobs.txt`-vs-`docker/crontab` drift class again, and here
+it is worse in one respect: this file decides **which positions get opened**, so
+a silent divergence changes live trading rather than just logging.
+
+`tests/test_trend_book_universe.py` only checks the repo copy exists and parses;
+it runs against the repo and cannot see the box. So changing the list is a
+TWO-step operation, and the verification is not optional:
+
+```bash
+# 1. edit input/trend.txt, commit, push, pull on the box, then:
+docker compose cp ./input/trend.txt scanner-cron:/app/input/trend.txt
+# 2. prove all three agree (git blob / box checkout / running container):
+git show HEAD:input/trend.txt | sha256sum
+docker exec sb-scanner-cron sha256sum /app/input/trend.txt
+docker exec sb-scanner-cron python3 -c \
+  "import auto_portfolio as ap; print(len(ap._book_universe('trend')))"
+```
+Verified in sync 2026-09-04: `a8faf7f2dd8e`, 688 bytes, 148 symbols in all three.
+And remember the §33 subset rule — any symbol added here that is not in
+`all.txt` is silently invisible.
 - The trend book starts empty today while control has months of history, so
   `vs_control` is only meaningful over the shared window `book_compare` now
   computes. Per §26 the equity delta needs months; there is no per-swap
