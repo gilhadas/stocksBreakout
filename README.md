@@ -2144,6 +2144,7 @@ stat -f %Sm api/server.py auto_portfolio.py
 | `POST` | `/portfolio/refresh` | Refresh prices, auto-close stopped positions |
 | `POST` | `/push/register` | Register Expo push notification token |
 | `GET` | `/` | Web app (Expo static build from `mobile/dist/`) |
+| `GET` | `/greece` | Public Hebrew North-Greece family trip guide (`docs/greece/index.html`) |
 
 ### Environment Variables (`.env`)
 

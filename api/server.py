@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 from fastapi import Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -760,6 +761,19 @@ async def analyze_chat_endpoint(req: AnalyzeChatRequest, current_user: User = De
 @app.get("/analyze/llm-status")
 def analyze_llm_status(current_user: User = Depends(get_current_user)):
     return {"enabled": bool(os.getenv('ANTHROPIC_API_KEY'))}
+
+
+# ── Greece family trip guide (must be before the SPA mount at "/") ───────────
+_GREECE_HTML = Path(__file__).resolve().parent.parent / "docs" / "greece" / "index.html"
+
+
+@app.get("/greece")
+@app.get("/greece/")
+def greece_trip_guide():
+    """Public static Hebrew trip guide. Not part of the Expo SPA."""
+    if not _GREECE_HTML.exists():
+        raise HTTPException(status_code=404, detail="Greece guide not found")
+    return FileResponse(_GREECE_HTML, media_type="text/html; charset=utf-8")
 
 
 # ── Static Web App (must be last — mounts after all API routes) ──────────────

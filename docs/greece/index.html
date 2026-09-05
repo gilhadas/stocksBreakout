@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>טיול צפון יוון · 17.9–6.10.2026</title>
+<style>
+
+:root {
+  --bg:#f4f1ec; --card:#fffdf9; --ink:#1c2430; --muted:#5c6b7a; --line:#e6ddd0;
+  --sea:#1f6f8b; --sea-soft:#e7f4f8; --sun:#c47a2c; --sun-soft:#fff1e0;
+  --green:#2f6b4f; --green-soft:#e8f3ec; --warn:#9a3412; --warn-soft:#ffedd5;
+  --nav:#16324f; --shadow:0 10px 30px rgba(22,50,79,.08); --radius:18px;
+  --font:"Segoe UI","Heebo","Arial Hebrew",Arial,sans-serif;
+  --safe-top:env(safe-area-inset-top,0px); --safe-bottom:env(safe-area-inset-bottom,0px);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: var(--font);
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 500px at 100% -10%, #d9eef5 0%, transparent 55%),
+    radial-gradient(900px 400px at 0% 0%, #ffe8cc 0%, transparent 50%),
+    var(--bg);
+  line-height: 1.55;
+  -webkit-tap-highlight-color: transparent;
+}
+a { color: var(--sea); text-decoration: none; }
+#home { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+.app { display: grid; grid-template-columns: 300px 1fr; min-height: 100vh; }
+.side {
+  position: sticky; top: 0; height: 100vh; overflow: auto;
+  background: var(--nav); color: #eef5fb;
+  padding: 22px 16px 40px;
+}
+.side h1 { margin: 0 0 4px; font-size: 1.2rem; }
+.side .sub { color: #9db4c9; font-size: .85rem; margin-bottom: 14px; }
+.hint { display: none; }
+.search {
+  width: 100%; border: 0; border-radius: 12px; padding: 12px 14px;
+  margin-bottom: 12px; background: rgba(255,255,255,.1); color: #fff;
+  outline: none; font-size: 16px;
+}
+.search::placeholder { color: #9db4c9; }
+.nav-group-title {
+  font-size: .72rem; letter-spacing: .04em; color: #7f9bb3;
+  margin: 14px 6px 8px; text-transform: uppercase;
+}
+.nav-link {
+  display: block; background: rgba(255,255,255,.06); color: #d7e6f3;
+  padding: 14px 16px; border-radius: 14px; margin-bottom: 8px; position: relative;
+}
+.nav-link .nav-label { display: block; font-weight: 600; }
+.nav-link small { display: block; color: #8eabc2; font-size: .78rem; margin-top: 3px; }
+.nav-link:active, .nav-link:focus { background: rgba(255,255,255,.16); color: #fff; }
+
+main { padding: 24px 24px 80px; max-width: 980px; }
+.sheet-bar { display: none; }
+.panel { display: none; }
+.panel.is-open { display: block; }
+
+.hero {
+  background: linear-gradient(135deg, #16324f, #1f6f8b 55%, #2f6b4f);
+  color: #fff; border-radius: 24px; padding: 24px; box-shadow: var(--shadow); margin-bottom: 16px;
+}
+.hero h2 { margin: 0 0 8px; font-size: 1.5rem; }
+.hero p { margin: 0; opacity: .92; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.chip {
+  background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.18);
+  border-radius: 999px; padding: 6px 12px; font-size: .82rem;
+}
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px; margin-bottom: 12px; box-shadow: var(--shadow);
+}
+.card h3 { margin: 0 0 6px; font-size: 1.15rem; }
+.meta { color: var(--muted); font-size: .9rem; margin-bottom: 10px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.box { border-radius: 14px; padding: 12px 14px; border: 1px solid var(--line); background: #fff; }
+.box.sea { background: var(--sea-soft); border-color: #c5e3ec; }
+.box.sun { background: var(--sun-soft); border-color: #f0d7b5; }
+.box.green { background: var(--green-soft); border-color: #c9e2d4; }
+.box.warn { background: var(--warn-soft); border-color: #fdba74; }
+.box h4 { margin: 0 0 6px; font-size: .82rem; color: var(--muted); font-weight: 700; }
+.box .big { font-size: 1.1rem; font-weight: 700; }
+ul.clean { margin: 8px 0 0; padding: 0 1.1rem 0 0; }
+ul.clean li { margin: .35rem 0; }
+.tag {
+  display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: .75rem;
+  background: #eef2f6; color: var(--muted); margin-left: 4px;
+}
+.tag.ok { background: var(--green-soft); color: var(--green); }
+.tag.open { background: var(--warn-soft); color: var(--warn); }
+.tag.plan { background: var(--sea-soft); color: var(--sea); }
+.tag.must { background: #fee2e2; color: #991b1b; font-weight: 700; }
+.tag.nice { background: #e0e7ff; color: #3730a3; }
+.tag.skip { background: #f3f4f6; color: #6b7280; }
+
+.tag.kid-great { background: #dcfce7; color: #166534; }
+.tag.kid-good { background: #e0f2fe; color: #075985; }
+.tag.kid-ok { background: #fef9c3; color: #854d0e; }
+.tag.kid-hard { background: #fee2e2; color: #991b1b; }
+.food-box, .trails-box { margin-top: 12px; }
+.trails-table { width: 100%; border-collapse: collapse; font-size: .88rem; margin-top: 8px; }
+.trails-table th, .trails-table td {
+  border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: right; vertical-align: top;
+}
+.trails-table th { color: var(--muted); font-size: .75rem; font-weight: 700; }
+@media (max-width: 900px) {
+  .trails-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
+
+.prio-list { margin: 8px 0 0; padding: 0; list-style: none; }
+.prio-list li {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 8px 0; border-bottom: 1px solid var(--line);
+}
+.prio-list li:last-child { border-bottom: 0; }
+.prio-list .tag { flex: 0 0 auto; margin-top: 2px; }
+
+.drive { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0 4px; }
+.drive .arrow { align-self: center; color: var(--muted); font-weight: 700; }
+table.legs { width: 100%; border-collapse: collapse; font-size: .9rem; }
+table.legs th, table.legs td {
+  border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: right; vertical-align: top;
+}
+table.legs th { color: var(--muted); font-weight: 600; font-size: .8rem; }
+.checklist label {
+  display: flex; gap: 10px; align-items: flex-start; padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.day-title-row { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.footnote { font-size: .82rem; color: var(--muted); margin-top: 10px; }
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.btn {
+  border: 1px solid var(--line); background: var(--card); border-radius: 999px;
+  padding: 10px 16px; font: inherit; cursor: pointer;
+}
+.btn.primary { background: var(--sea); border-color: var(--sea); color: #fff; }
+
+@media (max-width: 900px) {
+  .app { display: block; }
+  .side {
+    position: static; height: auto; min-height: 100dvh;
+    padding: calc(18px + var(--safe-top)) 14px calc(30px + var(--safe-bottom));
+  }
+  .hint { display: block; color: #9db4c9; font-size: .92rem; margin: 0 2px 14px; }
+  .nav-link { padding: 16px 44px 16px 16px; }
+  .nav-link::after {
+    content: "‹"; position: absolute; left: 16px; top: 50%;
+    transform: translateY(-50%); color: #8eabc2; font-size: 1.5rem;
+  }
+  main { padding: 0; max-width: none; }
+  .toolbar { display: none; }
+
+  /* Mobile sheets via :target — no JS required */
+  .panel { display: none !important; }
+  .panel:target {
+    display: block !important;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--bg);
+    padding: 0 0 calc(28px + var(--safe-bottom));
+  }
+  .sheet-bar {
+    display: flex !important;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 110;
+    background: rgba(255,253,249,.96);
+    border-bottom: 1px solid var(--line);
+    padding: calc(10px + var(--safe-top)) 12px 10px;
+  }
+  .close-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 46px; height: 46px; border-radius: 14px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink);
+    font-size: 1.6rem; line-height: 1; flex: 0 0 auto;
+  }
+  .sheet-title { font-weight: 700; font-size: 1rem; }
+  .panel:target .card,
+  .panel:target .hero { margin-left: 14px; margin-right: 14px; }
+  .panel:target > .hero,
+  .panel:target > .card { margin-top: 12px; }
+  .grid2 { grid-template-columns: 1fr; }
+  table.legs { display: block; overflow-x: auto; }
+}
+
+@media (min-width: 901px) {
+  .sheet-bar { display: none !important; }
+  #overview.is-open, #overview:target { display: block; }
+}
+
+@media print {
+  .side, .toolbar, .sheet-bar { display: none !important; }
+  .panel { display: block !important; position: static !important; }
+}
+
+</style>
+</head>
+<body>
+<a id="home"></a>
+<div class="app">
+<nav class="side" aria-label="תפריט">
+<h1>טיול צפון יוון</h1>
+<div class="sub">17 בספט׳ – 6 באוק׳ 2026 · נדל + הדס (+ילד ~8)</div>
+<p class="hint">לחצו על יום לפתיחה. × חוזר לרשימה.</p>
+<input class="search" id="q" type="search" placeholder="חיפוש: מלון, חוף, נסיעה…" />
+<div class="nav-group-title">כללי</div>
+<a class="nav-link" href="#overview"><span class="nav-label">סקירה כללית</span><small>מסלול, מלונות, נסיעות</small></a>
+<a class="nav-link" href="#drives"><span class="nav-label">כל הנסיעות</span><small>זמנים ומרחקים</small></a>
+<a class="nav-link" href="#hotels"><span class="nav-label">מלונות</span><small>סטטוס הזמנות</small></a>
+<a class="nav-link" href="#checklist"><span class="nav-label">צ׳ק־ליסט</span><small>לפני ואחרי</small></a>
+<div class="nav-group-title">לפי ימים</div>
+<a class="nav-link" href="#d17"><span class="nav-label">17.9 · הגעה</span><small>שדה → גיאניטסה / אדסה–פוזאר</small></a>
+<a class="nav-link" href="#d18"><span class="nav-label">18–21.9 · זגורי</span><small>3 לילות · Pirrion</small></a>
+<a class="nav-link" href="#d21"><span class="nav-label">21–23.9 · פארגה</span><small>2 לילות · Lichnos Bay</small></a>
+<a class="nav-link" href="#d23"><span class="nav-label">23–25.9 · מטאורה</span><small>2 לילות · Divani</small></a>
+<a class="nav-link" href="#d25"><span class="nav-label">25–27.9 · אולימפוס</span><small>2 לילות · Litohoro Resort</small></a>
+<a class="nav-link" href="#d27"><span class="nav-label">27–30.9 · פליון</span><small>3 לילות · Nest by the Sea</small></a>
+<a class="nav-link" href="#d30"><span class="nav-label">30.9–6.10 · סיטוניה</span><small>מתוכנן · עדיין בלי מלון</small></a>
+<a class="nav-link" href="#d06"><span class="nav-label">6.10 · יציאה</span><small>סיטוניה → שדה סלוניקי</small></a>
+</nav>
+<main>
+<div class="toolbar"><button type="button" class="btn primary" onclick="window.print()">הדפסה / PDF</button></div>
+<section class="panel" id="overview" data-title="סקירה כללית">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">סקירה כללית</div></div>
+      <div class="hero">
+        <h2>מסלול צפון־מערב יוון → פליון → סיטוניה</h2>
+        <p>כ־20 ימים עם רכב. דגש על טבע, כפרים וים לקראת הסוף. התאריכים והמלונות לפי קובץ התכנון שלכם + השלמות ל־30.9–6.10.</p>
+        <div class="chips">
+          <span class="chip">17.9–6.10.2026</span>
+          <span class="chip">רכב שכור</span>
+          <span class="chip">TLV ↔ SKG (מומלץ)</span>
+          <span class="chip">סוכות / ביקוש גבוה</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>מפת מסלול בקצרה</h3>
+        <p class="meta">שדה סלוניקי → גיאניטסה → זגורי → פארגה → מטאורה → ליטוחורו → קאלה נרה (פליון) → סיטוניה → שדה</p>
+        <div class="grid2">
+          <div class="box sea">
+            <h4>ים</h4>
+            <div>פארגה · פליון · סיטוניה (עיקר הים)</div>
+          </div>
+          <div class="box green">
+            <h4>טבע / הרים</h4>
+            <div>פוזאר–אדסה · זגורי · מטאורה · אולימפוס</div>
+          </div>
+        </div>
+        <p class="footnote">זמני נסיעה הם הערכות כביש (כולל כבישי הרים). בקובץ שלכם מופיעים גם אומדנים שלכם — מוצגים יחד במסך הנסיעות.</p>
+      </div>
+
+
+      <div class="card">
+        <h3>עדיפויות · מה חובה / מה לוותר</h3>
+        <p class="meta">עם ילד ~8 ונהיגה רבה — עדיף פחות אטרקציות, יותר עמוק. אל תנסו “לסמן הכול”.</p>
+        <div class="box warn" style="margin-bottom:12px">
+          <h4>אל תפספסו בטיול (Top)</h4>
+          <ul class="clean">
+            <li>תצפית ויקוס (זגורי) + גשר אבן אחד</li>
+            <li>מטאורה — 2 מנזרים + שקיעה</li>
+            <li>סיטוניה: <strong>יום סירה בדיאפורוס</strong> + 2–3 חופים טובים</li>
+            <li>מפלי אורליאס או גיא אניפיאס (אחד מהם מספיק)</li>
+            <li>עיירת פארגה + שחייה בליכנוס</li>
+            <li>פליון: רכבת Moutzouris אם פועלת + מפרץ אחד (דאמוכארי)</li>
+          </ul>
+        </div>
+        <div class="box green">
+          <h4>אפשר לוותר בלי חרטה</h4>
+          <ul class="clean">
+            <li>ירידה מלאה לקניון ויקוס / פסגת אולימפוס</li>
+            <li>כל 6 מנזרי מטאורה (2–3 מספיקים)</li>
+            <li>גם אדסה וגם פוזאר ביום הגעה אם נוחתים מאוחר — בחרו אחד</li>
+            <li>גם אניפיאס וגם אורליאס באותו יום — עמוס מדי</li>
+            <li>שייט לאתוס / כל חוף בסיטוניה</li>
+            <li>עיירת גיאניטסה עצמה</li>
+          </ul>
+        </div>
+        
+        <div class="box sea" style="margin-top:12px">
+          <h4>מקרא מסלולים (גיל ~8)</h4>
+          <span class="tag kid-great">מעולה לילדים</span>
+          <span class="tag kid-good">טוב עם ליווי</span>
+          <span class="tag kid-ok">אפשרי אם רגילים ללכת</span>
+          <span class="tag kid-hard">קשה / לא מומלץ</span>
+          <p class="footnote">זמנים = הליכה הלוך־חזור בקצב משפחתי + עצירות קצרות. לבדוק מזג אוויר ופתיחה.</p>
+        </div>
+
+        <p class="footnote">בכל יום במדריך: <span class="tag must">חובה</span> <span class="tag nice">נחמד</span> <span class="tag skip">לוותר אם עייפים</span></p>
+      </div>
+
+      <div class="card">
+        <h3>סיכום לילות</h3>
+        <table class="legs">
+          <thead><tr><th>תאריכים</th><th>אזור</th><th>מלון</th><th>לילות</th><th>סטטוס</th></tr></thead>
+          <tbody>
+            <tr><td>17→18.9</td><td>גיאניטסה</td><td>Kornilios Istron Hotel</td><td>1</td><td><span class="tag ok">מוזמן</span></td></tr>
+            <tr><td>18→21.9</td><td>זגורי · אנו פדינה</td><td>Pirrion Wellness Boutique</td><td>3</td><td><span class="tag ok">מוזמן</span></td></tr>
+            <tr><td>—</td><td>זגורי · ויצה</td><td>Archontiko Evridikis</td><td>—</td><td><span class="tag open">לבטל כפילות</span></td></tr>
+            <tr><td>21→23.9</td><td>פארגה</td><td>Enjoy Lichnos Bay Village</td><td>2</td><td><span class="tag ok">מוזמן</span></td></tr>
+            <tr><td>23→25.9</td><td>מטאורה</td><td>Divani Meteora Hotel</td><td>2</td><td><span class="tag ok">מוזמן</span></td></tr>
+            <tr><td>25→27.9</td><td>ליטוחורו</td><td>Litohoro Olympus Resort Villas &amp; Spa</td><td>2</td><td><span class="tag ok">מוזמן</span></td></tr>
+            <tr><td>27→30.9</td><td>קאלה נרה · פליון</td><td>Nest by the Sea (Nilie)</td><td>3</td><td><span class="tag plan">לקבע · לבדוק תאריכי ספט׳</span></td></tr>
+            <tr><td>30.9→6.10</td><td>סיטוניה</td><td>טרם נבחר</td><td>~6</td><td><span class="tag open">פתוח</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+<section class="panel" id="drives" data-title="כל הנסיעות">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">כל הנסיעות</div></div>
+      <div class="card">
+        <h3>כל קטעי הנהיגה</h3>
+        <p class="meta">עמודת “בקובץ שלכם” = האומדן מגיליון הנסיעות. “הערכה מעודכנת” = לפי מחקר מפות (ללא מעבורות). הוסיפו מרווח לעצירות וכבישי הרים.</p>
+        <div class="box warn" style="margin-bottom:12px">
+          <h4>שימו לב</h4>
+          <strong>קאלה נרה → סיטוניה</strong> הוא יום נסיעה ארוך: ~4–4.5 שע׳ / ~340–360 ק״מ — לא קפיצה קצרה.
+        </div>
+        <table class="legs">
+          <thead>
+            <tr><th>תאריך</th><th>מ־</th><th>אל</th><th>בקובץ</th><th>הערכה מעודכנת</th><th>מרחק</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>17.9</td><td>שדה SKG</td><td>גיאניטסה / מלון</td><td>—</td><td>1–1.25 שע׳</td><td>~74–77 ק״מ</td></tr>
+            <tr><td>17.9</td><td>שדה SKG</td><td>אדסה</td><td>~2 שע׳</td><td>1.5–1.75 שע׳</td><td>~107–114 ק״מ</td></tr>
+            <tr><td>17.9</td><td>שדה SKG</td><td>פוזאר</td><td>~2.5 שע׳</td><td>1.75–2 שע׳ (עם מרווח עד 2.5)</td><td>~116–130 ק״מ</td></tr>
+            <tr><td>18.9</td><td>אדסה</td><td>אנו פדינה (זגורי)</td><td>~3.5 שע׳</td><td>3.5–4.5 שע׳</td><td>~255–275 ק״מ</td></tr>
+            <tr><td>18.9</td><td>פוזאר</td><td>אנו פדינה</td><td>~3.5 שע׳</td><td>3.75–4.75 שע׳</td><td>~275–290 ק״מ</td></tr>
+            <tr><td>21.9</td><td>זגורי</td><td>ליכנוס / פארגה</td><td>~2 שע׳</td><td>2.5–3.5 שע׳</td><td>~135–160 ק״מ</td></tr>
+            <tr><td>23.9</td><td>פארגה</td><td>קלמבקה</td><td>~3 שע׳</td><td>2.25–2.75 שע׳ (+כבישי אגרה)</td><td>~188–193 ק״מ</td></tr>
+            <tr><td>25.9</td><td>קלמבקה</td><td>פלאקה ליטוחורו</td><td>~2 שע׳</td><td>2–2.25 שע׳</td><td>~150 ק״מ</td></tr>
+            <tr><td>27.9</td><td>ליטוחורו</td><td>קאלה נרה</td><td>~1.5 שע׳</td><td>1.75–2.25 שע׳</td><td>~140–155 ק״מ</td></tr>
+            <tr><td>30.9</td><td>קאלה נרה</td><td>סיטוניה (נ״מ / וורבורורו)</td><td>—</td><td><strong>4–4.5+ שע׳</strong></td><td><strong>~340–360 ק״מ</strong></td></tr>
+            <tr><td>6.10</td><td>סיטוניה</td><td>שדה SKG</td><td>—</td><td>1.4–1.85 שע׳</td><td>~104–115 ק״מ</td></tr>
+          </tbody>
+        </table>
+        <p class="footnote">ביום יציאה מהשדה: צאו מסיטוניה לפחות 3–3.5 שע׳ לפני טיסה בינלאומית (נסיעה + החזרת רכב + צ׳ק־אין). בכבישי זגורי — הגעה באור יום.</p>
+      </div>
+    </section>
+<section class="panel" id="hotels" data-title="מלונות">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">מלונות</div></div>
+      <div class="card">
+        <h3>מלונות וסטטוס</h3>
+        <div class="box warn" style="margin-bottom:12px">
+          <h4>לטיפול</h4>
+          <ul class="clean">
+            <li>לבטל <strong>Archontiko Evridikis</strong> (כפילות בזגורי / בוקינג).</li>
+            <li>לקבע <strong>Nest by the Sea</strong> על <strong>27–30 בספטמבר</strong> (הקישור נפתח עם אוקטובר — לבדוק).</li>
+            <li>לבחור מלון בסיטוניה ל־30.9–6.10.</li>
+            <li>מועדי ביטול שעברו: Pirrion (עד 2.9), Litohoro Resort (עד 31.8).</li>
+          </ul>
+        </div>
+        <table class="legs">
+          <thead><tr><th>מלון</th><th>אזור</th><th>לילות</th><th>מחיר שצוין</th><th>הערות</th></tr></thead>
+          <tbody>
+            <tr><td>Kornilios Istron Hotel</td><td>גיאניטסה</td><td>1</td><td>₪450.62</td><td>נדל+הדס · ביטול עד 9.9</td></tr>
+            <tr><td>Pirrion Wellness Boutique</td><td>אנו פדינה · זגורי</td><td>3</td><td>ILS 1,760</td><td>נדל · ציון 5 · ביטול עד 2.9 (עבר)</td></tr>
+            <tr><td>Archontiko Evridikis</td><td>ויצה · זגורי</td><td>3</td><td>1,536 ILS</td><td>הדס · <strong>לבטל</strong></td></tr>
+            <tr><td>Enjoy Lichnos Bay Village</td><td>פארגה</td><td>2</td><td>₪2,602</td><td>אישור: 26786505661415 · ציון 4</td></tr>
+            <tr><td>Divani Meteora Hotel</td><td>קלמבקה</td><td>2</td><td>₪2,496</td><td>ציון 5 · ביטול עד 12.9</td></tr>
+            <tr><td>Litohoro Olympus Resort</td><td>ליטוחורו</td><td>2</td><td>₪1,578</td><td>ציון 5 · ביטול עד 31.8 (עבר)</td></tr>
+            <tr><td>Nest by the Sea</td><td>קאלה נרה</td><td>3</td><td>~$268–291 (3 לילות, בלי מיסים)</td><td>ים · מתאים ל־2+ילד · לקבע ספט׳</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+<section class="panel" id="checklist" data-title="צ׳ק־ליסט">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">צ׳ק־ליסט</div></div>
+      <div class="card">
+        <h3>צ׳ק־ליסט</h3>
+        <p class="meta">הסימונים נשמרים במכשיר שלכם (localStorage).</p>
+        <div class="checklist" id="checks"></div>
+      </div>
+    </section>
+<section class="panel" id="d17" data-title="17.9 · הגעה">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">17.9 · הגעה</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>17 בספטמבר · יום הגעה</h3>
+            <div class="meta">שדה סלוניקי (SKG) → אדסה / פוזאר → לינה בגיאניטסה</div>
+          </div>
+          <span class="tag ok">לילה 1/19</span>
+        </div>
+        <div class="drive">
+          <div class="box sea" style="flex:1"><h4>אופציה 1</h4><div class="big">SKG → אדסה</div><div>~1.5–1.75 שע׳ · ~107–114 ק״מ · בקובץ: ~2 שע׳</div></div>
+          <div class="arrow">או</div>
+          <div class="box sun" style="flex:1"><h4>אופציה 2</h4><div class="big">SKG → פוזאר</div><div>~1.75–2 שע׳ (עד 2.5 עם מרווח) · ~116–130 ק״מ</div></div>
+        </div>
+        <div class="grid2" style="margin-top:12px">
+          <div class="box">
+            <h4>לינה</h4>
+            <strong>Kornilios Istron Hotel</strong> · גיאניטסה<br>
+            צ׳ק־אין 17.9 · צ׳ק־אאוט 18.9<br>
+            <span class="tag ok">מוזמן · נדל+הדס</span>
+          </div>
+          <div class="box">
+            <h4>מה לעשות ביום</h4>
+            <ul class="prio-list">
+              <li><span class="tag must">חובה*</span><span><strong>מפלי אדסה</strong> או <strong>פוזאר</strong> — אם הגעה מאוחרת בחרו <em>אחד</em>. אדסה קלה יותר עם ילד; פוזאר חווית מים חמים.</span></li>
+              <li><span class="tag nice">נחמד</span><span><strong>פלה + מוזיאון</strong> — קרוב למלון, פסיפסים יפים. שווה אם יש כוח אחה״צ/בוקר למחרת לפני זגורי.</span></li>
+              <li><span class="tag skip">לוותר</span><span>עיירת גיאניטסה, שני האתרים (אדסה+פוזאר) באותו יום אם נוחתים אחה״צ.</span></li>
+            </ul>
+            <p class="footnote">*חובה = אל תדלגו על “חוויית טבע” ביום הראשון — לא חייבים את שניהם.</p>
+          </div>
+        </div>
+        <p class="footnote">אם נוחתים מאוחר — לוותר על פוזאר ולהסתפק באדסה או לנסוע ישר למלון.</p>
+      </div>
+    
+      <!-- food-trails:d17 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li><strong>Πολυχώρος Καταρράκτες</strong> (פארק המפלים, אדסה) — קפה/מסעדה עם נוף למפלים; פיצה/סלטים לילדים + גלידה.</li><li><strong>Το Πιθάρι</strong> (מול פארק המפלים) — טברנה קלאסית, גריל ומזטים.</li><li><strong>Το Πέτρινο / Καρατζοβίτσα / Ο Καλοφαγάς</strong> (לוטראקי–פוזאר) — בשרים על השיפוד אחרי המרחצאות.</li><li><strong>Φάρμα Μαϊλιάνη</strong> (ליד גיאניטסה) — חווה עם מגרש משחקים; מצוין לילדים אם יש זמן.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>מפלי אדסה (פארק)</strong><div class="footnote" style="margin:0">שבילים עלולים להיות רטובים — נעלי ספורט, לא כפכפים.</div></td><td style="white-space:nowrap">1–2 שע׳</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>מרחצאות פוזאר</strong><div class="footnote" style="margin:0">בגדי ים; עדיין נעים בסוף ספט׳.</div></td><td style="white-space:nowrap">1–3 שע׳</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>פלה אתר + מוזיאון</strong><div class="footnote" style="margin:0">התחילו במוזיאון, אחר כך האתר; כובע ומים.</div></td><td style="white-space:nowrap">2–3 שע׳</td><td><span class="tag kid-good">טוב</span></td></tr></tbody></table></div>
+    
+    </section>
+<section class="panel" id="d18" data-title="18–21.9 · זגורי">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">18–21.9 · זגורי</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>18–21 בספטמבר · זגורי</h3>
+            <div class="meta">3 לילות · אנו פדינה · כפרי אבן, גשרים, תצפיות</div>
+          </div>
+          <span class="tag ok">לילות 2–4</span>
+        </div>
+        <div class="box sea" style="margin:10px 0 12px">
+          <h4>נסיעת מעבר · 18.9</h4>
+          <div class="big">מפלי אדסה / פוזאר → Pirrion (אנו פדינה)</div>
+          <div>בקובץ: ~3.5 שע׳ · מעודכן: אדסה 3.5–4.5 שע׳ / פוזאר 3.75–4.75 · ~255–290 ק״מ · כבישי הר בסוף</div>
+        </div>
+        <div class="grid2">
+          <div class="box">
+            <h4>לינה</h4>
+            <strong>Pirrion Wellness Boutique Hotel</strong><br>
+            אנו פדינה · ציון שלכם: 5<br>
+            <span class="tag ok">מוזמן (נדל)</span>
+            <div class="footnote" style="margin-top:8px">לבטל: Archontiko Evridikis בוויצה (כפילות).</div>
+          </div>
+          <div class="box green">
+            <h4>אוכל מקומי</h4>
+            פשטידות אפירוס, גבינות הרים, בשרים איטיים, יין מקומי. כדאי להזמין מקומות בערב בעונה.
+          </div>
+        </div>
+        <div class="card" style="box-shadow:none;margin:14px 0 0;padding:0;border:0">
+          <h4 style="margin:0 0 8px">אטרקציות — עדיפויות</h4>
+          <ul class="prio-list">
+            <li><span class="tag must">חובה</span><span><strong>תצפית ויקוס</strong> — אוקסיה / בלוי / מונודנדרי (אגיה פרסקבי) — זה “הכרטיס” של זגורי.</span></li>
+            <li><span class="tag must">חובה</span><span><strong>גשרי אבן</strong> (קוקורו / פלקידה ליד קיפוי) + הליכה קצרה ליד <strong>ווידומטיס</strong>.</span></li>
+            <li><span class="tag nice">נחמד</span><span>כיכרות: דילופו / ויצה / אנו פדינה + גלידה.</span></li>
+            <li><span class="tag nice">נחמד</span><span><strong>פאפיגו</strong> + בריכות טבע (אם חם/יש כוח).</span></li>
+            <li><span class="tag skip">לוותר</span><span>ירידה מלאה לוויקוס, דרקולימני, ראפטינג אם אין אנרגיה, “לאסוף” כל הכפרים.</span></li>
+          </ul>
+          <div class="box sun" style="margin-top:12px">
+            <h4>עם ילד</h4>
+            יום אחד לתצפית+גשרים, יום כפרים רגוע, יום פאפיגו או מנוחה במלון. ערבים קרירים — שכבות.
+          </div>
+        </div>
+      </div>
+    
+      <!-- food-trails:d18 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li><strong>Η Πίτα της Κικίτσας</strong> (מונודנדרי, מאז 1958) — פשטידות אפירוס אייקוניות; פשוט ומשפחתי.</li><li><strong>Μαργαρίτες / Μαχαλάς</strong> (קיפוי) — טברנות כפר אבן; פשטידות זגורי; במחאלאס יש אזור לילדים לפי דיווחים.</li><li><strong>Καλλιόπη / Κονάκι</strong> (מגאלו פאפיגו) — מטבח הרים, צ׳ופס, פשטידות; אווירה משפחתית.</li><li>מה להזמין: <em>אלברופיטה / בטסאריה</em>, פשטידת ירקות, צלי, סלט כפרי.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>תצפית אוקסיה</strong><div class="footnote" style="margin:0">שביל קצר; בטוח יותר מבלוי (מעקות).</div></td><td style="white-space:nowrap">10–20 דק׳ מהחניה</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>תצפית בלוי (מוורדטו)</strong><div class="footnote" style="margin:0">בלי מעקות — להחזיק יד ליד הקצה.</div></td><td style="white-space:nowrap">1–1.5 שע׳ הלוך־חזור</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>אגיה פרסקבי (מונודנדרי)</strong><div class="footnote" style="margin:0">בעיקר סלול; להישאר בשביל ליד המצוק.</div></td><td style="white-space:nowrap">~45 דק׳ הלוך־חזור</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>גשרי קיפוי (קוקוריס+פלקידאס)</strong><div class="footnote" style="margin:0">עצירות קצרות ליד הכביש.</div></td><td style="white-space:nowrap">20–40 דק׳ משולב</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>ווידומטיס — קטע קצר</strong><div class="footnote" style="margin:0">מים קרים; נעליים טובות; לא ירידה מלאה לוויקוס.</div></td><td style="white-space:nowrap">1–2 שע׳</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>בריכות פאפיגו</strong><div class="footnote" style="margin:0">סלעים חלקלקים; מים רדודים לילדים.</div></td><td style="white-space:nowrap">45–70 דק׳</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>ירידה מלאה לוויקוס</strong><div class="footnote" style="margin:0">לוותר עם ילד בן 8.</div></td><td style="white-space:nowrap">5–8 שע׳+</td><td><span class="tag kid-hard">קשה</span></td></tr></tbody></table></div>
+    
+    </section>
+<section class="panel" id="d21" data-title="21–23.9 · פארגה">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">21–23.9 · פארגה</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>21–23 בספטמבר · פארגה</h3>
+            <div class="meta">2 לילות · ים ראשון במסלול · Lichnos Bay</div>
+          </div>
+          <span class="tag ok">לילות 5–6</span>
+        </div>
+        <div class="box sea" style="margin:10px 0 12px">
+          <h4>נסיעת מעבר · 21.9</h4>
+          <div class="big">זגורי → Enjoy Lichnos Bay Village (ליכנוס, ~3–4 ק״מ מפארגה)</div>
+          <div>בקובץ: ~2 שע׳ · מעודכן: 2.5–3.5 שע׳ · ~135–160 ק״מ</div>
+        </div>
+        <div class="grid2">
+          <div class="box">
+            <h4>לינה</h4>
+            <strong>Enjoy Lichnos Bay Village</strong><br>
+            ציון שלכם: 4 · אישור הזמנה קיים<br>
+            <span class="tag ok">מוזמן</span>
+          </div>
+          <div class="box">
+            <h4>אטרקציות</h4>
+            <ul class="prio-list">
+              <li><span class="tag must">חובה</span><span><strong>שחייה בליכנוס</strong> + מנוחה אחרי זגורי.</span></li>
+              <li><span class="tag must">חובה</span><span><strong>עיירת פארגה</strong> — סמטאות, מבצר/תצפית, גלידה.</span></li>
+              <li><span class="tag nice">נחמד</span><span><strong>שייט קצר</strong> למפרצונים/מערות (אם פועל).</span></li>
+              <li><span class="tag nice">נחמד</span><span><strong>נהר האחרון (Acheron)</strong> — חצי יום; שווה אם אוהבים מים שקטים. אפשר לוותר אם רוצים רק ים.</span></li>
+              <li><span class="tag skip">לוותר</span><span>נסיעות ארוכות נוספות מערבה; יום עמוס לפני מטאורה.</span></li>
+            </ul>
+          </div>
+        </div>
+        <p class="footnote">אחרי זגורי זה יום “איפוס ים”. אל תדחסו יותר מדי — מחר נסיעה למטאורה.</p>
+      </div>
+    
+      <!-- food-trails:d21 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li><strong>Περιβόλι (Perivoli)</strong> (פארגה, חורשת זיתים) — קלפטיקו/דגים; מגרש משחקים + כיסאות גבוהים.</li><li><strong>Ζορμπάς</strong> (נמל פארגה) — דגים/יווני מול הים; להזמין בעונה.</li><li><strong>Coral / Enjoy Lichnos Bay</strong> (ליכנוס) — נוח אחרי החוף; תפריט ילדים. <em>לוודא פתיחה בתחילת אוק׳</em>.</li><li>ליד אחרון (אם הולכים): טברנות ב־Glyki על הנהר — לבדוק פתיחה.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>מבצר ונציאני בפארגה</strong><div class="footnote" style="margin:0">מדרגות אבן תלולות; מוקדם/מאוחר ביום.</div></td><td style="white-space:nowrap">1–1.5 שע׳</td><td><span class="tag kid-ok">אפשרי</span></td></tr><tr><td><strong>טיילת / חוף בעיר</strong><div class="footnote" style="margin:0">גלידה בנמל — אם עייפים מהמבצר.</div></td><td style="white-space:nowrap">1–2 שע׳</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>חוף ליכנוס</strong><div class="footnote" style="margin:0">עדיף רכב/סירה על הליכת חורשת הזיתים.</div></td><td style="white-space:nowrap">חצי יום–יום</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>מעיינות אחרון (Glyki) קצר</strong><div class="footnote" style="margin:0">נעלי מים אם נכנסים; לא טרק מלא.</div></td><td style="white-space:nowrap">40–90 דק׳</td><td><span class="tag kid-good">טוב</span></td></tr></tbody></table></div>
+    
+    </section>
+<section class="panel" id="d23" data-title="23–25.9 · מטאורה">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">23–25.9 · מטאורה</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>23–25 בספטמבר · מטאורה</h3>
+            <div class="meta">2 לילות · קלמבקה / קסטרקי · מנזרים ותצפיות</div>
+          </div>
+          <span class="tag ok">לילות 7–8</span>
+        </div>
+        <div class="box sea" style="margin:10px 0 12px">
+          <h4>נסיעת מעבר · 23.9</h4>
+          <div class="big">פארגה → Divani Meteora Hotel (קלמבקה)</div>
+          <div>בקובץ: ~3 שע׳ · מעודכן: 2.25–2.75 שע׳ · ~188–193 ק״מ · אגרה אפשרית</div>
+        </div>
+        <div class="grid2">
+          <div class="box">
+            <h4>לינה</h4>
+            <strong>Divani Meteora Hotel</strong><br>
+            קלמבקה · ציון שלכם: 5<br>
+            ביטול עד 12.9<br>
+            <span class="tag ok">מוזמן</span>
+          </div>
+          <div class="box warn">
+            <h4>חשוב במנזרים</h4>
+            כיסוי כתפיים וברכיים. חלק מהמנזרים סגורים ביום משתנה — לבדוק בבוקר. מדרגות רבות עם ילד.
+          </div>
+        </div>
+        <div style="margin-top:12px">
+          <h4 style="margin:0 0 8px">אטרקציות — עדיפויות</h4>
+          <ul class="prio-list">
+            <li><span class="tag must">חובה</span><span><strong>2 מנזרים</strong> (לא יותר מ־3) — למשל Great Meteoron + Varlaam, או St. Stephen אם רוצים פחות מדרגות עם ילד. בדקו בבוקר מה פתוח (יש סגירות מתחלפות).</span></li>
+            <li><span class="tag must">חובה</span><span><strong>תצפית שקיעה</strong> מכביש התצפיות / קסטרקי — שווה בנפרד מהמנזרים.</span></li>
+            <li><span class="tag nice">נחמד</span><span><strong>מוזיאון ההיסטוריה הטבעית / הפטריות</strong> — מעולה לילד אם גשום או עייפים ממדרגות.</span></li>
+            <li><span class="tag nice">נחמד</span><span>מנזר דרמטי נוסף (למשל Holy Trinity) רק אם יש אנרגיה; ערב רגוע בקלמבקה.</span></li>
+            <li><span class="tag nice">נחמד</span><span>מערת תאופטרה — רק אם אוהבים מוזיאונים/פרהיסטוריה.</span></li>
+            <li><span class="tag skip">לוותר</span><span>כל 6 המנזרים; מעגלי הליכה ארוכים בין הסלעים; סיורי לילה אם כבר קמים מוקדם למנזרים.</span></li>
+          </ul>
+          <div class="box sun" style="margin-top:12px">
+            <h4>תכנון יומיים</h4>
+            יום א׳: 2 מנזרים + שקיעה. יום ב׳: מוזיאון/מנזר קל או מנוחה — ואז נסיעה לליטוחורו.
+          </div>
+        </div>
+      </div>
+    
+      <!-- food-trails:d23 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li><strong>Taverna Xarama</strong> (קסטרקי) — גריל משפחתי מאז 1982; פאידאקיה/סוברלאקי.</li><li><strong>Gardenia / Stefanos</strong> (כיכר קסטרקי) — טברנה כפרית קלאסית; מצוין למשפחות.</li><li><strong>Βάλια Κάλντα (Valia Calda)</strong> (קלמבקה) — מטבח ולאכי, פטריות/פורל; ליד אזור המוזיאון.</li><li><strong>Μετεώρων Πανόραμα</strong> — נוף לסלעים; להזמין שולחן לשקיעה אם אפשר.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>מנזר Agios Stefanos</strong><div class="footnote" style="margin:0">גשר, כמעט בלי מדרגות — הכי טוב להתחלה עם ילד. לבדוק יום סגירה.</div></td><td style="white-space:nowrap">30–60 דק׳</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>Roussanou</strong><div class="footnote" style="margin:0">~130 מדרגות; מעקות וצל.</div></td><td style="white-space:nowrap">~1 שע׳</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>Varlaam</strong><div class="footnote" style="margin:0">~195 מדרגות לא אחידות; מוקדם + מים.</div></td><td style="white-space:nowrap">1–1.5 שע׳</td><td><span class="tag kid-ok">אפשרי</span></td></tr><tr><td><strong>Great Meteoron</strong><div class="footnote" style="margin:0">~300 מדרגות — רק אם הילד חזק/רוצה; אחרת לדלג.</div></td><td style="white-space:nowrap">1.5–2 שע׳</td><td><span class="tag kid-hard">קשה</span></td></tr><tr><td><strong>תצפית שקיעה Psaropetra</strong><div class="footnote" style="margin:0">להגיע 30–45 דק׳ לפני שקיעה; יד ליד הקצה.</div></td><td style="white-space:nowrap">20–40 דק׳</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>מוזיאון פטריות / היסטוריה טבעית</strong><div class="footnote" style="margin:0">הפסקה מקורה; טעימות/חנות.</div></td><td style="white-space:nowrap">1–1.5 שע׳</td><td><span class="tag kid-great">מעולה</span></td></tr></tbody></table></div>
+    
+    </section>
+<section class="panel" id="d25" data-title="25–27.9 · אולימפוס">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">25–27.9 · אולימפוס</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>25–27 בספטמבר · אולימפוס / ליטוחורו</h3>
+            <div class="meta">2 לילות · טבע למרגלות האולימפוס</div>
+          </div>
+          <span class="tag ok">לילות 9–10</span>
+        </div>
+        <div class="box sea" style="margin:10px 0 12px">
+          <h4>נסיעת מעבר · 25.9</h4>
+          <div class="big">מטאורה → Litohoro Olympus Resort (פלאקה ליטוחורו)</div>
+          <div>בקובץ: ~2 שע׳ · מעודכן: 2–2.25 שע׳ · ~150 ק״מ</div>
+        </div>
+        <div class="grid2">
+          <div class="box">
+            <h4>לינה</h4>
+            <strong>Litohoro Olympus Resort Villas &amp; Spa</strong><br>
+            ליטוחורו / לימין ליטוחורו · ציון 5<br>
+            <span class="tag ok">מוזמן</span>
+          </div>
+          <div class="box">
+            <h4>אטרקציות</h4>
+            <ul class="prio-list">
+              <li><span class="tag must">חובה</span><span><strong>מפלי אורליאס</strong> <em>או</em> <strong>גיא אניפיאס</strong> — לא את שניהם באותו יום. אורליאס נוח למשפחה; אניפיאס קלאסי ליטוחורו.</span></li>
+              <li><span class="tag nice">נחמד</span><span><strong>דיון</strong> — אתר + מוזיאון; משתלב עם אורליאס.</span></li>
+              <li><span class="tag nice">נחמד</span><span>חוף/טיילת בפלאקה ליטוחורו.</span></li>
+              <li><span class="tag nice">נחמד</span><span><strong>טירת פלאטמון</strong> — עצירה קצרה ויפה בדרך לפליון (27.9).</span></li>
+              <li><span class="tag skip">לוותר</span><span>פסגת אולימפוס; שני מסלולי מים באותו יום.</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    
+      <!-- food-trails:d25 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li><strong>Όλυμπος Γήτεμα (Olympus Gitema)</strong> (ליטוחורו) — יווני מודרני, סלטים/סוברלאקי; מדורג גבוה.</li><li><strong>Νερόμυλος (Neromylos)</strong> — טחנת מים ליד אניפיאס; בשרים ופשטידות אחרי הליכה.</li><li><strong>Πάνθεον Μεζέ</strong> (כיכר ליטוחורו) — מזטים; לבדוק שעות צהריים.</li><li>פלאטמון/פלאקה: טברנות דגים על הטיילת אחרי הטירה/החוף.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>אורליאס — מפלים תחתונים</strong><div class="footnote" style="margin:0">מהקפלה Ag. Konstantinos; להשגיח במקטע תלול למפל השני.</div></td><td style="white-space:nowrap">30–60 דק׳</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>אורליאס → Red Rock הלוך־חזור</strong><div class="footnote" style="margin:0">עלייה רציפה; סלעים רטובים; גיל 8 OK אם רגיל להליכות.</div></td><td style="white-space:nowrap">~2.5 שע׳ בקצב קל</td><td><span class="tag kid-ok">אפשרי</span></td></tr><tr><td><strong>אניפיאס — קטע ראשון/גשרים</strong><div class="footnote" style="margin:0">לחזור לפני המסלול המלא ל־Prionia (~6 שע׳).</div></td><td style="white-space:nowrap">1–2 שע׳</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>דיון אתר + מוזיאון</strong><div class="footnote" style="margin:0">שטח לא אחיד; צל ונחלים — אל תעמיסו.</div></td><td style="white-space:nowrap">2–3 שע׳</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>טירת פלאטמון</strong><div class="footnote" style="margin:0">גישה תלולה מהעיירה; חניה ליד השער.</div></td><td style="white-space:nowrap">1–2 שע׳</td><td><span class="tag kid-good">טוב</span></td></tr></tbody></table></div>
+    
+    </section>
+<section class="panel" id="d27" data-title="27–30.9 · פליון">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">27–30.9 · פליון</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>27–30 בספטמבר · פליון</h3>
+            <div class="meta">3 לילות · קאלה נרה · Nest by the Sea</div>
+          </div>
+          <span class="tag plan">לילות 11–13</span>
+        </div>
+        <div class="box sea" style="margin:10px 0 12px">
+          <h4>נסיעת מעבר · 27.9</h4>
+          <div class="big">ליטוחורו → קאלה נרה</div>
+          <div>בקובץ: ~1.5 שע׳ · מעודכן: 1.75–2.25 שע׳ דרך וולוס · ~140–155 ק״מ</div>
+        </div>
+        <div class="grid2">
+          <div class="box">
+            <h4>לינה</h4>
+            <strong>Nest by the Sea (Nilie Hospitality)</strong><br>
+            קאלה נרה · ~2 דק׳ לחוף Glypha<br>
+            מתאים ל־2 מבוגרים + ילד<br>
+            <span class="tag plan">לקבע על 27–30.9 (לא אוקטובר)</span>
+          </div>
+          <div class="box">
+            <h4>אטרקציות</h4>
+            <ul class="prio-list">
+              <li><span class="tag must">חובה</span><span><strong>ימי חוף</strong> בקאלה נרה / אפיסוס.</span></li>
+              <li><span class="tag must">חובה</span><span><strong>יום כפרים+ים</strong>: צאגאראדה + <strong>דאמוכארי</strong> / פקיסטרה / מילופוטמוס — מפרץ אחד מספיק.</span></li>
+              <li><span class="tag must">חובה*</span><span><strong>רכבת פליון (Moutzouris)</strong> ממילייס — אם פועלת (לרוב סופ״ש); לשריין. *אם אין רכבת בתאריכים → הופך לנחמד/לוותר.</span></li>
+              <li><span class="tag nice">נחמד</span><span>חצי יום בוולוס רק לקניות/נמל.</span></li>
+              <li><span class="tag skip">לוותר</span><span>לרדוף כל חופי מערב+מזרח; כבר ממשיכים לסיטוניה.</span></li>
+            </ul>
+          </div>
+        </div>
+        <p class="footnote">זה בסיס הים שלכם לפני המעבר לסיטוניה. אם מתאהבים — אפשר לקצר את סיטוניה, אבל להמלצה: להמשיך לאצבע האמצעית ב־30.9.</p>
+      </div>
+    
+      <!-- food-trails:d27 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li><strong>Παγασητικός (Pagasitikos)</strong> (קאלה נרה, מאז 1934) — קלאסיקה על החוף; פתוח כמעט כל השנה.</li><li><strong>1900</strong> (קאלה נרה) — מוסקה/סוצ׳וקאקיה; להגיע ~13:00 או 20:00.</li><li><strong>Ροδιά (Rodia)</strong> — גינה שקטה יותר בקצה הכפר.</li><li><strong>Παλιά Νταμούχαρη</strong> (דאמוכארי, מאז 1982) — דגים במפרץ; <em>לוודא פתיחה באוק׳</em>.</li><li><strong>Σαλκίμι (Salkimi)</strong> (מילייס) — אחרי הרכבת; להזמין בסופ״ש.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>חוף קאלה נרה</strong><div class="footnote" style="margin:0">מים רדודים יחסית במפרץ פגסיטיקוס.</div></td><td style="white-space:nowrap">גמיש</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>צאגאראדה → דאמוכארי (קלדרימי)</strong><div class="footnote" style="margin:0">עדיף לרדת ברגל ולעלות במונית/אוטובוס; אבנים חלקלקות.</div></td><td style="white-space:nowrap">1.25–1.75 שע׳ בירידה</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>דאמוכארי / פקיסטרה</strong><div class="footnote" style="margin:0">מפרץ Mamma Mia; פקיסטרה מבודדת יותר.</div></td><td style="white-space:nowrap">זמן חוף + שביל קצר</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>צאגאראדה — עץ הדולב</strong><div class="footnote" style="margin:0">כפר וצל — לא טרק.</div></td><td style="white-space:nowrap">30–60 דק׳</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>רכבת Moutzouris (מילייס)</strong><div class="footnote" style="margin:0">לרוב סופ״ש בעונת מעבר — לשריין.</div></td><td style="white-space:nowrap">~1.5 שע׳ לכל כיוון</td><td><span class="tag kid-great">מעולה</span></td></tr></tbody></table></div>
+    
+    </section>
+<section class="panel" id="d30" data-title="30.9–6.10 · סיטוניה">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">30.9–6.10 · סיטוניה</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>30 בספטמבר – 6 באוקטובר · סיטוניה</h3>
+            <div class="meta">~6 לילות · האצבע האמצעית של חאלקידיקי · עדיין בלי מלון</div>
+          </div>
+          <span class="tag open">לילות 14–19 · פתוח</span>
+        </div>
+        <div class="box sea" style="margin:10px 0 12px">
+          <h4>נסיעת מעבר · 30.9</h4>
+          <div class="big">קאלה נרה → סיטוניה</div>
+          <div><strong>~4–4.5 שע׳ · ~340–360 ק״מ</strong> · יום נסיעה מלא (כביש מהיר + אגרות)</div>
+        </div>
+        <div class="grid2">
+          <div class="box warn">
+            <h4>לינה</h4>
+            טרם נבחר. מומלץ בסיס אחד לכל התקופה.<br>
+            אזורים טובים למשפחה:
+            <ul class="clean">
+              <li>וורבורורו / אורמוס פנאגיאס</li>
+              <li>ניקיטי / ניאוס מרמארס</li>
+              <li>טורוני / קלמיטסי (שקט יותר)</li>
+            </ul>
+            <span class="tag open">לוודא פתיחה עד תחילת אוקטובר</span>
+          </div>
+          <div class="box">
+            <h4>אטרקציות / ימים</h4>
+            <ul class="prio-list">
+              <li><span class="tag must">חובה</span><span><strong>יום סירה בדיאפורוס / וורבורורו</strong> — מפרצים כחולים; סירה קטנה או עם רב־חובל. זה היילייט של סיטוניה.</span></li>
+              <li><span class="tag must">חובה</span><span><strong>2–3 סוגי חוף</strong>: למשל קארידי (רדוד), קלמיטסי/טורוני (חול), קאבורוטריפס (דרמטי).</span></li>
+              <li><span class="tag nice">נחמד</span><span>כפר <strong>פרתנונאס</strong> — שקיעה ומסעדה; ערב בניקיטי / נאוס מרמארס.</span></li>
+              <li><span class="tag nice">נחמד</span><span><strong>פורטו קופו</strong> — נמל+שחייה; תצפית אתוס מאורמוס פנאגיאס.</span></li>
+              <li><span class="tag skip">לוותר</span><span>קסנדרה; שייט אתוס ארוך; לאסוף כל מפרץ ביום אחד — שמרו יום מנוחה.</span></li>
+            </ul>
+          </div>
+        </div>
+        <div class="box green" style="margin-top:12px">
+          <h4>למה סיטוניה אחרי פליון</h4>
+          יותר “חופשת ים”, מים צלולים ומפרצים מגוונים. פליון נתן טעימה — כאן עיקר הים עד היציאה.
+        </div>
+      </div>
+    
+      <!-- food-trails:d30 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li><strong>Αρσανάς / Αντιγόνη</strong> (חוף ניקיטי) — דגים מול הגלים; להזמין.</li><li><strong>Paul’s Tavern</strong> (פרתנונאס, מאז 1978) — בשרים/פשטידות + נוף; מצוין לשקיעה. <em>לוודא פתיחה עד תחילת אוק׳</em>.</li><li><strong>Ζορμπάς</strong> (קלמיטסי) — דג היום, מנות גדולות; עונתי.</li><li><strong>Απόστολος</strong> (טורוני) — פסטת שרימפס/מולים; שקיעה על החוף הארוך.</li><li><strong>Ο Πεύκος / Τζίτζικας</strong> (פורטו קופו) — טברנות דגים קלאסיות בנמל.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>יום סירה דיאפורוס</strong><div class="footnote" style="margin:0">אפודים; בוקר רגוע יותר; סירה קטנה או עם רב־חובל.</div></td><td style="white-space:nowrap">2–5 שע׳</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>חוף קארידי</strong><div class="footnote" style="margin:0">רדוד מאוד; להגיע מוקדם (עמוס).</div></td><td style="white-space:nowrap">חצי יום</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>קלמיטסי / טורוני</strong><div class="footnote" style="margin:0">חול וכניסה עדינה.</div></td><td style="white-space:nowrap">חצי–יום</td><td><span class="tag kid-great">מעולה</span></td></tr><tr><td><strong>פרתנונאס</strong><div class="footnote" style="margin:0">סמטאות אבן + תצפית; שלבו עם Paul’s.</div></td><td style="white-space:nowrap">45–90 דק׳</td><td><span class="tag kid-good">טוב</span></td></tr><tr><td><strong>פורטו קופו</strong><div class="footnote" style="margin:0">טיול נמל + ארוחת דגים — לא טרק.</div></td><td style="white-space:nowrap">1–2 שע׳</td><td><span class="tag kid-great">מעולה</span></td></tr></tbody></table></div>
+    
+    </section>
+<section class="panel" id="d06" data-title="6.10 · יציאה">
+<div class="sheet-bar"><a class="close-btn" href="#home" aria-label="סגור">×</a><div class="sheet-title">6.10 · יציאה</div></div>
+      <div class="card">
+        <div class="day-title-row">
+          <div>
+            <h3>6 באוקטובר · יציאה</h3>
+            <div class="meta">סיטוניה → נמל התעופה סלוניקי (SKG)</div>
+          </div>
+          <span class="tag plan">יום טיסה</span>
+        </div>
+        <div class="box sea" style="margin:10px 0 12px">
+          <h4>נסיעה</h4>
+          <div class="big">סיטוניה → SKG</div>
+          <div>~1.4–1.85 שע׳ · ~104–115 ק״מ · לצאת ≥3–3.5 שע׳ לפני טיסה בינל׳</div>
+        </div>
+        <ul class="prio-list">
+          <li><span class="tag must">חובה</span><span>מרווח: צאו ≥3–3.5 שע׳ לפני טיסה בינל׳ (נסיעה + רכב + צ׳ק־אין).</span></li>
+          <li><span class="tag nice">נחמד</span><span>לילה אחרון בסלוניקי רק אם הטיסה מוקדמת מאוד.</span></li>
+          <li><span class="tag skip">לוותר</span><span>אטרקציות ביום הטיסה.</span></li>
+        </ul>
+      </div>
+    
+      <!-- food-trails:d06 -->
+      <div class="box food-box sun"><h4>אוכל · טברנות ומסעדות</h4><ul class="clean"><li>יום טיסה: ארוחה קלה במלון או כריכים לדרך.</li><li>רק אם יש מרווח גדול בסלוניקי — בוגאצה/קפה בעיר; אחרת ישר לשדה.</li></ul><p class="footnote">להזמין בערב בעונת חגים/סוכות. בחופים — לוודא פתיחה בתחילת אוקטובר.</p></div><div class="box trails-box green"><h4>מסלולים · זמן + התאמה לגיל 8</h4><table class="trails-table"><thead><tr><th>מסלול / אטרקציה</th><th>זמן</th><th>ילדים</th></tr></thead><tbody><tr><td><strong>אין מסלולים</strong><div class="footnote" style="margin:0">לוגיסטיקה בלבד.</div></td><td style="white-space:nowrap">—</td><td><span class="tag kid-great">מעולה</span></td></tr></tbody></table></div>
+    
+    </section>
+</main>
+</div>
+<script>
+
+(function () {
+  try {
+    var desktop = window.matchMedia('(min-width: 901px)');
+    function openDesktop(id) {
+      document.querySelectorAll('.panel').forEach(function (p) {
+        p.classList.toggle('is-open', p.id === id);
+      });
+    }
+    function sync() {
+      if (!desktop.matches) return;
+      var id = (location.hash || '#overview').replace('#', '');
+      if (id === 'home' || !document.getElementById(id)) id = 'overview';
+      openDesktop(id);
+    }
+    document.querySelectorAll('.nav-link').forEach(function (a) {
+      a.addEventListener('click', function () {
+        if (!desktop.matches) return;
+        var id = a.getAttribute('href').replace('#', '');
+        openDesktop(id);
+      });
+    });
+    window.addEventListener('hashchange', sync);
+    if (desktop.addEventListener) desktop.addEventListener('change', sync);
+    else if (desktop.addListener) desktop.addListener(sync);
+    sync();
+
+    var q = document.getElementById('q');
+    if (q) {
+      q.addEventListener('input', function (e) {
+        var term = e.target.value.trim().toLowerCase();
+        if (!term) return;
+        var panels = document.querySelectorAll('.panel');
+        for (var i = 0; i < panels.length; i++) {
+          var p = panels[i];
+          var hay = ((p.getAttribute('data-search') || '') + ' ' + p.textContent).toLowerCase();
+          if (hay.indexOf(term) !== -1) {
+            location.hash = p.id;
+            if (desktop.matches) openDesktop(p.id);
+            break;
+          }
+        }
+      });
+    }
+
+    var items = [
+      'לבטל Archontiko Evridikis (כפילות זגורי)',
+      'לקבע Nest by the Sea ל־27–30 בספטמבר',
+      'לבחור ולהזמין מלון בסיטוניה ל־30.9–6.10',
+      'לוודא טיסות TLV↔SKG ל־17.9 ו־6.10',
+      'רכב שכור מסלוניקי (אוטומט אם צריך) + כיסוי מלא',
+      'ביטוח נסיעות + כרטיסי אשראי לחו״ל',
+      'בגדי ים + מעיל קל לערבי הרים',
+      'נעלי הליכה נוחות (מטאורה / זגורי / אולימפוס)',
+      'ביגוד צנוע למנזרים (כתפיים וברכיים)',
+      'מתאם חשמל / כבלים / תרופות לילד'
+    ];
+    var box = document.getElementById('checks');
+    if (box && !box.children.length) {
+      var saved = {};
+      try { saved = JSON.parse(localStorage.getItem('greece2026-checks') || '{}'); } catch (e) {}
+      items.forEach(function (text, i) {
+        var id = 'c' + i;
+        var label = document.createElement('label');
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!saved[id];
+        cb.addEventListener('change', function () {
+          saved[id] = cb.checked;
+          try { localStorage.setItem('greece2026-checks', JSON.stringify(saved)); } catch (e) {}
+        });
+        var span = document.createElement('span');
+        span.textContent = text;
+        label.appendChild(cb);
+        label.appendChild(span);
+        box.appendChild(label);
+      });
+    }
+  } catch (err) {}
+})();
+
+</script>
+</body>
+</html>
